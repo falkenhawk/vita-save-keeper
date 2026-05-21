@@ -13,9 +13,10 @@ This repository currently contains the first buildable foundation:
 - local timestamped ZIP backup creation
 - local backup listing for the selected save
 - local backup restore with a second-press confirmation
+- Google OAuth device-code request and token polling controls
 - a native `vita2d` UI preview that builds into a VPK
 
-Google OAuth, Drive upload, and Drive download are not implemented yet.
+Drive upload and Drive download are not implemented yet.
 
 ## Target behavior
 
@@ -63,6 +64,14 @@ The current foundation scans these roots at startup:
 - `ux0:pspemu/PSP/SAVEDATA`
 
 Local backups are written under `ux0:data/save-keeper/backups`.
+
+## Google auth
+
+Development builds expect OAuth client credentials at
+`ux0:data/save-keeper/google-client.json`. The JSON must contain `client_id` and `client_secret`
+fields from a Google OAuth client of type TVs and Limited Input devices. Press `Triangle` once to
+request a device code, finish consent on a phone or PC, then press `Triangle` again to poll and save
+the token cache to `ux0:data/save-keeper/google-token.json`.
 
 ## Comment style
 

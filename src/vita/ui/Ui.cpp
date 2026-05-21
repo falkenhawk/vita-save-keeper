@@ -84,27 +84,32 @@ void Ui::shutdown() {
 
 void Ui::draw(const std::vector<SaveRecord> &saves, std::size_t selected_save,
               const std::vector<std::string> &local_backups, std::size_t selected_backup,
-              bool restore_confirmation_pending,
+              bool restore_confirmation_pending, bool google_connected, bool google_auth_pending,
+              const std::string &google_verification_url, const std::string &google_user_code,
               const std::string &status_message) {
   vita2d_start_drawing();
   vita2d_clear_screen();
 
-  draw_header();
+  draw_header(google_connected, google_auth_pending);
   draw_title_grid(saves, selected_save);
   draw_backup_panel(saves, selected_save, local_backups, selected_backup,
-                    restore_confirmation_pending, status_message);
+                    restore_confirmation_pending, google_verification_url, google_user_code,
+                    status_message);
   draw_footer();
 
   vita2d_end_drawing();
   vita2d_swap_buffers();
 }
 
-void Ui::draw_header() const {
+void Ui::draw_header(bool google_connected, bool google_auth_pending) const {
   vita2d_draw_rectangle(0, 0, 960, 52, kColorHeader);
   vita2d_draw_line(0, 52, 960, 52, RGBA8(255, 255, 255, 28));
 
   draw_text(font_, 18, 34, kColorText, kTextScaleTitle, "Save Keeper");
-  draw_text(font_, 700, 32, kColorMuted, kTextScaleSmall, "Google Drive not connected");
+  const char *drive_status = google_connected       ? "Google Drive connected"
+                             : google_auth_pending ? "Google auth pending"
+                                                   : "Google Drive not connected";
+  draw_text(font_, 700, 32, kColorMuted, kTextScaleSmall, drive_status);
 }
 
 void Ui::draw_title_grid(const std::vector<SaveRecord> &saves, std::size_t selected_save) const {
@@ -164,6 +169,8 @@ void Ui::draw_title_grid(const std::vector<SaveRecord> &saves, std::size_t selec
 void Ui::draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t selected_save,
                            const std::vector<std::string> &local_backups,
                            std::size_t selected_backup, bool restore_confirmation_pending,
+                           const std::string &google_verification_url,
+                           const std::string &google_user_code,
                            const std::string &status_message) const {
   vita2d_draw_rectangle(432, 52, 528, 456, RGBA8(15, 23, 42, 255));
   draw_text(font_, 456, 84, kColorText, kTextScaleNormal, "Backups");
@@ -218,8 +225,15 @@ void Ui::draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t sel
 
   if (local_backups.empty()) {
     draw_text(font_, 470, 208, kColorMuted, kTextScaleSmall, "No local backups yet");
-  } else if (entries.size() > visible_count) {
+  } else if (entries.size() > visible_count && google_user_code.empty()) {
     draw_text(font_, 470, 414, kColorMuted, kTextScaleSmall, "More backups hidden");
+  }
+
+  if (!google_user_code.empty()) {
+    const std::string url = truncate_label(google_verification_url, 42);
+    const std::string code = "Code: " + google_user_code;
+    draw_text(font_, 456, 408, kColorText, kTextScaleSmall, url.c_str());
+    draw_text(font_, 456, 434, kColorAccent, kTextScaleSmall, code.c_str());
   }
 
   const std::string status =
@@ -233,7 +247,7 @@ void Ui::draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t sel
 void Ui::draw_footer() const {
   vita2d_draw_rectangle(0, 508, 960, 36, RGBA8(3, 7, 18, 230));
   draw_text(font_, 18, 532, kColorMuted, kTextScaleSmall,
-            "D-Pad Save    L/R Backup    O Backup    Square Restore    X Cancel    START Exit");
+            "D-Pad Save  L/R Backup  O Backup  Sq Restore  Tri Google  X Cancel  START Exit");
 }
 
 } // namespace vsm::vita
