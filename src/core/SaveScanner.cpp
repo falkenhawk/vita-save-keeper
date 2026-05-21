@@ -88,6 +88,11 @@ void apply_sfo_metadata(SaveRecord *save) {
   const std::string sfo_path = save->platform == SavePlatform::Psp ? psp_sfo : vita_sfo;
   if (!sfo_path.empty()) {
     const SfoMetadata metadata = parse_sfo_metadata_file(sfo_path);
+    const auto title_id = metadata.strings.find("TITLE_ID");
+    if (title_id != metadata.strings.end() && !title_id->second.empty()) {
+      save->title_id = title_id->second;
+    }
+
     const std::string title = title_from_sfo_metadata(metadata);
     if (!title.empty()) {
       save->display_name = title;
@@ -100,9 +105,12 @@ void apply_sfo_metadata(SaveRecord *save) {
         join_path(save->path, "icon0.png"),
     });
   } else {
+    const std::string metadata_title_id =
+        save->title_id.empty() ? save->id : save->title_id;
     save->icon_path = first_existing_file({
         join_path(join_path(save->path, "sce_sys"), "icon0.png"),
         join_path(join_path(save->path, "sce_sys"), "ICON0.PNG"),
+        join_path(join_path("ux0:appmeta", metadata_title_id), "icon0.png"),
     });
   }
 }

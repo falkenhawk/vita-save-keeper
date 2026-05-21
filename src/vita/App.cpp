@@ -33,6 +33,13 @@ constexpr const char *kGoogleTokenPath = "ux0:data/save-keeper/google-token.json
 constexpr const char *kDriveFilesEndpoint = "https://www.googleapis.com/drive/v3/files";
 constexpr const char *kDriveUploadEndpoint =
     "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id%2Cname";
+constexpr int kAnalogCenter = 128;
+constexpr int kAnalogDeadZone = 48;
+constexpr int kRepeatInitialDelayFrames = 18;
+constexpr int kRepeatIntervalFrames = 5;
+constexpr unsigned int kRepeatableButtons = SCE_CTRL_LEFT | SCE_CTRL_RIGHT | SCE_CTRL_UP |
+                                            SCE_CTRL_DOWN | SCE_CTRL_LTRIGGER |
+                                            SCE_CTRL_RTRIGGER;
 
 std::vector<SaveRoot> default_save_roots() {
   return {
@@ -60,6 +67,46 @@ BackupTimestamp current_backup_timestamp() {
 
 long long current_epoch_seconds() {
   return static_cast<long long>(std::time(nullptr));
+}
+
+unsigned int buttons_with_left_analog(const SceCtrlData &pad) {
+  unsigned int buttons = pad.buttons;
+
+  if (pad.lx < kAnalogCenter - kAnalogDeadZone) {
+    buttons |= SCE_CTRL_LEFT;
+  } else if (pad.lx > kAnalogCenter + kAnalogDeadZone) {
+    buttons |= SCE_CTRL_RIGHT;
+  }
+
+  if (pad.ly < kAnalogCenter - kAnalogDeadZone) {
+    buttons |= SCE_CTRL_UP;
+  } else if (pad.ly > kAnalogCenter + kAnalogDeadZone) {
+    buttons |= SCE_CTRL_DOWN;
+  }
+
+  return buttons;
+}
+
+unsigned int apply_hold_repeat(unsigned int buttons, unsigned int previous_buttons,
+                               unsigned int *repeat_held_buttons, int *repeat_frames) {
+  unsigned int pressed = buttons & ~previous_buttons;
+  const unsigned int held_repeatable = buttons & kRepeatableButtons;
+
+  // VitaShell-style menus repeat only navigation controls. Action buttons stay edge-triggered so
+  // holding Circle, Square, Triangle, or Select cannot create duplicate backups or auth requests.
+  if (held_repeatable == 0 || held_repeatable != *repeat_held_buttons) {
+    *repeat_held_buttons = held_repeatable;
+    *repeat_frames = 0;
+    return pressed;
+  }
+
+  ++(*repeat_frames);
+  if (*repeat_frames >= kRepeatInitialDelayFrames &&
+      ((*repeat_frames - kRepeatInitialDelayFrames) % kRepeatIntervalFrames) == 0) {
+    pressed |= held_repeatable;
+  }
+
+  return pressed;
 }
 
 bool ensure_directory(const char *path) {
@@ -251,7 +298,7 @@ bool App::load_google_credentials() {
 
   std::string json;
   if (!read_text_file(kGoogleClientPath, &json)) {
-    status_message_ = "Missing ux0:data/save-keeper/google-client.json.";
+    status_message_ = "Google setup: add ux0:data/save-keeper/google-client.json.";
     return false;
   }
 
@@ -290,7 +337,7 @@ void App::handle_google_button() {
     }
 
     google_auth_pending_ = true;
-    status_message_ = "Open " + device_code_.verification_url + " code " + device_code_.user_code;
+    status_message_ = "Scan QR, approve Google, then press Triangle again.";
     return;
   }
 
@@ -544,10 +591,14 @@ int App::run() {
 
   bool running = true;
   unsigned int previous_buttons = 0;
+  unsigned int repeat_held_buttons = 0;
+  int repeat_frames = 0;
   while (running) {
     SceCtrlData pad{};
     sceCtrlPeekBufferPositive(0, &pad, 1);
-    const unsigned int pressed = pad.buttons & ~previous_buttons;
+    const unsigned int buttons = buttons_with_left_analog(pad);
+    const unsigned int pressed =
+        apply_hold_repeat(buttons, previous_buttons, &repeat_held_buttons, &repeat_frames);
 
     if ((pressed & SCE_CTRL_LEFT) != 0) {
       move_selected_save(-1);
@@ -602,7 +653,7 @@ int App::run() {
     ui_.draw(saves_, selected_save_, remote_backup_names(), local_backups_, selected_backup_,
              restore_confirmation_pending_, google_connected_, google_auth_pending_,
              device_code_.verification_url, device_code_.user_code, status_message_);
-    previous_buttons = pad.buttons;
+    previous_buttons = buttons;
 
     // This keeps the placeholder loop from busy-spinning. Vita2d swaps on vblank when configured,
     // but the small delay also keeps CPU use reasonable if vblank wait is disabled by a future build.

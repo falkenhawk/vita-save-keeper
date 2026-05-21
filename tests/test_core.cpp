@@ -202,7 +202,8 @@ void test_save_scanner_lists_direct_child_save_directories() {
   std::filesystem::create_directories(base / "vita" / "PCSE00120" / "sce_sys");
   std::filesystem::create_directories(base / "psp" / "ULUS12345");
   write_binary_file(base / "vita" / "PCSE00120" / "sce_sys" / "param.sfo",
-                    build_sfo_with_strings({{"TITLE", "Persona 4 Golden"}}));
+                    build_sfo_with_strings({{"TITLE", "Persona 4 Golden"},
+                                            {"TITLE_ID", "PCSE00120"}}));
   std::ofstream(base / "vita" / "PCSE00120" / "sce_sys" / "icon0.png", std::ios::binary)
       << "png";
   write_binary_file(base / "psp" / "ULUS12345" / "PARAM.SFO",
@@ -223,6 +224,7 @@ void test_save_scanner_lists_direct_child_save_directories() {
   EXPECT_TRUE(saves[0].platform == vsm::SavePlatform::Vita);
   EXPECT_EQ(saves[0].id, "PCSE00120");
   EXPECT_EQ(saves[0].display_name, "Persona 4 Golden");
+  EXPECT_EQ(saves[0].title_id, "PCSE00120");
   EXPECT_EQ(saves[0].path, (base / "vita" / "PCSE00120").string());
   EXPECT_EQ(saves[0].icon_path, (base / "vita" / "PCSE00120" / "sce_sys" / "icon0.png").string());
   EXPECT_EQ(saves[1].id, "PCSE99999");
