@@ -10,6 +10,8 @@ add_library(vsm_core
   src/core/BackupList.cpp
   src/core/BackupName.cpp
   src/core/PathUtil.cpp
+  src/core/SaveScanner.cpp
+  src/core/Selection.cpp
 )
 target_include_directories(vsm_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src

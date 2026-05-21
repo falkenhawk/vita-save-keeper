@@ -1,8 +1,12 @@
 #include "core/BackupList.hpp"
 #include "core/BackupName.hpp"
 #include "core/PathUtil.hpp"
+#include "core/SaveScanner.hpp"
+#include "core/Selection.hpp"
 
 #include <cstdlib>
+#include <cstdio>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -68,6 +72,44 @@ void test_path_component_normalization_replaces_unsafe_characters() {
   EXPECT_EQ(vsm::normalize_path_component("  ux0:\\bad*name\"  "), "ux0__bad_name_");
 }
 
+void test_save_scanner_lists_direct_child_save_directories() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-scanner-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "vita" / "PCSE00120");
+  std::filesystem::create_directories(base / "vita" / "PCSE99999");
+  std::filesystem::create_directories(base / "vita" / "PCSE00120" / "sce_sys");
+  std::filesystem::create_directories(base / "psp" / "ULUS12345");
+
+  FILE *ignored_file = std::fopen((base / "vita" / "not-a-save.txt").string().c_str(), "w");
+  EXPECT_TRUE(ignored_file != nullptr);
+  std::fclose(ignored_file);
+
+  const std::vector<vsm::SaveRecord> saves = vsm::scan_save_roots({
+      {vsm::SavePlatform::Vita, (base / "vita").string()},
+      {vsm::SavePlatform::Psp, (base / "psp").string()},
+      {vsm::SavePlatform::GameCard, (base / "missing").string()},
+  });
+
+  EXPECT_EQ(saves.size(), static_cast<std::size_t>(3));
+  EXPECT_TRUE(saves[0].platform == vsm::SavePlatform::Vita);
+  EXPECT_EQ(saves[0].id, "PCSE00120");
+  EXPECT_EQ(saves[0].display_name, "PCSE00120");
+  EXPECT_EQ(saves[0].path, (base / "vita" / "PCSE00120").string());
+  EXPECT_EQ(saves[1].id, "PCSE99999");
+  EXPECT_TRUE(saves[2].platform == vsm::SavePlatform::Psp);
+  EXPECT_EQ(saves[2].id, "ULUS12345");
+
+  std::filesystem::remove_all(base);
+}
+
+void test_selection_wraps_and_handles_empty_lists() {
+  EXPECT_EQ(vsm::move_selection(0, 3, -1), static_cast<std::size_t>(2));
+  EXPECT_EQ(vsm::move_selection(2, 3, 1), static_cast<std::size_t>(0));
+  EXPECT_EQ(vsm::move_selection(1, 3, 1), static_cast<std::size_t>(2));
+  EXPECT_EQ(vsm::move_selection(12, 0, -1), static_cast<std::size_t>(0));
+}
+
 } // namespace
 
 int main() {
@@ -75,6 +117,8 @@ int main() {
   test_remote_entries_are_prefixed_and_local_entries_are_plain();
   test_backup_menu_order_matches_jksv_style();
   test_path_component_normalization_replaces_unsafe_characters();
+  test_save_scanner_lists_direct_child_save_directories();
+  test_selection_wraps_and_handles_empty_lists();
 
   std::cout << "vsm_core_tests passed\n";
   return 0;

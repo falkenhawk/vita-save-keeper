@@ -9,10 +9,11 @@ This repository currently contains the first buildable foundation:
 - host-tested core logic for JKSV-style timestamped backup names
 - local/remote backup menu entries, with only remote entries shown as `[GD] ...`
 - path component normalization for future local and Google Drive folder names
+- startup discovery for Vita saves and PSP/Adrenaline saves
 - a native `vita2d` UI preview that builds into a VPK
 
-Save scanning, ZIP archive creation, Google OAuth, Drive upload, Drive download, and restore are
-not implemented yet.
+ZIP archive creation, Google OAuth, Drive upload, Drive download, and restore are not implemented
+yet.
 
 ## Target behavior
 
@@ -51,6 +52,13 @@ The VPK is written to `build/vita/save-keeper.vpk`.
 - `src/vita`: Vita app loop and native UI
 - `tests`: lightweight host test executable
 - `sce_sys`: Vita package metadata
+
+## Save roots
+
+The current foundation scans these roots at startup:
+
+- `ux0:user/00/savedata`
+- `ux0:pspemu/PSP/SAVEDATA`
 
 ## Comment style
 
