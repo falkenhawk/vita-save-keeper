@@ -3,6 +3,7 @@
 #include "core/BackupList.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <qrcodegen.hpp>
 #include <string>
@@ -20,10 +21,19 @@ constexpr unsigned int kColorAccent = RGBA8(56, 189, 248, 255);
 constexpr unsigned int kColorAccentSoft = RGBA8(56, 189, 248, 48);
 constexpr unsigned int kColorText = RGBA8(232, 238, 246, 255);
 constexpr unsigned int kColorMuted = RGBA8(148, 163, 184, 255);
+constexpr unsigned int kColorDarkText = RGBA8(15, 23, 42, 255);
 
-constexpr float kTextScaleSmall = 0.78f;
-constexpr float kTextScaleNormal = 0.92f;
-constexpr float kTextScaleTitle = 1.15f;
+constexpr float kTextScaleSmall = 0.82f;
+constexpr float kTextScaleNormal = 0.98f;
+constexpr float kTextScaleTitle = 1.16f;
+
+enum class ButtonSymbol {
+  Circle,
+  Cross,
+  Square,
+  Triangle,
+  Select,
+};
 
 void draw_text(vita2d_pgf *font, int x, int y, unsigned int color, float scale,
                const char *text) {
@@ -63,6 +73,30 @@ const SaveRecord *selected_record(const std::vector<SaveRecord> &saves,
   return &saves[selected_save % saves.size()];
 }
 
+std::string title_id_label(const SaveRecord &save) {
+  if (!save.title_id.empty() && save.title_id != save.id) {
+    return save.title_id + " | " + save.id;
+  }
+  if (!save.title_id.empty()) {
+    return save.title_id;
+  }
+  return save.id;
+}
+
+std::string placeholder_text(const SaveRecord &save) {
+  const std::string &source = save.display_name.empty() ? save.id : save.display_name;
+  std::string result;
+  for (char value : source) {
+    if (std::isalnum(static_cast<unsigned char>(value))) {
+      result.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(value))));
+      if (result.size() == 2) {
+        break;
+      }
+    }
+  }
+  return result.empty() ? "SK" : result;
+}
+
 void draw_qr_code(const std::string &value, int x, int y, int module_size) {
   if (value.empty()) {
     return;
@@ -87,6 +121,72 @@ void draw_qr_code(const std::string &value, int x, int y, int module_size) {
   }
 }
 
+void draw_texture_fit(vita2d_texture *texture, int x, int y, int size) {
+  if (!texture) {
+    return;
+  }
+
+  const unsigned int width = vita2d_texture_get_width(texture);
+  const unsigned int height = vita2d_texture_get_height(texture);
+  if (width == 0 || height == 0) {
+    return;
+  }
+
+  const float scale =
+      static_cast<float>(size) / static_cast<float>(std::max(width, height));
+  const float draw_width = static_cast<float>(width) * scale;
+  const float draw_height = static_cast<float>(height) * scale;
+  vita2d_draw_texture_scale(texture, x + (size - draw_width) / 2.0f,
+                            y + (size - draw_height) / 2.0f, scale, scale);
+}
+
+void draw_placeholder_icon(vita2d_pgf *font, const SaveRecord &save, int x, int y, int size,
+                           bool selected) {
+  vita2d_draw_rectangle(x, y, size, size,
+                        selected ? RGBA8(219, 234, 254, 255) : RGBA8(44, 58, 78, 255));
+  vita2d_draw_line(x + 10, y + size - 18, x + size - 10, y + 18,
+                   selected ? RGBA8(56, 189, 248, 180) : RGBA8(56, 189, 248, 90));
+  const std::string text = placeholder_text(save);
+  draw_text(font, x + 20, y + (size / 2) + 12, selected ? kColorDarkText : kColorText, 1.0f,
+            text.c_str());
+}
+
+void draw_button_shape(int x, int y, ButtonSymbol symbol, unsigned int color,
+                       vita2d_pgf *font) {
+  switch (symbol) {
+  case ButtonSymbol::Circle:
+    vita2d_draw_fill_circle(x + 8, y + 8, 8, RGBA8(255, 255, 255, 18));
+    vita2d_draw_fill_circle(x + 8, y + 8, 5, RGBA8(3, 7, 18, 230));
+    break;
+  case ButtonSymbol::Cross:
+    vita2d_draw_line(x + 2, y + 2, x + 14, y + 14, color);
+    vita2d_draw_line(x + 14, y + 2, x + 2, y + 14, color);
+    break;
+  case ButtonSymbol::Square:
+    vita2d_draw_line(x + 1, y + 1, x + 15, y + 1, color);
+    vita2d_draw_line(x + 15, y + 1, x + 15, y + 15, color);
+    vita2d_draw_line(x + 15, y + 15, x + 1, y + 15, color);
+    vita2d_draw_line(x + 1, y + 15, x + 1, y + 1, color);
+    break;
+  case ButtonSymbol::Triangle:
+    vita2d_draw_line(x + 8, y, x + 16, y + 15, color);
+    vita2d_draw_line(x + 16, y + 15, x, y + 15, color);
+    vita2d_draw_line(x, y + 15, x + 8, y, color);
+    break;
+  case ButtonSymbol::Select:
+    vita2d_draw_rectangle(x, y + 2, 36, 14, RGBA8(255, 255, 255, 18));
+    draw_text(font, x + 5, y + 14, color, 0.52f, "SEL");
+    break;
+  }
+}
+
+void draw_hint(vita2d_pgf *font, int x, ButtonSymbol symbol, const char *label) {
+  const int y = 518;
+  draw_button_shape(x, y - 10, symbol, kColorMuted, font);
+  const int label_x = symbol == ButtonSymbol::Select ? x + 42 : x + 22;
+  draw_text(font, label_x, y + 4, kColorMuted, 0.68f, label);
+}
+
 } // namespace
 
 bool Ui::initialize() {
@@ -100,11 +200,33 @@ bool Ui::initialize() {
 }
 
 void Ui::shutdown() {
+  for (auto &entry : icon_cache_) {
+    if (entry.second) {
+      vita2d_free_texture(entry.second);
+    }
+  }
+  icon_cache_.clear();
+
   if (font_) {
     vita2d_free_pgf(font_);
     font_ = nullptr;
   }
   vita2d_fini();
+}
+
+vita2d_texture *Ui::load_icon_texture(const std::string &path) const {
+  if (path.empty()) {
+    return nullptr;
+  }
+
+  const auto cached = icon_cache_.find(path);
+  if (cached != icon_cache_.end()) {
+    return cached->second;
+  }
+
+  vita2d_texture *texture = vita2d_load_PNG_file(path.c_str());
+  icon_cache_[path] = texture;
+  return texture;
 }
 
 void Ui::draw(const std::vector<SaveRecord> &saves, std::size_t selected_save,
@@ -135,7 +257,7 @@ void Ui::draw_header(bool google_connected, bool google_auth_pending) const {
   const char *drive_status = google_connected       ? "Google Drive connected"
                              : google_auth_pending ? "Google auth pending"
                                                    : "Google Drive not connected";
-  draw_text(font_, 700, 32, kColorMuted, kTextScaleSmall, drive_status);
+  draw_text(font_, 676, 32, kColorMuted, kTextScaleSmall, drive_status);
 }
 
 void Ui::draw_title_grid(const std::vector<SaveRecord> &saves, std::size_t selected_save) const {
@@ -146,32 +268,51 @@ void Ui::draw_title_grid(const std::vector<SaveRecord> &saves, std::size_t selec
 
   constexpr int kColumns = 4;
   constexpr int kRows = 3;
-  constexpr int kTileSize = 82;
-  constexpr int kGap = 14;
-  constexpr int kStartX = 22;
-  constexpr int kStartY = 108;
-  constexpr int kVisibleTiles = kColumns * kRows;
+  constexpr int kTileSize = 96;
+  constexpr int kGapX = 8;
+  constexpr int kGapY = 12;
+  constexpr int kStartX = 16;
+  constexpr int kStartY = 104;
   const std::size_t selected = saves.empty() ? 0 : selected_save % saves.size();
+  const std::size_t selected_row = selected / kColumns;
+  const std::size_t total_rows = (saves.size() + kColumns - 1) / kColumns;
+  const std::size_t max_top_row =
+      total_rows <= kRows ? 0 : static_cast<std::size_t>(total_rows - kRows);
+  const std::size_t top_row =
+      selected_row < kRows ? 0 : std::min(selected_row - kRows + 1, max_top_row);
+  const std::size_t first_index = top_row * kColumns;
+
+  if (!saves.empty()) {
+    const std::string count =
+        std::to_string(selected + 1) + "/" + std::to_string(saves.size());
+    draw_text(font_, 350, 84, kColorMuted, kTextScaleSmall, count.c_str());
+  }
 
   for (int row = 0; row < kRows; ++row) {
     for (int col = 0; col < kColumns; ++col) {
-      const int index = row * kColumns + col;
-      const int x = kStartX + col * (kTileSize + kGap);
-      const int y = kStartY + row * (kTileSize + kGap);
-      const bool has_save = static_cast<std::size_t>(index) < saves.size();
-      const bool is_selected = has_save && static_cast<std::size_t>(index) == selected;
+      const std::size_t index = first_index + static_cast<std::size_t>(row * kColumns + col);
+      const int x = kStartX + col * (kTileSize + kGapX);
+      const int y = kStartY + row * (kTileSize + kGapY);
+      if (index >= saves.size()) {
+        vita2d_draw_rectangle(x, y, kTileSize, kTileSize, RGBA8(255, 255, 255, 10));
+        continue;
+      }
 
+      const bool is_selected = index == selected;
+      const SaveRecord &save = saves[index];
       vita2d_draw_rectangle(x - 3, y - 3, kTileSize + 6, kTileSize + 6,
-                            is_selected ? kColorAccent : RGBA8(255, 255, 255, 20));
+                            is_selected ? kColorAccent : RGBA8(255, 255, 255, 18));
       vita2d_draw_rectangle(x, y, kTileSize, kTileSize,
                             is_selected ? RGBA8(219, 234, 254, 255) : kColorPanelAlt);
 
-      if (has_save) {
-        const SaveRecord &save = saves[static_cast<std::size_t>(index)];
-        const std::string id = truncate_label(save.id, 10);
-        const unsigned int text_color = is_selected ? RGBA8(15, 23, 42, 255) : kColorMuted;
-        draw_text(font_, x + 8, y + 34, text_color, 0.62f, platform_label(save.platform));
-        draw_text(font_, x + 8, y + 58, text_color, 0.56f, id.c_str());
+      const int pad = is_selected ? 4 : 8;
+      const int icon_size = kTileSize - pad * 2;
+      vita2d_texture *texture = load_icon_texture(save.icon_path);
+      if (texture) {
+        vita2d_draw_rectangle(x + pad, y + pad, icon_size, icon_size, RGBA8(0, 0, 0, 120));
+        draw_texture_fit(texture, x + pad, y + pad, icon_size);
+      } else {
+        draw_placeholder_icon(font_, save, x + pad, y + pad, icon_size, is_selected);
       }
     }
   }
@@ -179,16 +320,14 @@ void Ui::draw_title_grid(const std::vector<SaveRecord> &saves, std::size_t selec
   const SaveRecord *save = selected_record(saves, selected_save);
   if (save) {
     const std::string title = truncate_label(save->display_name, 34);
-    const std::string path = truncate_label(save->path, 46);
-    draw_text(font_, 18, 430, kColorText, kTextScaleNormal, title.c_str());
-    draw_text(font_, 18, 456, kColorMuted, kTextScaleSmall, path.c_str());
+    const std::string id = truncate_label(title_id_label(*save), 42);
+    const std::string platform = std::string(platform_label(save->platform)) + " save";
+    draw_text(font_, 18, 444, kColorText, kTextScaleNormal, title.c_str());
+    draw_text(font_, 18, 470, kColorMuted, kTextScaleSmall, id.c_str());
+    draw_text(font_, 18, 492, kColorMuted, 0.74f, platform.c_str());
   } else {
     draw_text(font_, 18, 430, kColorText, kTextScaleNormal, "No saves found");
-    draw_text(font_, 18, 456, kColorMuted, kTextScaleSmall, "Checked ux0 Vita and Adrenaline roots");
-  }
-
-  if (saves.size() > static_cast<std::size_t>(kVisibleTiles)) {
-    draw_text(font_, 300, 84, kColorMuted, kTextScaleSmall, "More saves hidden");
+    draw_text(font_, 18, 456, kColorMuted, kTextScaleSmall, "Checked Vita, game card, and PSP roots");
   }
 }
 
@@ -203,8 +342,12 @@ void Ui::draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t sel
   draw_text(font_, 456, 84, kColorText, kTextScaleNormal, "Backups");
   const SaveRecord *save = selected_record(saves, selected_save);
 
+  const char *google_action = google_user_code.empty() ? "Google: footer button connects / refreshes"
+                                                       : "Scan QR, then press Google again";
+  draw_text(font_, 456, 112, kColorMuted, 0.78f, google_action);
+
   if (!save) {
-    draw_text(font_, 456, 128, kColorMuted, kTextScaleSmall,
+    draw_text(font_, 456, 150, kColorMuted, kTextScaleSmall,
               "Install or create saves, then reopen Save Keeper.");
     if (!status_message.empty()) {
       const std::string status = truncate_label(status_message, 58);
@@ -214,7 +357,7 @@ void Ui::draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t sel
   }
 
   const std::string selected_label = truncate_label(save->display_name, 36);
-  draw_text(font_, 456, 110, kColorMuted, kTextScaleSmall, selected_label.c_str());
+  draw_text(font_, 456, 138, kColorMuted, kTextScaleSmall, selected_label.c_str());
 
   constexpr std::size_t kVisibleBackups = 5;
   const std::vector<BackupEntry> all_entries = build_backup_menu(remote_backups, local_backups);
@@ -231,38 +374,37 @@ void Ui::draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t sel
     entries.push_back(all_entries[i]);
   }
 
-  int y = 136;
+  int y = 164;
   const std::size_t visible_count = entries.size();
   for (std::size_t i = 0; i < visible_count; ++i) {
     const bool selected = (i + backup_window) == selected_entry;
     const unsigned int bg = selected ? kColorAccentSoft : RGBA8(255, 255, 255, 18);
-    vita2d_draw_rectangle(456, y, 460, 38, bg);
+    vita2d_draw_rectangle(456, y, 460, 36, bg);
     if (selected) {
-      vita2d_draw_rectangle(456, y, 4, 38, kColorAccent);
+      vita2d_draw_rectangle(456, y, 4, 36, kColorAccent);
     }
 
-    const std::string label = entries[i].display_name();
-    draw_text(font_, 470, y + 25, selected ? kColorText : kColorMuted, kTextScaleSmall,
-              label.c_str());
-    y += 46;
+    const std::string label = truncate_label(entries[i].display_name(), 46);
+    draw_text(font_, 470, y + 24, selected ? kColorText : kColorMuted, 0.78f, label.c_str());
+    y += 42;
   }
 
   if (selectable_count == 0) {
-    draw_text(font_, 470, 208, kColorMuted, kTextScaleSmall, "No backups yet");
+    draw_text(font_, 470, 230, kColorMuted, kTextScaleSmall, "No backups yet");
   } else if (all_entries.size() > entries.size() && google_user_code.empty()) {
-    draw_text(font_, 470, 414, kColorMuted, kTextScaleSmall, "More backups hidden");
+    draw_text(font_, 470, 414, kColorMuted, kTextScaleSmall, "More backups below");
   }
 
   if (!google_user_code.empty()) {
-    const std::string url = truncate_label(google_verification_url, 42);
+    const std::string url = truncate_label(google_verification_url, 38);
     const std::string code = "Code: " + google_user_code;
-    draw_text(font_, 456, 408, kColorText, kTextScaleSmall, url.c_str());
+    draw_text(font_, 456, 408, kColorText, 0.76f, url.c_str());
     draw_text(font_, 456, 434, kColorAccent, kTextScaleSmall, code.c_str());
-    draw_qr_code(google_verification_url, 782, 348, 3);
+    draw_qr_code(google_verification_url, 790, 346, 3);
   }
 
   const std::string status =
-      status_message.empty() ? "O creates a local timestamped ZIP snapshot."
+      status_message.empty() ? "Circle creates a timestamped ZIP snapshot."
                              : truncate_label(status_message, 58);
   draw_text(font_, 456, 462,
             restore_confirmation_pending ? kColorAccent : kColorMuted, kTextScaleSmall,
@@ -271,8 +413,13 @@ void Ui::draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t sel
 
 void Ui::draw_footer() const {
   vita2d_draw_rectangle(0, 508, 960, 36, RGBA8(3, 7, 18, 230));
-  draw_text(font_, 18, 532, kColorMuted, kTextScaleSmall,
-            "D-Pad Save  L/R Backup  O Backup  Sq Restore  Sel Upload  Tri Google  START Exit");
+  draw_text(font_, 18, 532, kColorMuted, 0.68f, "D-Pad Saves");
+  draw_text(font_, 124, 532, kColorMuted, 0.68f, "L/R Backups");
+  draw_hint(font_, 248, ButtonSymbol::Circle, "Backup");
+  draw_hint(font_, 366, ButtonSymbol::Square, "Restore");
+  draw_hint(font_, 496, ButtonSymbol::Select, "Upload");
+  draw_hint(font_, 640, ButtonSymbol::Triangle, "Google");
+  draw_hint(font_, 768, ButtonSymbol::Cross, "Cancel");
 }
 
 } // namespace vsm::vita

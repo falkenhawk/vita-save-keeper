@@ -8,7 +8,9 @@
 #include "core/PathUtil.hpp"
 #include "core/SaveScanner.hpp"
 #include "core/Selection.hpp"
+#include "core/SfoParser.hpp"
 
+#include <cstdint>
 #include <cstdlib>
 #include <cstdio>
 #include <filesystem>
@@ -16,6 +18,7 @@
 #include <iostream>
 #include <iterator>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -57,6 +60,70 @@ std::uint32_t read_le32(const std::vector<unsigned char> &data, std::size_t offs
          (static_cast<std::uint32_t>(data[offset + 1]) << 8) |
          (static_cast<std::uint32_t>(data[offset + 2]) << 16) |
          (static_cast<std::uint32_t>(data[offset + 3]) << 24);
+}
+
+void append_le16(std::vector<unsigned char> *data, std::uint16_t value) {
+  data->push_back(static_cast<unsigned char>(value & 0xff));
+  data->push_back(static_cast<unsigned char>((value >> 8) & 0xff));
+}
+
+void append_le32(std::vector<unsigned char> *data, std::uint32_t value) {
+  data->push_back(static_cast<unsigned char>(value & 0xff));
+  data->push_back(static_cast<unsigned char>((value >> 8) & 0xff));
+  data->push_back(static_cast<unsigned char>((value >> 16) & 0xff));
+  data->push_back(static_cast<unsigned char>((value >> 24) & 0xff));
+}
+
+std::size_t align4(std::size_t value) {
+  return (value + 3) & ~static_cast<std::size_t>(3);
+}
+
+std::vector<unsigned char>
+build_sfo_with_strings(const std::vector<std::pair<std::string, std::string>> &fields) {
+  std::vector<unsigned char> key_table;
+  std::vector<unsigned char> data_table;
+  std::vector<std::uint16_t> key_offsets;
+  std::vector<std::uint32_t> data_offsets;
+
+  for (const auto &field : fields) {
+    key_offsets.push_back(static_cast<std::uint16_t>(key_table.size()));
+    key_table.insert(key_table.end(), field.first.begin(), field.first.end());
+    key_table.push_back('\0');
+
+    data_offsets.push_back(static_cast<std::uint32_t>(data_table.size()));
+    data_table.insert(data_table.end(), field.second.begin(), field.second.end());
+    data_table.push_back('\0');
+  }
+
+  const std::uint32_t index_count = static_cast<std::uint32_t>(fields.size());
+  const std::uint32_t key_table_offset = 20 + index_count * 16;
+  const std::uint32_t data_table_offset =
+      static_cast<std::uint32_t>(align4(key_table_offset + key_table.size()));
+
+  std::vector<unsigned char> sfo;
+  append_le32(&sfo, 0x46535000);
+  append_le32(&sfo, 0x00000101);
+  append_le32(&sfo, key_table_offset);
+  append_le32(&sfo, data_table_offset);
+  append_le32(&sfo, index_count);
+
+  for (std::size_t i = 0; i < fields.size(); ++i) {
+    append_le16(&sfo, key_offsets[i]);
+    append_le16(&sfo, 0x0204);
+    append_le32(&sfo, static_cast<std::uint32_t>(fields[i].second.size() + 1));
+    append_le32(&sfo, static_cast<std::uint32_t>(fields[i].second.size() + 1));
+    append_le32(&sfo, data_offsets[i]);
+  }
+
+  sfo.insert(sfo.end(), key_table.begin(), key_table.end());
+  sfo.resize(data_table_offset, 0);
+  sfo.insert(sfo.end(), data_table.begin(), data_table.end());
+  return sfo;
+}
+
+void write_binary_file(const std::filesystem::path &path, const std::vector<unsigned char> &data) {
+  std::ofstream output(path, std::ios::binary);
+  output.write(reinterpret_cast<const char *>(data.data()), static_cast<std::streamsize>(data.size()));
 }
 
 std::vector<std::string> read_zip_central_directory_names(const std::filesystem::path &zip_path) {
@@ -113,6 +180,19 @@ void test_path_component_normalization_replaces_unsafe_characters() {
   EXPECT_EQ(vsm::normalize_path_component("  ux0:\\bad*name\"  "), "ux0__bad_name_");
 }
 
+void test_sfo_parser_reads_title_strings() {
+  const std::vector<unsigned char> data = build_sfo_with_strings({
+      {"SAVEDATA_TITLE", "Clear Data"},
+      {"TITLE", "Persona 4 Golden"},
+  });
+
+  const vsm::SfoMetadata metadata = vsm::parse_sfo_metadata(data);
+
+  EXPECT_TRUE(metadata.ok);
+  EXPECT_EQ(metadata.strings.at("TITLE"), "Persona 4 Golden");
+  EXPECT_EQ(vsm::title_from_sfo_metadata(metadata), "Persona 4 Golden");
+}
+
 void test_save_scanner_lists_direct_child_save_directories() {
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() / "save-keeper-scanner-test";
@@ -121,6 +201,13 @@ void test_save_scanner_lists_direct_child_save_directories() {
   std::filesystem::create_directories(base / "vita" / "PCSE99999");
   std::filesystem::create_directories(base / "vita" / "PCSE00120" / "sce_sys");
   std::filesystem::create_directories(base / "psp" / "ULUS12345");
+  write_binary_file(base / "vita" / "PCSE00120" / "sce_sys" / "param.sfo",
+                    build_sfo_with_strings({{"TITLE", "Persona 4 Golden"}}));
+  std::ofstream(base / "vita" / "PCSE00120" / "sce_sys" / "icon0.png", std::ios::binary)
+      << "png";
+  write_binary_file(base / "psp" / "ULUS12345" / "PARAM.SFO",
+                    build_sfo_with_strings({{"TITLE", "PSP Save"}}));
+  std::ofstream(base / "psp" / "ULUS12345" / "ICON0.PNG", std::ios::binary) << "png";
 
   FILE *ignored_file = std::fopen((base / "vita" / "not-a-save.txt").string().c_str(), "w");
   EXPECT_TRUE(ignored_file != nullptr);
@@ -135,11 +222,15 @@ void test_save_scanner_lists_direct_child_save_directories() {
   EXPECT_EQ(saves.size(), static_cast<std::size_t>(3));
   EXPECT_TRUE(saves[0].platform == vsm::SavePlatform::Vita);
   EXPECT_EQ(saves[0].id, "PCSE00120");
-  EXPECT_EQ(saves[0].display_name, "PCSE00120");
+  EXPECT_EQ(saves[0].display_name, "Persona 4 Golden");
   EXPECT_EQ(saves[0].path, (base / "vita" / "PCSE00120").string());
+  EXPECT_EQ(saves[0].icon_path, (base / "vita" / "PCSE00120" / "sce_sys" / "icon0.png").string());
   EXPECT_EQ(saves[1].id, "PCSE99999");
+  EXPECT_EQ(saves[1].display_name, "PCSE99999");
   EXPECT_TRUE(saves[2].platform == vsm::SavePlatform::Psp);
   EXPECT_EQ(saves[2].id, "ULUS12345");
+  EXPECT_EQ(saves[2].display_name, "PSP Save");
+  EXPECT_EQ(saves[2].icon_path, (base / "psp" / "ULUS12345" / "ICON0.PNG").string());
 
   std::filesystem::remove_all(base);
 }
@@ -407,6 +498,7 @@ int main() {
   test_remote_entries_are_prefixed_and_local_entries_are_plain();
   test_backup_menu_order_matches_jksv_style();
   test_path_component_normalization_replaces_unsafe_characters();
+  test_sfo_parser_reads_title_strings();
   test_save_scanner_lists_direct_child_save_directories();
   test_selection_wraps_and_handles_empty_lists();
   test_backup_archive_creates_timestamped_zip_snapshot();

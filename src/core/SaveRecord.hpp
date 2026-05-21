@@ -13,6 +13,7 @@ enum class SavePlatform {
 struct SaveRecord {
   SavePlatform platform{};
   std::string id;
+  std::string title_id;
   std::string display_name;
   std::string path;
   std::string icon_path;

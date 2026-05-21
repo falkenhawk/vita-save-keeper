@@ -1,5 +1,7 @@
 #include "core/SaveScanner.hpp"
 
+#include "core/SfoParser.hpp"
+
 #include <algorithm>
 #include <dirent.h>
 #include <string>
@@ -31,6 +33,23 @@ bool is_directory(const std::string &path) {
   return S_ISDIR(info.st_mode);
 }
 
+bool is_regular_file(const std::string &path) {
+  struct stat info {};
+  if (stat(path.c_str(), &info) != 0) {
+    return false;
+  }
+  return S_ISREG(info.st_mode);
+}
+
+std::string first_existing_file(const std::vector<std::string> &paths) {
+  for (const std::string &path : paths) {
+    if (is_regular_file(path)) {
+      return path;
+    }
+  }
+  return {};
+}
+
 std::vector<std::string> list_direct_child_directories(const std::string &root_path) {
   std::vector<std::string> directories;
   DIR *dir = opendir(root_path.c_str());
@@ -57,6 +76,37 @@ std::vector<std::string> list_direct_child_directories(const std::string &root_p
   return directories;
 }
 
+void apply_sfo_metadata(SaveRecord *save) {
+  const std::string vita_sfo = first_existing_file({
+      join_path(join_path(save->path, "sce_sys"), "param.sfo"),
+      join_path(join_path(save->path, "sce_sys"), "PARAM.SFO"),
+  });
+  const std::string psp_sfo = first_existing_file({
+      join_path(save->path, "PARAM.SFO"),
+      join_path(save->path, "param.sfo"),
+  });
+  const std::string sfo_path = save->platform == SavePlatform::Psp ? psp_sfo : vita_sfo;
+  if (!sfo_path.empty()) {
+    const SfoMetadata metadata = parse_sfo_metadata_file(sfo_path);
+    const std::string title = title_from_sfo_metadata(metadata);
+    if (!title.empty()) {
+      save->display_name = title;
+    }
+  }
+
+  if (save->platform == SavePlatform::Psp) {
+    save->icon_path = first_existing_file({
+        join_path(save->path, "ICON0.PNG"),
+        join_path(save->path, "icon0.png"),
+    });
+  } else {
+    save->icon_path = first_existing_file({
+        join_path(join_path(save->path, "sce_sys"), "icon0.png"),
+        join_path(join_path(save->path, "sce_sys"), "ICON0.PNG"),
+    });
+  }
+}
+
 } // namespace
 
 std::vector<SaveRecord> scan_save_roots(const std::vector<SaveRoot> &roots) {
@@ -70,6 +120,7 @@ std::vector<SaveRecord> scan_save_roots(const std::vector<SaveRoot> &roots) {
       save.id = child;
       save.display_name = child;
       save.path = join_path(root.path, child);
+      apply_sfo_metadata(&save);
 
       // Only direct children are treated as saves. Descending into save payloads would turn internal
       // folders such as sce_sys into fake titles and would make scanning much slower on a Vita.

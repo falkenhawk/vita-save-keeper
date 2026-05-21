@@ -8,6 +8,7 @@
 #include "core/PathUtil.hpp"
 #include "core/SaveScanner.hpp"
 #include "core/Selection.hpp"
+#include "vita/SaveAppDbMetadata.hpp"
 #include "vita/net/HttpClient.hpp"
 
 #include <psp2/ctrl.h>
@@ -36,6 +37,7 @@ constexpr const char *kDriveUploadEndpoint =
 std::vector<SaveRoot> default_save_roots() {
   return {
       {SavePlatform::Vita, "ux0:user/00/savedata"},
+      {SavePlatform::GameCard, "grw0:savedata"},
       {SavePlatform::Psp, "ux0:pspemu/PSP/SAVEDATA"},
   };
 }
@@ -190,7 +192,7 @@ void App::handle_restore_button() {
   const std::string backup_name = selected_backup_name();
   if (!restore_confirmation_pending_) {
     restore_confirmation_pending_ = true;
-    status_message_ = "Press Square again to restore " + backup_name + ".";
+    status_message_ = "Press restore again to restore " + backup_name + ".";
     return;
   }
 
@@ -531,6 +533,10 @@ int App::run() {
   // Scan once at startup for the foundation build. Later actions that create, restore, or delete a
   // save will refresh this list explicitly so the UI does not rescan storage every frame.
   saves_ = scan_save_roots(default_save_roots());
+  const AppDbMetadataResult metadata_result = apply_app_db_metadata(&saves_);
+  if (!metadata_result.ok && !metadata_result.error.empty()) {
+    status_message_ = "Using save-folder metadata: " + metadata_result.error;
+  }
   refresh_local_backups();
   load_google_token_cache();
 
@@ -543,11 +549,6 @@ int App::run() {
     sceCtrlPeekBufferPositive(0, &pad, 1);
     const unsigned int pressed = pad.buttons & ~previous_buttons;
 
-    // START exits immediately in this foundation build. Later screens will route input through a
-    // state stack so destructive actions can require explicit confirmation or hold-to-confirm.
-    if ((pressed & SCE_CTRL_START) != 0) {
-      running = false;
-    }
     if ((pressed & SCE_CTRL_LEFT) != 0) {
       move_selected_save(-1);
     }

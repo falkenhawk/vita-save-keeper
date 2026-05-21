@@ -17,6 +17,7 @@ add_library(vsm_core
   src/core/PathUtil.cpp
   src/core/SaveScanner.cpp
   src/core/Selection.cpp
+  src/core/SfoParser.cpp
 )
 target_include_directories(vsm_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -42,6 +43,7 @@ else()
 
   add_executable(save-keeper
     src/vita/App.cpp
+    src/vita/SaveAppDbMetadata.cpp
     src/vita/main.cpp
     src/vita/net/HttpClient.cpp
     src/vita/ui/Ui.cpp
@@ -74,6 +76,7 @@ else()
     SceNet_stub
     ScePgf_stub
     ScePvf_stub
+    SceSqlite_stub
     SceSsl_stub
     SceSysmodule_stub
   )
@@ -82,6 +85,9 @@ else()
   vita_create_vpk(save-keeper.vpk ${VITA_TITLEID} save-keeper.self
     VERSION ${VITA_VERSION}
     NAME ${VITA_APP_NAME}
+    FILE sce_sys/icon0.png sce_sys/icon0.png
+    FILE sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
+    FILE sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
     FILE sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
   )
 endif()

@@ -3,10 +3,12 @@
 #include "core/SaveRecord.hpp"
 
 #include <cstddef>
+#include <map>
 #include <string>
 #include <vector>
 
 struct vita2d_pgf;
+struct vita2d_texture;
 
 namespace vsm::vita {
 
@@ -32,8 +34,10 @@ private:
                          const std::string &google_user_code,
                          const std::string &status_message) const;
   void draw_footer() const;
+  vita2d_texture *load_icon_texture(const std::string &path) const;
 
   vita2d_pgf *font_{};
+  mutable std::map<std::string, vita2d_texture *> icon_cache_;
 };
 
 } // namespace vsm::vita
