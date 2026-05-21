@@ -107,6 +107,21 @@ void apply_sfo_metadata(SaveRecord *save) {
   } else {
     const std::string metadata_title_id =
         save->title_id.empty() ? save->id : save->title_id;
+    if (save->display_name == save->id) {
+      const std::string appmeta_sfo = first_existing_file({
+          join_path(join_path("ur0:appmeta", metadata_title_id), "param.sfo"),
+          join_path(join_path("ur0:appmeta", metadata_title_id), "PARAM.SFO"),
+          join_path(join_path("ux0:appmeta", metadata_title_id), "param.sfo"),
+          join_path(join_path("ux0:appmeta", metadata_title_id), "PARAM.SFO"),
+      });
+      if (!appmeta_sfo.empty()) {
+        const SfoMetadata metadata = parse_sfo_metadata_file(appmeta_sfo);
+        const std::string title = title_from_sfo_metadata(metadata);
+        if (!title.empty()) {
+          save->display_name = title;
+        }
+      }
+    }
     save->icon_path = first_existing_file({
         join_path(join_path(save->path, "sce_sys"), "icon0.png"),
         join_path(join_path(save->path, "sce_sys"), "ICON0.PNG"),

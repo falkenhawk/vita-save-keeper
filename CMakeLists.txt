@@ -22,6 +22,7 @@ add_library(vsm_core
   src/core/GoogleAuth.cpp
   src/core/GoogleConfig.cpp
   src/core/GoogleDrive.cpp
+  src/core/GridWindow.cpp
   src/core/PathUtil.cpp
   src/core/SaveScanner.cpp
   src/core/Selection.cpp
@@ -78,6 +79,8 @@ else()
     crypto
     zstd
     vita2d
+    freetype
+    bz2
     png
     z
     m
@@ -107,6 +110,7 @@ else()
     FILE sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
     FILE sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
     FILE sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
+    FILE sce_sys/resources/Roboto-Regular.ttf sce_sys/resources/Roboto-Regular.ttf
     FILE sce_sys/resources/font.pgf sce_sys/resources/font.pgf
   )
 endif()

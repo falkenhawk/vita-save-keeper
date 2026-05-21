@@ -303,7 +303,7 @@ bool App::load_google_credentials() {
 
   std::string json;
   if (!read_text_file(kGoogleClientPath, &json)) {
-    status_message_ = "This build has no bundled Google client.";
+    status_message_ = "Google auth is not configured in this VPK.";
     return false;
   }
 

@@ -5,6 +5,7 @@
 #include "core/GoogleAuth.hpp"
 #include "core/GoogleConfig.hpp"
 #include "core/GoogleDrive.hpp"
+#include "core/GridWindow.hpp"
 #include "core/PathUtil.hpp"
 #include "core/SaveScanner.hpp"
 #include "core/Selection.hpp"
@@ -242,6 +243,13 @@ void test_selection_wraps_and_handles_empty_lists() {
   EXPECT_EQ(vsm::move_selection(2, 3, 1), static_cast<std::size_t>(0));
   EXPECT_EQ(vsm::move_selection(1, 3, 1), static_cast<std::size_t>(2));
   EXPECT_EQ(vsm::move_selection(12, 0, -1), static_cast<std::size_t>(0));
+}
+
+void test_grid_window_scrolls_only_when_selection_leaves_view() {
+  EXPECT_EQ(vsm::grid_window_top_row(0, 12, 90, 4, 3), static_cast<std::size_t>(1));
+  EXPECT_EQ(vsm::grid_window_top_row(1, 10, 90, 4, 3), static_cast<std::size_t>(1));
+  EXPECT_EQ(vsm::grid_window_top_row(1, 3, 90, 4, 3), static_cast<std::size_t>(0));
+  EXPECT_EQ(vsm::grid_window_top_row(99, 89, 90, 4, 3), static_cast<std::size_t>(20));
 }
 
 void test_backup_archive_creates_timestamped_zip_snapshot() {
@@ -509,6 +517,7 @@ int main() {
   test_sfo_parser_reads_title_strings();
   test_save_scanner_lists_direct_child_save_directories();
   test_selection_wraps_and_handles_empty_lists();
+  test_grid_window_scrolls_only_when_selection_leaves_view();
   test_backup_archive_creates_timestamped_zip_snapshot();
   test_backup_archive_restores_snapshot_and_removes_stale_files();
   test_backup_archive_missing_file_does_not_clear_destination();
