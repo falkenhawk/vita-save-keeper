@@ -21,6 +21,14 @@ public:
   HttpClient &operator=(const HttpClient &) = delete;
 
   HttpResponse post_form(const std::string &url, const std::string &body) const;
+  HttpResponse get_json(const std::string &url, const std::string &bearer_token) const;
+  HttpResponse post_json(const std::string &url, const std::string &json,
+                         const std::string &bearer_token) const;
+  HttpResponse post_multipart_file(const std::string &url, const std::string &metadata_json,
+                                   const std::string &file_path,
+                                   const std::string &bearer_token) const;
+  HttpResponse download_file(const std::string &url, const std::string &file_path,
+                             const std::string &bearer_token) const;
 
 private:
   bool initialized_{};
