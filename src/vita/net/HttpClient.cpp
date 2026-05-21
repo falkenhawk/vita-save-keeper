@@ -1,6 +1,11 @@
 #include "vita/net/HttpClient.hpp"
 
 #include <curl/curl.h>
+#include <psp2/net/net.h>
+#include <psp2/net/netctl.h>
+#include <psp2/net/http.h>
+#include <psp2/sysmodule.h>
+#include <cstdlib>
 
 namespace vsm::vita {
 namespace {
@@ -21,6 +26,36 @@ HttpResponse curl_error(const char *message) {
 } // namespace
 
 HttpClient::HttpClient() {
+  constexpr int kNetMemorySize = 4 * 1024 * 1024;
+  net_module_loaded_ = sceSysmoduleLoadModule(SCE_SYSMODULE_NET) >= 0;
+
+  net_memory_ = std::malloc(kNetMemorySize);
+  if (!net_memory_) {
+    return;
+  }
+
+  SceNetInitParam net_init_param {};
+  net_init_param.memory = net_memory_;
+  net_init_param.size = kNetMemorySize;
+  net_init_param.flags = 0;
+  if (sceNetInit(&net_init_param) < 0) {
+    return;
+  }
+  net_initialized_ = true;
+
+  if (sceNetCtlInit() < 0) {
+    return;
+  }
+  netctl_initialized_ = true;
+
+  http_module_loaded_ = sceSysmoduleLoadModule(SCE_SYSMODULE_HTTP) >= 0;
+  if (sceHttpInit(kNetMemorySize) < 0) {
+    return;
+  }
+  http_initialized_ = true;
+
+  // VitaSDK's libcurl sample initializes the Vita NET and HTTP modules before curl. Keep that
+  // ordering here so DNS, TLS, and HTTP share Sony's initialized networking stack on hardware.
   initialized_ = curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK;
 }
 
@@ -28,6 +63,22 @@ HttpClient::~HttpClient() {
   if (initialized_) {
     curl_global_cleanup();
   }
+  if (http_initialized_) {
+    sceHttpTerm();
+  }
+  if (http_module_loaded_) {
+    sceSysmoduleUnloadModule(SCE_SYSMODULE_HTTP);
+  }
+  if (netctl_initialized_) {
+    sceNetCtlTerm();
+  }
+  if (net_initialized_) {
+    sceNetTerm();
+  }
+  if (net_module_loaded_) {
+    sceSysmoduleUnloadModule(SCE_SYSMODULE_NET);
+  }
+  std::free(net_memory_);
 }
 
 HttpResponse HttpClient::post_form(const std::string &url, const std::string &body) const {

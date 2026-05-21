@@ -24,6 +24,12 @@ public:
 
 private:
   bool initialized_{};
+  bool net_module_loaded_{};
+  bool net_initialized_{};
+  bool netctl_initialized_{};
+  bool http_module_loaded_{};
+  bool http_initialized_{};
+  void *net_memory_{};
 };
 
 } // namespace vsm::vita
