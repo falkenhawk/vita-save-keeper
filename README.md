@@ -14,9 +14,10 @@ This repository currently contains the first buildable foundation:
 - local backup listing for the selected save
 - local backup restore with a second-press confirmation
 - Google OAuth device-code request and token polling controls
+- Google Drive upload for the selected local ZIP backup
 - a native `vita2d` UI preview that builds into a VPK
 
-Drive upload and Drive download are not implemented yet.
+Drive download is not implemented yet.
 
 ## Target behavior
 

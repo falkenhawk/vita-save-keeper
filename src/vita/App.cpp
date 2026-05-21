@@ -4,6 +4,8 @@
 #include "core/BackupStore.hpp"
 #include "core/GoogleAuth.hpp"
 #include "core/GoogleConfig.hpp"
+#include "core/GoogleDrive.hpp"
+#include "core/PathUtil.hpp"
 #include "core/SaveScanner.hpp"
 #include "core/Selection.hpp"
 #include "vita/net/HttpClient.hpp"
@@ -27,6 +29,9 @@ constexpr const char *kDataRoot = "ux0:data/save-keeper";
 constexpr const char *kBackupRoot = "ux0:data/save-keeper/backups";
 constexpr const char *kGoogleClientPath = "ux0:data/save-keeper/google-client.json";
 constexpr const char *kGoogleTokenPath = "ux0:data/save-keeper/google-token.json";
+constexpr const char *kDriveFilesEndpoint = "https://www.googleapis.com/drive/v3/files";
+constexpr const char *kDriveUploadEndpoint =
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id%2Cname";
 
 std::vector<SaveRoot> default_save_roots() {
   return {
@@ -173,8 +178,8 @@ void App::load_google_token_cache() {
     return;
   }
 
-  const GoogleTokenCache cache = parse_google_token_cache(json);
-  google_connected_ = cache.ok;
+  google_token_cache_ = parse_google_token_cache(json);
+  google_connected_ = google_token_cache_.ok;
 }
 
 bool App::load_google_credentials() {
@@ -229,11 +234,14 @@ void App::handle_google_button() {
   const TokenResponse token = parse_token_response(response.body);
   if (token.ok) {
     GoogleTokenCache cache;
+    cache.ok = true;
     cache.access_token = token.access_token;
-    cache.refresh_token = token.refresh_token;
+    cache.refresh_token = token.refresh_token.empty() ? google_token_cache_.refresh_token
+                                                      : token.refresh_token;
     cache.token_type = token.token_type;
     cache.expires_at_epoch_seconds = current_epoch_seconds() + token.expires_in;
-    if (!write_text_file(kGoogleTokenPath, serialize_google_token_cache(cache))) {
+    google_token_cache_ = cache;
+    if (!save_google_token_cache()) {
       status_message_ = "Google connected, but token save failed.";
       return;
     }
@@ -253,6 +261,115 @@ void App::handle_google_button() {
     google_auth_pending_ = false;
     status_message_ = "Google auth failed: " + token_error_text(token);
   }
+}
+
+bool App::save_google_token_cache() {
+  return write_text_file(kGoogleTokenPath, serialize_google_token_cache(google_token_cache_));
+}
+
+bool App::refresh_google_access_token() {
+  if (!load_google_credentials() || google_token_cache_.refresh_token.empty()) {
+    return false;
+  }
+
+  HttpClient http;
+  const HttpResponse response = http.post_form(
+      kGoogleTokenEndpoint,
+      build_refresh_token_request_body(google_credentials_.client_id, google_credentials_.client_secret,
+                                       google_token_cache_.refresh_token));
+  const TokenResponse token = parse_token_response(response.body);
+  if (!token.ok) {
+    status_message_ = "Google refresh failed: " + token_error_text(token);
+    google_connected_ = false;
+    return false;
+  }
+
+  google_token_cache_.access_token = token.access_token;
+  google_token_cache_.ok = true;
+  google_token_cache_.token_type = token.token_type;
+  google_token_cache_.expires_at_epoch_seconds = current_epoch_seconds() + token.expires_in;
+  google_connected_ = save_google_token_cache();
+  return google_connected_;
+}
+
+bool App::ensure_google_access_token() {
+  if (!google_token_cache_.ok) {
+    status_message_ = "Connect Google Drive first.";
+    return false;
+  }
+  if (!google_token_cache_.access_token.empty() &&
+      google_token_cache_.expires_at_epoch_seconds > current_epoch_seconds() + 60) {
+    return true;
+  }
+  return refresh_google_access_token();
+}
+
+std::string App::find_or_create_drive_folder(const std::string &folder_name,
+                                             const std::string &parent_id) {
+  HttpClient http;
+  const std::string list_url = std::string(kDriveFilesEndpoint) + "?" +
+                               build_drive_find_folder_query(folder_name, parent_id);
+  const HttpResponse list_response = http.get_json(list_url, google_token_cache_.access_token);
+  if (list_response.ok) {
+    const DriveFileList files = parse_drive_file_list(list_response.body);
+    if (files.ok && !files.files.empty()) {
+      return files.files[0].id;
+    }
+  }
+
+  const std::string create_url = std::string(kDriveFilesEndpoint) + "?fields=id%2Cname";
+  const HttpResponse create_response = http.post_json(
+      create_url, build_drive_folder_metadata_json(folder_name, parent_id),
+      google_token_cache_.access_token);
+  if (!create_response.ok) {
+    status_message_ = "Drive folder create failed.";
+    return {};
+  }
+
+  const DriveFileList created = parse_drive_file_list(create_response.body);
+  if (!created.ok || created.files.empty()) {
+    status_message_ = "Drive folder response invalid.";
+    return {};
+  }
+  return created.files[0].id;
+}
+
+void App::handle_upload_button() {
+  if (saves_.empty()) {
+    status_message_ = "No save selected.";
+    return;
+  }
+  if (local_backups_.empty()) {
+    status_message_ = "No local backup selected.";
+    return;
+  }
+  if (!ensure_google_access_token()) {
+    return;
+  }
+
+  const SaveRecord &save = saves_[selected_save_ % saves_.size()];
+  const std::string &backup_name = local_backups_[selected_backup_ % local_backups_.size()];
+  const std::string archive_path = local_backup_archive_path(kBackupRoot, save.id, backup_name);
+  const std::string root_id = find_or_create_drive_folder(kGoogleDriveRootFolderName, "root");
+  if (root_id.empty()) {
+    return;
+  }
+
+  std::string save_folder_name = normalize_path_component(save.id);
+  if (save_folder_name.empty()) {
+    save_folder_name = "unknown-save";
+  }
+  const std::string save_folder_id = find_or_create_drive_folder(save_folder_name, root_id);
+  if (save_folder_id.empty()) {
+    return;
+  }
+
+  HttpClient http;
+  const HttpResponse upload_response = http.post_multipart_file(
+      kDriveUploadEndpoint, build_drive_upload_metadata_json(backup_name, save_folder_id),
+      archive_path, google_token_cache_.access_token);
+  status_message_ = upload_response.ok ? "Uploaded [GD] " + backup_name
+                                       : "Drive upload failed.";
 }
 
 int App::run() {
@@ -325,6 +442,9 @@ int App::run() {
     }
     if ((pressed & SCE_CTRL_TRIANGLE) != 0) {
       handle_google_button();
+    }
+    if ((pressed & SCE_CTRL_SELECT) != 0) {
+      handle_upload_button();
     }
 
     ui_.draw(saves_, selected_save_, local_backups_, selected_backup_,

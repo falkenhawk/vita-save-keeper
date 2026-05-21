@@ -24,8 +24,15 @@ private:
   void load_google_token_cache();
   bool load_google_credentials();
   void handle_google_button();
+  bool save_google_token_cache();
+  bool refresh_google_access_token();
+  bool ensure_google_access_token();
+  std::string find_or_create_drive_folder(const std::string &folder_name,
+                                          const std::string &parent_id);
+  void handle_upload_button();
 
   GoogleClientCredentials google_credentials_;
+  GoogleTokenCache google_token_cache_;
   DeviceCodeResponse device_code_;
   std::vector<SaveRecord> saves_;
   std::vector<std::string> local_backups_;

@@ -247,7 +247,7 @@ void Ui::draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t sel
 void Ui::draw_footer() const {
   vita2d_draw_rectangle(0, 508, 960, 36, RGBA8(3, 7, 18, 230));
   draw_text(font_, 18, 532, kColorMuted, kTextScaleSmall,
-            "D-Pad Save  L/R Backup  O Backup  Sq Restore  Tri Google  X Cancel  START Exit");
+            "D-Pad Save  L/R Backup  O Backup  Sq Restore  Sel Upload  Tri Google  START Exit");
 }
 
 } // namespace vsm::vita
