@@ -4,6 +4,7 @@
 #include "core/BackupStore.hpp"
 #include "core/GoogleAuth.hpp"
 #include "core/GoogleConfig.hpp"
+#include "core/GoogleDrive.hpp"
 #include "core/PathUtil.hpp"
 #include "core/SaveScanner.hpp"
 #include "core/Selection.hpp"
@@ -365,6 +366,34 @@ void test_google_config_serializes_and_parses_token_cache() {
   EXPECT_EQ(cache.expires_at_epoch_seconds, static_cast<long long>(123456));
 }
 
+void test_google_drive_builds_folder_metadata_json() {
+  EXPECT_EQ(vsm::build_drive_folder_metadata_json("PSV Saves", "root"),
+            "{\"name\":\"PSV Saves\",\"mimeType\":\"application/vnd.google-apps.folder\","
+            "\"parents\":[\"root\"]}");
+}
+
+void test_google_drive_builds_find_folder_query() {
+  EXPECT_EQ(vsm::build_drive_find_folder_query("PSV Saves", "root"),
+            "q=mimeType%3D%27application%2Fvnd.google-apps.folder%27%20and%20name%3D%27PSV%"
+            "20Saves%27%20and%20%27root%27%20in%20parents%20and%20trashed%3Dfalse&fields=files%"
+            "28id%2Cname%29");
+}
+
+void test_google_drive_parses_first_file_id() {
+  const vsm::DriveFileList files =
+      vsm::parse_drive_file_list("{\"files\":[{\"id\":\"folder-id\",\"name\":\"PSV Saves\"}]}");
+
+  EXPECT_TRUE(files.ok);
+  EXPECT_EQ(files.files.size(), static_cast<std::size_t>(1));
+  EXPECT_EQ(files.files[0].id, "folder-id");
+  EXPECT_EQ(files.files[0].name, "PSV Saves");
+}
+
+void test_google_drive_builds_upload_metadata_json() {
+  EXPECT_EQ(vsm::build_drive_upload_metadata_json("2026-05-21 16-14.zip", "folder-id"),
+            "{\"name\":\"2026-05-21 16-14.zip\",\"parents\":[\"folder-id\"]}");
+}
+
 } // namespace
 
 int main() {
@@ -388,6 +417,10 @@ int main() {
   test_google_auth_parses_token_success_response();
   test_google_config_parses_downloaded_client_json();
   test_google_config_serializes_and_parses_token_cache();
+  test_google_drive_builds_folder_metadata_json();
+  test_google_drive_builds_find_folder_query();
+  test_google_drive_parses_first_file_id();
+  test_google_drive_builds_upload_metadata_json();
 
   std::cout << "vsm_core_tests passed\n";
   return 0;
