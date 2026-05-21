@@ -13,15 +13,14 @@
 namespace vsm::vita {
 namespace {
 
-constexpr unsigned int kColorBackground = RGBA8(11, 15, 21, 255);
-constexpr unsigned int kColorHeader = RGBA8(26, 35, 50, 255);
-constexpr unsigned int kColorPanel = RGBA8(21, 29, 42, 255);
-constexpr unsigned int kColorPanelAlt = RGBA8(31, 42, 59, 255);
+constexpr unsigned int kColorBackground = RGBA8(8, 13, 21, 255);
+constexpr unsigned int kColorHeader = RGBA8(17, 24, 36, 255);
+constexpr unsigned int kColorPanel = RGBA8(16, 24, 36, 255);
+constexpr unsigned int kColorPanelAlt = RGBA8(25, 37, 55, 255);
 constexpr unsigned int kColorAccent = RGBA8(56, 189, 248, 255);
-constexpr unsigned int kColorAccentSoft = RGBA8(56, 189, 248, 48);
+constexpr unsigned int kColorAccentSoft = RGBA8(56, 189, 248, 40);
 constexpr unsigned int kColorText = RGBA8(232, 238, 246, 255);
-constexpr unsigned int kColorMuted = RGBA8(148, 163, 184, 255);
-constexpr unsigned int kColorDarkText = RGBA8(15, 23, 42, 255);
+constexpr unsigned int kColorMuted = RGBA8(166, 178, 198, 255);
 
 constexpr float kTextScaleSmall = 0.82f;
 constexpr float kTextScaleNormal = 0.98f;
@@ -142,12 +141,18 @@ void draw_texture_fit(vita2d_texture *texture, int x, int y, int size) {
 
 void draw_placeholder_icon(vita2d_pgf *font, const SaveRecord &save, int x, int y, int size,
                            bool selected) {
-  vita2d_draw_rectangle(x, y, size, size,
-                        selected ? RGBA8(219, 234, 254, 255) : RGBA8(44, 58, 78, 255));
-  vita2d_draw_line(x + 10, y + size - 18, x + size - 10, y + 18,
-                   selected ? RGBA8(56, 189, 248, 180) : RGBA8(56, 189, 248, 90));
+  const unsigned int tile = selected ? RGBA8(29, 49, 69, 255) : RGBA8(35, 49, 69, 255);
+  vita2d_draw_rectangle(x, y, size, size, tile);
+  const int card_x = x + size / 5;
+  const int card_y = y + size / 6;
+  const int card_w = size - (size / 5) * 2;
+  const int card_h = size / 2;
+  vita2d_draw_rectangle(card_x, card_y, card_w, card_h, RGBA8(12, 20, 32, 255));
+  vita2d_draw_rectangle(card_x, card_y, card_w, 8, kColorAccent);
+  vita2d_draw_rectangle(card_x + 10, card_y + 22, card_w - 20, 7, RGBA8(232, 238, 246, 255));
+  vita2d_draw_rectangle(card_x + 14, card_y + 38, card_w - 28, 12, RGBA8(21, 33, 49, 255));
   const std::string text = placeholder_text(save);
-  draw_text(font, x + 20, y + (size / 2) + 12, selected ? kColorDarkText : kColorText, 1.0f,
+  draw_text(font, x + 22, y + size - 12, selected ? kColorText : RGBA8(198, 210, 226, 255), 0.82f,
             text.c_str());
 }
 
@@ -155,7 +160,7 @@ void draw_button_shape(int x, int y, ButtonSymbol symbol, unsigned int color,
                        vita2d_pgf *font) {
   switch (symbol) {
   case ButtonSymbol::Circle:
-    vita2d_draw_fill_circle(x + 8, y + 8, 8, RGBA8(255, 255, 255, 18));
+    vita2d_draw_fill_circle(x + 8, y + 8, 8, color);
     vita2d_draw_fill_circle(x + 8, y + 8, 5, RGBA8(3, 7, 18, 230));
     break;
   case ButtonSymbol::Cross:
@@ -251,7 +256,7 @@ void Ui::draw(const std::vector<SaveRecord> &saves, std::size_t selected_save,
 
 void Ui::draw_header(bool google_connected, bool google_auth_pending) const {
   vita2d_draw_rectangle(0, 0, 960, 52, kColorHeader);
-  vita2d_draw_line(0, 52, 960, 52, RGBA8(255, 255, 255, 28));
+  vita2d_draw_line(0, 52, 960, 52, RGBA8(255, 255, 255, 20));
 
   draw_text(font_, 18, 34, kColorText, kTextScaleTitle, "Save Keeper");
   const char *drive_status = google_connected       ? "Google Drive connected"
@@ -262,7 +267,7 @@ void Ui::draw_header(bool google_connected, bool google_auth_pending) const {
 
 void Ui::draw_title_grid(const std::vector<SaveRecord> &saves, std::size_t selected_save) const {
   vita2d_draw_rectangle(0, 52, 432, 456, kColorPanel);
-  vita2d_draw_line(432, 52, 432, 508, RGBA8(255, 255, 255, 28));
+  vita2d_draw_line(432, 52, 432, 508, RGBA8(255, 255, 255, 20));
 
   draw_text(font_, 18, 84, kColorText, kTextScaleNormal, "Saves");
 
@@ -294,16 +299,16 @@ void Ui::draw_title_grid(const std::vector<SaveRecord> &saves, std::size_t selec
       const int x = kStartX + col * (kTileSize + kGapX);
       const int y = kStartY + row * (kTileSize + kGapY);
       if (index >= saves.size()) {
-        vita2d_draw_rectangle(x, y, kTileSize, kTileSize, RGBA8(255, 255, 255, 10));
+        vita2d_draw_rectangle(x, y, kTileSize, kTileSize, RGBA8(255, 255, 255, 8));
         continue;
       }
 
       const bool is_selected = index == selected;
       const SaveRecord &save = saves[index];
       vita2d_draw_rectangle(x - 3, y - 3, kTileSize + 6, kTileSize + 6,
-                            is_selected ? kColorAccent : RGBA8(255, 255, 255, 18));
+                            is_selected ? kColorAccent : RGBA8(255, 255, 255, 14));
       vita2d_draw_rectangle(x, y, kTileSize, kTileSize,
-                            is_selected ? RGBA8(219, 234, 254, 255) : kColorPanelAlt);
+                            is_selected ? RGBA8(25, 45, 64, 255) : kColorPanelAlt);
 
       const int pad = is_selected ? 4 : 8;
       const int icon_size = kTileSize - pad * 2;
@@ -342,8 +347,9 @@ void Ui::draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t sel
   draw_text(font_, 456, 84, kColorText, kTextScaleNormal, "Backups");
   const SaveRecord *save = selected_record(saves, selected_save);
 
-  const char *google_action = google_user_code.empty() ? "Google: footer button connects / refreshes"
-                                                       : "Scan QR, then press Google again";
+  const char *google_action =
+      google_user_code.empty() ? "Local snapshots and [GD] remote backups"
+                               : "Scan QR, then press Google again";
   draw_text(font_, 456, 112, kColorMuted, 0.78f, google_action);
 
   if (!save) {

@@ -1,6 +1,7 @@
 #include "vita/SaveAppDbMetadata.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <psp2/sysmodule.h>
 #include <string>
 #include <unordered_map>
@@ -12,6 +13,7 @@ int sqlite3_open_v2(const char *filename, sqlite3 **database, int flags, const c
 int sqlite3_close(sqlite3 *database);
 int sqlite3_exec(sqlite3 *database, const char *sql,
                  int (*callback)(void *, int, char **, char **), void *context, char **error);
+const char *sqlite3_errmsg(sqlite3 *database);
 void sqlite3_free(void *value);
 }
 
@@ -19,6 +21,7 @@ namespace vsm::vita {
 namespace {
 
 constexpr int kSqliteOk = 0;
+constexpr int kSqliteOpenReadwrite = 0x00000002;
 constexpr int kSqliteOpenReadonly = 0x00000001;
 constexpr const char *kAppDbPath = "ur0:/shell/db/app.db";
 
@@ -88,6 +91,14 @@ void apply_title_metadata(const AppDbTitle &title, SaveRecord *save) {
   }
 }
 
+std::string format_sqlite_open_error(int result_code, sqlite3 *database) {
+  char message[128];
+  const char *detail = database ? sqlite3_errmsg(database) : "no database handle";
+  std::snprintf(message, sizeof(message), "Could not open Vita app database (%d: %s).",
+                result_code, detail ? detail : "unknown error");
+  return message;
+}
+
 } // namespace
 
 AppDbMetadataResult apply_app_db_metadata(std::vector<SaveRecord> *saves) {
@@ -100,9 +111,21 @@ AppDbMetadataResult apply_app_db_metadata(std::vector<SaveRecord> *saves) {
   sceSysmoduleLoadModule(SCE_SYSMODULE_SQLITE);
 
   sqlite3 *database = nullptr;
-  const int open_result = sqlite3_open_v2(kAppDbPath, &database, kSqliteOpenReadonly, nullptr);
+  // SaveCloud Vita opens the shell app database read/write before querying title/icon metadata.
+  // Matching that mode avoids a Vita-side open failure seen with read-only access on hardware.
+  int open_result = sqlite3_open_v2(kAppDbPath, &database, kSqliteOpenReadwrite, nullptr);
+  if (open_result != kSqliteOk && database) {
+    sqlite3_close(database);
+    database = nullptr;
+  }
   if (open_result != kSqliteOk || !database) {
-    result.error = "Could not open Vita app database.";
+    open_result = sqlite3_open_v2(kAppDbPath, &database, kSqliteOpenReadonly, nullptr);
+  }
+  if (open_result != kSqliteOk || !database) {
+    result.error = format_sqlite_open_error(open_result, database);
+    if (database) {
+      sqlite3_close(database);
+    }
     return result;
   }
 
