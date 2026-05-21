@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(vsm_core
+  src/core/BackupArchive.cpp
   src/core/BackupList.cpp
   src/core/BackupName.cpp
   src/core/PathUtil.cpp

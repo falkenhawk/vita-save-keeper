@@ -82,13 +82,14 @@ void Ui::shutdown() {
   vita2d_fini();
 }
 
-void Ui::draw(const std::vector<SaveRecord> &saves, std::size_t selected_save) {
+void Ui::draw(const std::vector<SaveRecord> &saves, std::size_t selected_save,
+              const std::string &status_message) {
   vita2d_start_drawing();
   vita2d_clear_screen();
 
   draw_header();
   draw_title_grid(saves, selected_save);
-  draw_backup_panel(saves, selected_save);
+  draw_backup_panel(saves, selected_save, status_message);
   draw_footer();
 
   vita2d_end_drawing();
@@ -157,7 +158,8 @@ void Ui::draw_title_grid(const std::vector<SaveRecord> &saves, std::size_t selec
   }
 }
 
-void Ui::draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t selected_save) const {
+void Ui::draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t selected_save,
+                           const std::string &status_message) const {
   vita2d_draw_rectangle(432, 52, 528, 456, RGBA8(15, 23, 42, 255));
   draw_text(font_, 456, 84, kColorText, kTextScaleNormal, "Backups");
   const SaveRecord *save = selected_record(saves, selected_save);
@@ -165,6 +167,10 @@ void Ui::draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t sel
   if (!save) {
     draw_text(font_, 456, 128, kColorMuted, kTextScaleSmall,
               "Install or create saves, then reopen Save Keeper.");
+    if (!status_message.empty()) {
+      const std::string status = truncate_label(status_message, 58);
+      draw_text(font_, 456, 430, kColorMuted, kTextScaleSmall, status.c_str());
+    }
     return;
   }
 
@@ -189,8 +195,10 @@ void Ui::draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t sel
     y += 46;
   }
 
-  draw_text(font_, 456, 430, kColorMuted, kTextScaleSmall,
-            "Backup creation and restore come next.");
+  const std::string status =
+      status_message.empty() ? "O creates a local timestamped ZIP snapshot."
+                             : truncate_label(status_message, 58);
+  draw_text(font_, 456, 430, kColorMuted, kTextScaleSmall, status.c_str());
 }
 
 void Ui::draw_footer() const {

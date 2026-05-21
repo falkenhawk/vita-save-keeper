@@ -1,3 +1,4 @@
+#include "core/BackupArchive.hpp"
 #include "core/BackupList.hpp"
 #include "core/BackupName.hpp"
 #include "core/PathUtil.hpp"
@@ -7,7 +8,9 @@
 #include <cstdlib>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -39,6 +42,40 @@ void expect_eq(std::size_t actual, std::size_t expected, const char *expression,
 
 #define EXPECT_TRUE(expression) expect_true((expression), #expression, __LINE__)
 #define EXPECT_EQ(actual, expected) expect_eq((actual), (expected), #actual, __LINE__)
+
+std::uint16_t read_le16(const std::vector<unsigned char> &data, std::size_t offset) {
+  return static_cast<std::uint16_t>(data[offset]) |
+         static_cast<std::uint16_t>(data[offset + 1] << 8);
+}
+
+std::uint32_t read_le32(const std::vector<unsigned char> &data, std::size_t offset) {
+  return static_cast<std::uint32_t>(data[offset]) |
+         (static_cast<std::uint32_t>(data[offset + 1]) << 8) |
+         (static_cast<std::uint32_t>(data[offset + 2]) << 16) |
+         (static_cast<std::uint32_t>(data[offset + 3]) << 24);
+}
+
+std::vector<std::string> read_zip_central_directory_names(const std::filesystem::path &zip_path) {
+  std::ifstream input(zip_path, std::ios::binary);
+  const std::vector<unsigned char> data((std::istreambuf_iterator<char>(input)),
+                                        std::istreambuf_iterator<char>());
+
+  std::vector<std::string> names;
+  for (std::size_t offset = 0; offset + 46 <= data.size(); ++offset) {
+    if (read_le32(data, offset) != 0x02014b50) {
+      continue;
+    }
+
+    const std::uint16_t name_length = read_le16(data, offset + 28);
+    const std::uint16_t extra_length = read_le16(data, offset + 30);
+    const std::uint16_t comment_length = read_le16(data, offset + 32);
+    const std::size_t name_offset = offset + 46;
+    EXPECT_TRUE(name_offset + name_length <= data.size());
+    names.emplace_back(reinterpret_cast<const char *>(&data[name_offset]), name_length);
+    offset = name_offset + name_length + extra_length + comment_length - 1;
+  }
+  return names;
+}
 
 void test_timestamped_backup_name_uses_jksv_style_zip_name() {
   const vsm::BackupTimestamp timestamp{2026, 5, 21, 16, 14};
@@ -110,6 +147,37 @@ void test_selection_wraps_and_handles_empty_lists() {
   EXPECT_EQ(vsm::move_selection(12, 0, -1), static_cast<std::size_t>(0));
 }
 
+void test_backup_archive_creates_timestamped_zip_snapshot() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-archive-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source" / "sce_sys");
+  std::filesystem::create_directories(base / "backups");
+  {
+    std::ofstream(base / "source" / "data.bin", std::ios::binary) << "save-data";
+    std::ofstream(base / "source" / "sce_sys" / "icon0.png", std::ios::binary) << "icon-data";
+  }
+
+  const vsm::BackupResult result = vsm::create_backup_archive({
+      (base / "source").string(),
+      (base / "backups").string(),
+      "PCSE00120: Persona/4",
+      {2026, 5, 21, 16, 14},
+  });
+
+  EXPECT_TRUE(result.ok);
+  EXPECT_EQ(result.archive_path,
+            (base / "backups" / "PCSE00120_ Persona_4" / "2026-05-21 16-14.zip").string());
+  EXPECT_TRUE(std::filesystem::exists(result.archive_path));
+
+  const std::vector<std::string> names = read_zip_central_directory_names(result.archive_path);
+  EXPECT_EQ(names.size(), static_cast<std::size_t>(2));
+  EXPECT_EQ(names[0], "data.bin");
+  EXPECT_EQ(names[1], "sce_sys/icon0.png");
+
+  std::filesystem::remove_all(base);
+}
+
 } // namespace
 
 int main() {
@@ -119,6 +187,7 @@ int main() {
   test_path_component_normalization_replaces_unsafe_characters();
   test_save_scanner_lists_direct_child_save_directories();
   test_selection_wraps_and_handles_empty_lists();
+  test_backup_archive_creates_timestamped_zip_snapshot();
 
   std::cout << "vsm_core_tests passed\n";
   return 0;

@@ -1,22 +1,42 @@
 #include "vita/App.hpp"
 
+#include "core/BackupArchive.hpp"
 #include "core/SaveScanner.hpp"
 #include "core/Selection.hpp"
 
 #include <psp2/ctrl.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
+#include <ctime>
+#include <string>
 #include <vector>
 
 namespace vsm::vita {
 namespace {
 
 constexpr int kFrameDelayUs = 16 * 1000;
+constexpr const char *kBackupRoot = "ux0:data/save-keeper/backups";
 
 std::vector<SaveRoot> default_save_roots() {
   return {
       {SavePlatform::Vita, "ux0:user/00/savedata"},
       {SavePlatform::Psp, "ux0:pspemu/PSP/SAVEDATA"},
+  };
+}
+
+BackupTimestamp current_backup_timestamp() {
+  const std::time_t now = std::time(nullptr);
+  const std::tm *local = std::localtime(&now);
+  if (!local) {
+    return {1980, 1, 1, 0, 0};
+  }
+
+  return {
+      local->tm_year + 1900,
+      local->tm_mon + 1,
+      local->tm_mday,
+      local->tm_hour,
+      local->tm_min,
   };
 }
 
@@ -57,8 +77,23 @@ int App::run() {
     if ((pressed & SCE_CTRL_DOWN) != 0) {
       selected_save_ = move_selection(selected_save_, saves_.size(), 4);
     }
+    if ((pressed & SCE_CTRL_CIRCLE) != 0) {
+      if (saves_.empty()) {
+        status_message_ = "No save selected.";
+      } else {
+        const SaveRecord &save = saves_[selected_save_ % saves_.size()];
+        const BackupResult result = create_backup_archive({
+            save.path,
+            kBackupRoot,
+            save.id,
+            current_backup_timestamp(),
+        });
+        status_message_ = result.ok ? "Created " + result.archive_path
+                                    : "Backup failed: " + result.error;
+      }
+    }
 
-    ui_.draw(saves_, selected_save_);
+    ui_.draw(saves_, selected_save_, status_message_);
     previous_buttons = pad.buttons;
 
     // This keeps the placeholder loop from busy-spinning. Vita2d swaps on vblank when configured,

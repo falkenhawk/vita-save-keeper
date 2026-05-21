@@ -10,10 +10,10 @@ This repository currently contains the first buildable foundation:
 - local/remote backup menu entries, with only remote entries shown as `[GD] ...`
 - path component normalization for future local and Google Drive folder names
 - startup discovery for Vita saves and PSP/Adrenaline saves
+- local timestamped ZIP backup creation
 - a native `vita2d` UI preview that builds into a VPK
 
-ZIP archive creation, Google OAuth, Drive upload, Drive download, and restore are not implemented
-yet.
+Google OAuth, Drive upload, Drive download, and restore are not implemented yet.
 
 ## Target behavior
 
@@ -59,6 +59,8 @@ The current foundation scans these roots at startup:
 
 - `ux0:user/00/savedata`
 - `ux0:pspemu/PSP/SAVEDATA`
+
+Local backups are written under `ux0:data/save-keeper/backups`.
 
 ## Comment style
 
