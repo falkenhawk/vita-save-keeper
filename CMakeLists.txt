@@ -11,6 +11,7 @@ add_library(vsm_core
   src/core/BackupList.cpp
   src/core/BackupName.cpp
   src/core/BackupStore.cpp
+  src/core/GoogleAuth.cpp
   src/core/PathUtil.cpp
   src/core/SaveScanner.cpp
   src/core/Selection.cpp

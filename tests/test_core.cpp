@@ -2,6 +2,7 @@
 #include "core/BackupList.hpp"
 #include "core/BackupName.hpp"
 #include "core/BackupStore.hpp"
+#include "core/GoogleAuth.hpp"
 #include "core/PathUtil.hpp"
 #include "core/SaveScanner.hpp"
 #include "core/Selection.hpp"
@@ -280,6 +281,27 @@ void test_backup_store_builds_normalized_archive_path() {
             "/backups/PCSE00120_ Persona_4/2026-05-21 16-14.zip");
 }
 
+void test_google_auth_builds_device_code_request_body() {
+  EXPECT_EQ(vsm::build_device_code_request_body("client id"),
+            "client_id=client%20id&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.file");
+}
+
+void test_google_auth_builds_token_poll_request_body() {
+  EXPECT_EQ(vsm::build_device_token_request_body("client id", "client secret", "device/code"),
+            "client_id=client%20id&client_secret=client%20secret&device_code=device%2Fcode&"
+            "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code");
+}
+
+void test_google_auth_builds_refresh_request_body() {
+  EXPECT_EQ(vsm::build_refresh_token_request_body("client id", "client secret", "refresh/token"),
+            "client_id=client%20id&client_secret=client%20secret&refresh_token=refresh%2Ftoken&"
+            "grant_type=refresh_token");
+}
+
+void test_google_drive_root_folder_name_is_psv_saves() {
+  EXPECT_EQ(std::string(vsm::kGoogleDriveRootFolderName), "PSV Saves");
+}
+
 } // namespace
 
 int main() {
@@ -294,6 +316,10 @@ int main() {
   test_backup_archive_missing_file_does_not_clear_destination();
   test_backup_store_lists_local_zip_backups_newest_first();
   test_backup_store_builds_normalized_archive_path();
+  test_google_auth_builds_device_code_request_body();
+  test_google_auth_builds_token_poll_request_body();
+  test_google_auth_builds_refresh_request_body();
+  test_google_drive_root_folder_name_is_psv_saves();
 
   std::cout << "vsm_core_tests passed\n";
   return 0;
