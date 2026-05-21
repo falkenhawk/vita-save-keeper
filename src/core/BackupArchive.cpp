@@ -11,6 +11,7 @@
 #include <dirent.h>
 #include <string>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -30,6 +31,15 @@ struct ZipEntry {
   std::uint32_t crc32{};
   std::uint32_t size{};
   std::uint32_t local_header_offset{};
+};
+
+struct LocalZipHeader {
+  std::uint16_t flags{};
+  std::uint16_t method{};
+  std::uint32_t crc32{};
+  std::uint32_t compressed_size{};
+  std::uint32_t uncompressed_size{};
+  std::string name;
 };
 
 std::string join_path(const std::string &parent, const std::string &child) {
@@ -63,6 +73,12 @@ bool is_regular_file(const std::string &path) {
 BackupResult error_result(std::string archive_path, std::string error) {
   BackupResult result;
   result.archive_path = std::move(archive_path);
+  result.error = std::move(error);
+  return result;
+}
+
+RestoreResult restore_error(std::string error) {
+  RestoreResult result;
   result.error = std::move(error);
   return result;
 }
@@ -104,6 +120,76 @@ bool ensure_directory(const std::string &path) {
   }
 
   return true;
+}
+
+bool remove_tree(const std::string &path) {
+  struct stat info {};
+  if (stat(path.c_str(), &info) != 0) {
+    return errno == ENOENT;
+  }
+
+  if (S_ISDIR(info.st_mode)) {
+    DIR *dir = opendir(path.c_str());
+    if (!dir) {
+      return false;
+    }
+
+    bool ok = true;
+    while (dirent *entry = readdir(dir)) {
+      if (is_dot_entry(entry->d_name)) {
+        continue;
+      }
+      ok = remove_tree(join_path(path, entry->d_name)) && ok;
+    }
+    closedir(dir);
+    return rmdir(path.c_str()) == 0 && ok;
+  }
+
+  return std::remove(path.c_str()) == 0;
+}
+
+bool clear_directory_contents(const std::string &path) {
+  if (!ensure_directory(path)) {
+    return false;
+  }
+
+  DIR *dir = opendir(path.c_str());
+  if (!dir) {
+    return false;
+  }
+
+  bool ok = true;
+  while (dirent *entry = readdir(dir)) {
+    if (is_dot_entry(entry->d_name)) {
+      continue;
+    }
+    ok = remove_tree(join_path(path, entry->d_name)) && ok;
+  }
+  closedir(dir);
+  return ok;
+}
+
+bool move_directory_contents(const std::string &source_path, const std::string &destination_path) {
+  if (!ensure_directory(destination_path)) {
+    return false;
+  }
+
+  DIR *dir = opendir(source_path.c_str());
+  if (!dir) {
+    return false;
+  }
+
+  bool ok = true;
+  while (dirent *entry = readdir(dir)) {
+    if (is_dot_entry(entry->d_name)) {
+      continue;
+    }
+    ok = std::rename(join_path(source_path, entry->d_name).c_str(),
+                     join_path(destination_path, entry->d_name).c_str()) == 0 &&
+         ok;
+  }
+  closedir(dir);
+  return ok;
 }
 
 bool collect_files(const std::string &directory_path, const std::string &relative_path,
@@ -210,6 +296,32 @@ bool write_u32(FILE *output, std::uint32_t value) {
   return write_bytes(output, bytes, sizeof(bytes));
 }
 
+bool read_bytes(FILE *input, void *data, std::size_t size) {
+  return std::fread(data, 1, size, input) == size;
+}
+
+bool read_u16(FILE *input, std::uint16_t *value) {
+  unsigned char bytes[2] {};
+  if (!read_bytes(input, bytes, sizeof(bytes))) {
+    return false;
+  }
+  *value = static_cast<std::uint16_t>(bytes[0]) |
+           static_cast<std::uint16_t>(static_cast<std::uint16_t>(bytes[1]) << 8U);
+  return true;
+}
+
+bool read_u32(FILE *input, std::uint32_t *value) {
+  unsigned char bytes[4] {};
+  if (!read_bytes(input, bytes, sizeof(bytes))) {
+    return false;
+  }
+  *value = static_cast<std::uint32_t>(bytes[0]) |
+           (static_cast<std::uint32_t>(bytes[1]) << 8U) |
+           (static_cast<std::uint32_t>(bytes[2]) << 16U) |
+           (static_cast<std::uint32_t>(bytes[3]) << 24U);
+  return true;
+}
+
 bool current_offset(FILE *file, std::uint32_t *offset) {
   const long value = std::ftell(file);
   if (value < 0 || static_cast<unsigned long>(value) > 0xffffffffUL) {
@@ -282,6 +394,128 @@ bool write_end_of_central_directory(FILE *zip, std::uint16_t entry_count,
          write_u16(zip, entry_count) && write_u16(zip, entry_count) &&
          write_u32(zip, central_directory_size) && write_u32(zip, central_directory_offset) &&
          write_u16(zip, 0);
+}
+
+bool skip_bytes(FILE *input, std::uint32_t size) {
+  return std::fseek(input, static_cast<long>(size), SEEK_CUR) == 0;
+}
+
+bool read_string(FILE *input, std::uint16_t size, std::string *value) {
+  value->assign(size, '\0');
+  return size == 0 || read_bytes(input, &(*value)[0], size);
+}
+
+bool read_local_header_after_signature(FILE *zip, LocalZipHeader *header) {
+  std::uint16_t version = 0;
+  std::uint16_t modified_time = 0;
+  std::uint16_t modified_date = 0;
+  std::uint16_t name_length = 0;
+  std::uint16_t extra_length = 0;
+  return read_u16(zip, &version) && read_u16(zip, &header->flags) &&
+         read_u16(zip, &header->method) && read_u16(zip, &modified_time) &&
+         read_u16(zip, &modified_date) && read_u32(zip, &header->crc32) &&
+         read_u32(zip, &header->compressed_size) && read_u32(zip, &header->uncompressed_size) &&
+         read_u16(zip, &name_length) && read_u16(zip, &extra_length) &&
+         read_string(zip, name_length, &header->name) && skip_bytes(zip, extra_length);
+}
+
+bool is_safe_zip_entry_path(const std::string &path) {
+  if (path.empty() || path.front() == '/' || path.find('\\') != std::string::npos ||
+      path.find(':') != std::string::npos) {
+    return false;
+  }
+
+  std::size_t start = 0;
+  while (start <= path.size()) {
+    const std::size_t slash = path.find('/', start);
+    const std::size_t end = slash == std::string::npos ? path.size() : slash;
+    const std::string part = path.substr(start, end - start);
+    if (part.empty() || part == "." || part == "..") {
+      return false;
+    }
+    if (slash == std::string::npos) {
+      return true;
+    }
+    start = slash + 1;
+  }
+
+  return true;
+}
+
+bool ensure_parent_directory(const std::string &path) {
+  const std::size_t slash = path.find_last_of('/');
+  if (slash == std::string::npos) {
+    return true;
+  }
+  return ensure_directory(path.substr(0, slash));
+}
+
+bool extract_stored_file(FILE *zip, const LocalZipHeader &header,
+                         const std::string &destination_path) {
+  if (!ensure_parent_directory(destination_path)) {
+    return false;
+  }
+
+  FILE *output = std::fopen(destination_path.c_str(), "wb");
+  if (!output) {
+    return false;
+  }
+
+  std::array<unsigned char, kCopyBufferSize> buffer {};
+  std::uint32_t remaining = header.compressed_size;
+  std::uint32_t crc = 0;
+  while (remaining > 0) {
+    const std::size_t chunk = std::min<std::size_t>(buffer.size(), remaining);
+    if (!read_bytes(zip, buffer.data(), chunk)) {
+      std::fclose(output);
+      return false;
+    }
+    if (!write_bytes(output, buffer.data(), chunk)) {
+      std::fclose(output);
+      return false;
+    }
+    crc = update_crc32(crc, buffer.data(), chunk);
+    remaining -= static_cast<std::uint32_t>(chunk);
+  }
+
+  if (std::fclose(output) != 0) {
+    return false;
+  }
+  return crc == header.crc32;
+}
+
+bool extract_archive_to_directory(FILE *zip, const std::string &destination_path) {
+  while (true) {
+    std::uint32_t signature = 0;
+    if (!read_u32(zip, &signature)) {
+      return std::feof(zip) != 0;
+    }
+
+    if (signature == 0x02014b50 || signature == 0x06054b50) {
+      return true;
+    }
+    if (signature != 0x04034b50) {
+      return false;
+    }
+
+    LocalZipHeader header;
+    if (!read_local_header_after_signature(zip, &header)) {
+      return false;
+    }
+
+    // Restore only the ZIP shape Save Keeper writes today: store-method file entries with known
+    // sizes in the local header. Rejecting other forms keeps restore predictable before cloud data
+    // can introduce archives not produced by this app.
+    if ((header.flags & 0x0008U) != 0 || header.method != 0 ||
+        header.compressed_size != header.uncompressed_size ||
+        !is_safe_zip_entry_path(header.name)) {
+      return false;
+    }
+
+    if (!extract_stored_file(zip, header, join_path(destination_path, header.name))) {
+      return false;
+    }
+  }
 }
 
 } // namespace
@@ -365,6 +599,39 @@ BackupResult create_backup_archive(const BackupRequest &request) {
   BackupResult result;
   result.ok = true;
   result.archive_path = archive_path;
+  return result;
+}
+
+RestoreResult restore_backup_archive(const RestoreRequest &request) {
+  if (request.destination_path.empty() || request.destination_path == "/") {
+    return restore_error("destination path is unsafe");
+  }
+
+  FILE *zip = std::fopen(request.archive_path.c_str(), "rb");
+  if (!zip) {
+    return restore_error("could not open archive");
+  }
+
+  const std::string staging_path = request.destination_path + ".restore-tmp";
+  remove_tree(staging_path);
+  const bool ok = ensure_directory(staging_path) && extract_archive_to_directory(zip, staging_path);
+  std::fclose(zip);
+  if (!ok) {
+    remove_tree(staging_path);
+    return restore_error("could not restore archive");
+  }
+  if (!clear_directory_contents(request.destination_path)) {
+    remove_tree(staging_path);
+    return restore_error("could not clear destination save");
+  }
+  if (!move_directory_contents(staging_path, request.destination_path)) {
+    remove_tree(staging_path);
+    return restore_error("could not replace destination save");
+  }
+  remove_tree(staging_path);
+
+  RestoreResult result;
+  result.ok = true;
   return result;
 }
 

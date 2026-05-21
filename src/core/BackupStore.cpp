@@ -40,17 +40,20 @@ bool has_zip_extension(const std::string &name) {
                       kZipExtension) == 0;
 }
 
-} // namespace
-
-std::vector<std::string> scan_local_backup_names(const std::string &backup_root,
-                                                 const std::string &save_id) {
+std::string normalized_save_folder(const std::string &save_id) {
   std::string save_folder = normalize_path_component(save_id);
   if (save_folder.empty()) {
     save_folder = "unknown-save";
   }
+  return save_folder;
+}
 
+} // namespace
+
+std::vector<std::string> scan_local_backup_names(const std::string &backup_root,
+                                                 const std::string &save_id) {
   std::vector<std::string> backups;
-  const std::string backup_directory = join_path(backup_root, save_folder);
+  const std::string backup_directory = join_path(backup_root, normalized_save_folder(save_id));
   DIR *dir = opendir(backup_directory.c_str());
   if (!dir) {
     // Backup folders are created lazily when the first snapshot is made. Missing folders should
@@ -74,6 +77,11 @@ std::vector<std::string> scan_local_backup_names(const std::string &backup_root,
   // order puts the newest restore point at the top of the controller menu.
   std::sort(backups.rbegin(), backups.rend());
   return backups;
+}
+
+std::string local_backup_archive_path(const std::string &backup_root, const std::string &save_id,
+                                      const std::string &backup_name) {
+  return join_path(join_path(backup_root, normalized_save_folder(save_id)), backup_name);
 }
 
 } // namespace vsm

@@ -179,6 +179,79 @@ void test_backup_archive_creates_timestamped_zip_snapshot() {
   std::filesystem::remove_all(base);
 }
 
+void test_backup_archive_restores_snapshot_and_removes_stale_files() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-restore-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source" / "sce_sys");
+  std::filesystem::create_directories(base / "backups");
+  {
+    std::ofstream(base / "source" / "data.bin", std::ios::binary) << "save-data";
+    std::ofstream(base / "source" / "sce_sys" / "icon0.png", std::ios::binary) << "icon-data";
+  }
+
+  const vsm::BackupResult backup = vsm::create_backup_archive({
+      (base / "source").string(),
+      (base / "backups").string(),
+      "PCSE00120",
+      {2026, 5, 21, 16, 14},
+  });
+  EXPECT_TRUE(backup.ok);
+
+  std::filesystem::remove_all(base / "source");
+  std::filesystem::create_directories(base / "source" / "sce_sys");
+  {
+    std::ofstream(base / "source" / "data.bin", std::ios::binary) << "stale-data";
+    std::ofstream(base / "source" / "extra.bin", std::ios::binary) << "should-go-away";
+    std::ofstream(base / "source" / "sce_sys" / "icon0.png", std::ios::binary) << "stale-icon";
+  }
+
+  const vsm::RestoreResult restore = vsm::restore_backup_archive({
+      backup.archive_path,
+      (base / "source").string(),
+  });
+
+  EXPECT_TRUE(restore.ok);
+  EXPECT_TRUE(!std::filesystem::exists(base / "source" / "extra.bin"));
+  EXPECT_TRUE(std::filesystem::exists(base / "source" / "data.bin"));
+  EXPECT_TRUE(std::filesystem::exists(base / "source" / "sce_sys" / "icon0.png"));
+
+  std::ifstream data_file(base / "source" / "data.bin", std::ios::binary);
+  const std::string data((std::istreambuf_iterator<char>(data_file)),
+                         std::istreambuf_iterator<char>());
+  EXPECT_EQ(data, "save-data");
+
+  std::ifstream icon_file(base / "source" / "sce_sys" / "icon0.png", std::ios::binary);
+  const std::string icon((std::istreambuf_iterator<char>(icon_file)),
+                         std::istreambuf_iterator<char>());
+  EXPECT_EQ(icon, "icon-data");
+
+  std::filesystem::remove_all(base);
+}
+
+void test_backup_archive_missing_file_does_not_clear_destination() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-missing-restore-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source");
+  std::ofstream(base / "source" / "data.bin", std::ios::binary) << "keep-me";
+
+  const vsm::RestoreResult restore = vsm::restore_backup_archive({
+      (base / "missing.zip").string(),
+      (base / "source").string(),
+  });
+
+  EXPECT_TRUE(!restore.ok);
+  EXPECT_TRUE(std::filesystem::exists(base / "source" / "data.bin"));
+
+  std::ifstream data_file(base / "source" / "data.bin", std::ios::binary);
+  const std::string data((std::istreambuf_iterator<char>(data_file)),
+                         std::istreambuf_iterator<char>());
+  EXPECT_EQ(data, "keep-me");
+
+  std::filesystem::remove_all(base);
+}
+
 void test_backup_store_lists_local_zip_backups_newest_first() {
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() / "save-keeper-backup-store-test";
@@ -201,6 +274,12 @@ void test_backup_store_lists_local_zip_backups_newest_first() {
   std::filesystem::remove_all(base);
 }
 
+void test_backup_store_builds_normalized_archive_path() {
+  EXPECT_EQ(vsm::local_backup_archive_path("/backups", "PCSE00120: Persona/4",
+                                           "2026-05-21 16-14.zip"),
+            "/backups/PCSE00120_ Persona_4/2026-05-21 16-14.zip");
+}
+
 } // namespace
 
 int main() {
@@ -211,7 +290,10 @@ int main() {
   test_save_scanner_lists_direct_child_save_directories();
   test_selection_wraps_and_handles_empty_lists();
   test_backup_archive_creates_timestamped_zip_snapshot();
+  test_backup_archive_restores_snapshot_and_removes_stale_files();
+  test_backup_archive_missing_file_does_not_clear_destination();
   test_backup_store_lists_local_zip_backups_newest_first();
+  test_backup_store_builds_normalized_archive_path();
 
   std::cout << "vsm_core_tests passed\n";
   return 0;

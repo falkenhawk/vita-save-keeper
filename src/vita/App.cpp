@@ -46,19 +46,65 @@ BackupTimestamp current_backup_timestamp() {
 void App::refresh_local_backups() {
   if (saves_.empty()) {
     local_backups_.clear();
+    selected_backup_ = 0;
     return;
   }
 
   const SaveRecord &save = saves_[selected_save_ % saves_.size()];
   local_backups_ = scan_local_backup_names(kBackupRoot, save.id);
+  if (selected_backup_ >= local_backups_.size()) {
+    selected_backup_ = 0;
+  }
 }
 
 void App::move_selected_save(int delta) {
   const std::size_t previous = selected_save_;
   selected_save_ = move_selection(selected_save_, saves_.size(), delta);
   if (selected_save_ != previous) {
+    cancel_restore_confirmation();
     refresh_local_backups();
   }
+}
+
+void App::move_selected_backup(int delta) {
+  const std::size_t previous = selected_backup_;
+  selected_backup_ = move_selection(selected_backup_, local_backups_.size(), delta);
+  if (selected_backup_ != previous) {
+    cancel_restore_confirmation();
+  }
+}
+
+void App::cancel_restore_confirmation() {
+  if (restore_confirmation_pending_) {
+    restore_confirmation_pending_ = false;
+    status_message_ = "Restore cancelled.";
+  }
+}
+
+void App::handle_restore_button() {
+  if (saves_.empty()) {
+    status_message_ = "No save selected.";
+    return;
+  }
+  if (local_backups_.empty()) {
+    status_message_ = "No local backup selected.";
+    return;
+  }
+
+  const std::string &backup_name = local_backups_[selected_backup_ % local_backups_.size()];
+  if (!restore_confirmation_pending_) {
+    restore_confirmation_pending_ = true;
+    status_message_ = "Press Square again to restore " + backup_name + ".";
+    return;
+  }
+
+  const SaveRecord &save = saves_[selected_save_ % saves_.size()];
+  const RestoreResult result = restore_backup_archive({
+      local_backup_archive_path(kBackupRoot, save.id, backup_name),
+      save.path,
+  });
+  restore_confirmation_pending_ = false;
+  status_message_ = result.ok ? "Restored " + backup_name : "Restore failed: " + result.error;
 }
 
 int App::run() {
@@ -97,7 +143,14 @@ int App::run() {
     if ((pressed & SCE_CTRL_DOWN) != 0) {
       move_selected_save(4);
     }
+    if ((pressed & SCE_CTRL_LTRIGGER) != 0) {
+      move_selected_backup(-1);
+    }
+    if ((pressed & SCE_CTRL_RTRIGGER) != 0) {
+      move_selected_backup(1);
+    }
     if ((pressed & SCE_CTRL_CIRCLE) != 0) {
+      restore_confirmation_pending_ = false;
       if (saves_.empty()) {
         status_message_ = "No save selected.";
       } else {
@@ -115,8 +168,15 @@ int App::run() {
         }
       }
     }
+    if ((pressed & SCE_CTRL_SQUARE) != 0) {
+      handle_restore_button();
+    }
+    if ((pressed & SCE_CTRL_CROSS) != 0) {
+      cancel_restore_confirmation();
+    }
 
-    ui_.draw(saves_, selected_save_, local_backups_, status_message_);
+    ui_.draw(saves_, selected_save_, local_backups_, selected_backup_,
+             restore_confirmation_pending_, status_message_);
     previous_buttons = pad.buttons;
 
     // This keeps the placeholder loop from busy-spinning. Vita2d swaps on vblank when configured,

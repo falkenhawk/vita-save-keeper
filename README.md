@@ -12,9 +12,10 @@ This repository currently contains the first buildable foundation:
 - startup discovery for Vita saves and PSP/Adrenaline saves
 - local timestamped ZIP backup creation
 - local backup listing for the selected save
+- local backup restore with a second-press confirmation
 - a native `vita2d` UI preview that builds into a VPK
 
-Google OAuth, Drive upload, Drive download, and restore are not implemented yet.
+Google OAuth, Drive upload, and Drive download are not implemented yet.
 
 ## Target behavior
 
