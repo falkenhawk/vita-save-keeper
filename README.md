@@ -18,7 +18,7 @@ This repository currently contains the first buildable foundation:
 - Google Drive listing and download-then-restore for `[GD]` ZIP backups
 - a native `vita2d` UI preview that builds into a VPK
 
-Delete/rename flows and QR rendering are not implemented yet.
+Delete/rename flows are not implemented yet.
 
 ## Target behavior
 
@@ -78,6 +78,10 @@ the token cache to `ux0:data/save-keeper/google-token.json`.
 After auth, press `Triangle` to refresh remote backups for the selected save. Press `Select` to
 upload the selected local backup. Press `Square` on a local backup to restore it, or on a `[GD]`
 backup to download it locally and then restore it.
+
+## Third-party code
+
+- `third_party/qrcodegen`: Project Nayuki QR Code generator, MIT License.
 
 ## Comment style
 

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <qrcodegen.hpp>
 #include <string>
 #include <vector>
 #include <vita2d.h>
@@ -60,6 +61,30 @@ const SaveRecord *selected_record(const std::vector<SaveRecord> &saves,
     return nullptr;
   }
   return &saves[selected_save % saves.size()];
+}
+
+void draw_qr_code(const std::string &value, int x, int y, int module_size) {
+  if (value.empty()) {
+    return;
+  }
+
+  const qrcodegen::QrCode qr =
+      qrcodegen::QrCode::encodeText(value.c_str(), qrcodegen::QrCode::Ecc::LOW);
+  constexpr int kQuietZone = 2;
+  const int size = qr.getSize();
+  vita2d_draw_rectangle(x, y, (size + kQuietZone * 2) * module_size,
+                        (size + kQuietZone * 2) * module_size,
+                        RGBA8(255, 255, 255, 255));
+
+  for (int row = 0; row < size; ++row) {
+    for (int col = 0; col < size; ++col) {
+      if (qr.getModule(col, row)) {
+        vita2d_draw_rectangle(x + (col + kQuietZone) * module_size,
+                              y + (row + kQuietZone) * module_size, module_size, module_size,
+                              RGBA8(15, 23, 42, 255));
+      }
+    }
+  }
 }
 
 } // namespace
@@ -233,6 +258,7 @@ void Ui::draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t sel
     const std::string code = "Code: " + google_user_code;
     draw_text(font_, 456, 408, kColorText, kTextScaleSmall, url.c_str());
     draw_text(font_, 456, 434, kColorAccent, kTextScaleSmall, code.c_str());
+    draw_qr_code(google_verification_url, 782, 348, 3);
   }
 
   const std::string status =

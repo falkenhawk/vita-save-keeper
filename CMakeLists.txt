@@ -45,9 +45,11 @@ else()
     src/vita/main.cpp
     src/vita/net/HttpClient.cpp
     src/vita/ui/Ui.cpp
+    third_party/qrcodegen/qrcodegen.cpp
   )
   target_include_directories(save-keeper PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/qrcodegen
   )
   target_link_libraries(save-keeper PRIVATE
     vsm_core
