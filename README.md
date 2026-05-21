@@ -11,6 +11,7 @@ This repository currently contains the first buildable foundation:
 - path component normalization for future local and Google Drive folder names
 - startup discovery for Vita saves and PSP/Adrenaline saves
 - local timestamped ZIP backup creation
+- local backup listing for the selected save
 - a native `vita2d` UI preview that builds into a VPK
 
 Google OAuth, Drive upload, Drive download, and restore are not implemented yet.

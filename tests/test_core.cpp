@@ -1,6 +1,7 @@
 #include "core/BackupArchive.hpp"
 #include "core/BackupList.hpp"
 #include "core/BackupName.hpp"
+#include "core/BackupStore.hpp"
 #include "core/PathUtil.hpp"
 #include "core/SaveScanner.hpp"
 #include "core/Selection.hpp"
@@ -178,6 +179,28 @@ void test_backup_archive_creates_timestamped_zip_snapshot() {
   std::filesystem::remove_all(base);
 }
 
+void test_backup_store_lists_local_zip_backups_newest_first() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-backup-store-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "PCSE00120_ Persona_4");
+  {
+    std::ofstream(base / "PCSE00120_ Persona_4" / "2026-05-20 22-31.zip") << "old";
+    std::ofstream(base / "PCSE00120_ Persona_4" / "2026-05-21 16-14.zip") << "new";
+    std::ofstream(base / "PCSE00120_ Persona_4" / "not-a-backup.txt") << "ignore";
+  }
+
+  const std::vector<std::string> backups =
+      vsm::scan_local_backup_names(base.string(), "PCSE00120: Persona/4");
+
+  EXPECT_EQ(backups.size(), static_cast<std::size_t>(2));
+  EXPECT_EQ(backups[0], "2026-05-21 16-14.zip");
+  EXPECT_EQ(backups[1], "2026-05-20 22-31.zip");
+  EXPECT_TRUE(vsm::scan_local_backup_names(base.string(), "missing-save").empty());
+
+  std::filesystem::remove_all(base);
+}
+
 } // namespace
 
 int main() {
@@ -188,6 +211,7 @@ int main() {
   test_save_scanner_lists_direct_child_save_directories();
   test_selection_wraps_and_handles_empty_lists();
   test_backup_archive_creates_timestamped_zip_snapshot();
+  test_backup_store_lists_local_zip_backups_newest_first();
 
   std::cout << "vsm_core_tests passed\n";
   return 0;

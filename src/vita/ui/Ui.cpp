@@ -83,13 +83,14 @@ void Ui::shutdown() {
 }
 
 void Ui::draw(const std::vector<SaveRecord> &saves, std::size_t selected_save,
+              const std::vector<std::string> &local_backups,
               const std::string &status_message) {
   vita2d_start_drawing();
   vita2d_clear_screen();
 
   draw_header();
   draw_title_grid(saves, selected_save);
-  draw_backup_panel(saves, selected_save, status_message);
+  draw_backup_panel(saves, selected_save, local_backups, status_message);
   draw_footer();
 
   vita2d_end_drawing();
@@ -159,6 +160,7 @@ void Ui::draw_title_grid(const std::vector<SaveRecord> &saves, std::size_t selec
 }
 
 void Ui::draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t selected_save,
+                           const std::vector<std::string> &local_backups,
                            const std::string &status_message) const {
   vita2d_draw_rectangle(432, 52, 528, 456, RGBA8(15, 23, 42, 255));
   draw_text(font_, 456, 84, kColorText, kTextScaleNormal, "Backups");
@@ -169,7 +171,7 @@ void Ui::draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t sel
               "Install or create saves, then reopen Save Keeper.");
     if (!status_message.empty()) {
       const std::string status = truncate_label(status_message, 58);
-      draw_text(font_, 456, 430, kColorMuted, kTextScaleSmall, status.c_str());
+      draw_text(font_, 456, 462, kColorMuted, kTextScaleSmall, status.c_str());
     }
     return;
   }
@@ -177,12 +179,12 @@ void Ui::draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t sel
   const std::string selected_label = truncate_label(save->display_name, 36);
   draw_text(font_, 456, 110, kColorMuted, kTextScaleSmall, selected_label.c_str());
 
-  const std::vector<BackupEntry> entries = build_backup_menu(
-      {"2026-05-21 16-14.zip", "2026-05-20 22-31.zip"}, {"2026-05-19 09-05.zip"});
+  const std::vector<BackupEntry> entries = build_backup_menu({}, local_backups);
 
   int y = 136;
-  for (std::size_t i = 0; i < entries.size(); ++i) {
-    const bool selected = i == 1;
+  const std::size_t visible_count = std::min<std::size_t>(entries.size(), 6);
+  for (std::size_t i = 0; i < visible_count; ++i) {
+    const bool selected = i == 0;
     const unsigned int bg = selected ? kColorAccentSoft : RGBA8(255, 255, 255, 18);
     vita2d_draw_rectangle(456, y, 460, 38, bg);
     if (selected) {
@@ -195,10 +197,16 @@ void Ui::draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t sel
     y += 46;
   }
 
+  if (local_backups.empty()) {
+    draw_text(font_, 470, 208, kColorMuted, kTextScaleSmall, "No local backups yet");
+  } else if (entries.size() > visible_count) {
+    draw_text(font_, 470, 414, kColorMuted, kTextScaleSmall, "More backups hidden");
+  }
+
   const std::string status =
       status_message.empty() ? "O creates a local timestamped ZIP snapshot."
                              : truncate_label(status_message, 58);
-  draw_text(font_, 456, 430, kColorMuted, kTextScaleSmall, status.c_str());
+  draw_text(font_, 456, 462, kColorMuted, kTextScaleSmall, status.c_str());
 }
 
 void Ui::draw_footer() const {

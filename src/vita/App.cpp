@@ -1,6 +1,7 @@
 #include "vita/App.hpp"
 
 #include "core/BackupArchive.hpp"
+#include "core/BackupStore.hpp"
 #include "core/SaveScanner.hpp"
 #include "core/Selection.hpp"
 
@@ -42,6 +43,24 @@ BackupTimestamp current_backup_timestamp() {
 
 } // namespace
 
+void App::refresh_local_backups() {
+  if (saves_.empty()) {
+    local_backups_.clear();
+    return;
+  }
+
+  const SaveRecord &save = saves_[selected_save_ % saves_.size()];
+  local_backups_ = scan_local_backup_names(kBackupRoot, save.id);
+}
+
+void App::move_selected_save(int delta) {
+  const std::size_t previous = selected_save_;
+  selected_save_ = move_selection(selected_save_, saves_.size(), delta);
+  if (selected_save_ != previous) {
+    refresh_local_backups();
+  }
+}
+
 int App::run() {
   if (!ui_.initialize()) {
     return -1;
@@ -50,6 +69,7 @@ int App::run() {
   // Scan once at startup for the foundation build. Later actions that create, restore, or delete a
   // save will refresh this list explicitly so the UI does not rescan storage every frame.
   saves_ = scan_save_roots(default_save_roots());
+  refresh_local_backups();
 
   sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
 
@@ -66,16 +86,16 @@ int App::run() {
       running = false;
     }
     if ((pressed & SCE_CTRL_LEFT) != 0) {
-      selected_save_ = move_selection(selected_save_, saves_.size(), -1);
+      move_selected_save(-1);
     }
     if ((pressed & SCE_CTRL_RIGHT) != 0) {
-      selected_save_ = move_selection(selected_save_, saves_.size(), 1);
+      move_selected_save(1);
     }
     if ((pressed & SCE_CTRL_UP) != 0) {
-      selected_save_ = move_selection(selected_save_, saves_.size(), -4);
+      move_selected_save(-4);
     }
     if ((pressed & SCE_CTRL_DOWN) != 0) {
-      selected_save_ = move_selection(selected_save_, saves_.size(), 4);
+      move_selected_save(4);
     }
     if ((pressed & SCE_CTRL_CIRCLE) != 0) {
       if (saves_.empty()) {
@@ -90,10 +110,13 @@ int App::run() {
         });
         status_message_ = result.ok ? "Created " + result.archive_path
                                     : "Backup failed: " + result.error;
+        if (result.ok) {
+          refresh_local_backups();
+        }
       }
     }
 
-    ui_.draw(saves_, selected_save_, status_message_);
+    ui_.draw(saves_, selected_save_, local_backups_, status_message_);
     previous_buttons = pad.buttons;
 
     // This keeps the placeholder loop from busy-spinning. Vita2d swaps on vblank when configured,

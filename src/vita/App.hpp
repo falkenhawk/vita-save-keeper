@@ -14,7 +14,11 @@ public:
   int run();
 
 private:
+  void refresh_local_backups();
+  void move_selected_save(int delta);
+
   std::vector<SaveRecord> saves_;
+  std::vector<std::string> local_backups_;
   std::size_t selected_save_{};
   std::string status_message_;
   Ui ui_;

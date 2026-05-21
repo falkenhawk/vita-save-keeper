@@ -10,6 +10,7 @@ add_library(vsm_core
   src/core/BackupArchive.cpp
   src/core/BackupList.cpp
   src/core/BackupName.cpp
+  src/core/BackupStore.cpp
   src/core/PathUtil.cpp
   src/core/SaveScanner.cpp
   src/core/Selection.cpp

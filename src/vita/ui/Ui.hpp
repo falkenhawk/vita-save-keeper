@@ -15,12 +15,13 @@ public:
   bool initialize();
   void shutdown();
   void draw(const std::vector<SaveRecord> &saves, std::size_t selected_save,
-            const std::string &status_message);
+            const std::vector<std::string> &local_backups, const std::string &status_message);
 
 private:
   void draw_header() const;
   void draw_title_grid(const std::vector<SaveRecord> &saves, std::size_t selected_save) const;
   void draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t selected_save,
+                         const std::vector<std::string> &local_backups,
                          const std::string &status_message) const;
   void draw_footer() const;
 
