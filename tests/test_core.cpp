@@ -3,6 +3,7 @@
 #include "core/BackupName.hpp"
 #include "core/BackupStore.hpp"
 #include "core/GoogleAuth.hpp"
+#include "core/GoogleConfig.hpp"
 #include "core/PathUtil.hpp"
 #include "core/SaveScanner.hpp"
 #include "core/Selection.hpp"
@@ -337,6 +338,33 @@ void test_google_auth_parses_token_success_response() {
   EXPECT_EQ(response.expires_in, 3920);
 }
 
+void test_google_config_parses_downloaded_client_json() {
+  const vsm::GoogleClientCredentials credentials = vsm::parse_google_client_credentials(
+      "{\"installed\":{\"client_id\":\"client-id.apps.googleusercontent.com\","
+      "\"client_secret\":\"client-secret\"}}");
+
+  EXPECT_TRUE(credentials.ok);
+  EXPECT_EQ(credentials.client_id, "client-id.apps.googleusercontent.com");
+  EXPECT_EQ(credentials.client_secret, "client-secret");
+}
+
+void test_google_config_serializes_and_parses_token_cache() {
+  vsm::GoogleTokenCache original;
+  original.access_token = "access";
+  original.refresh_token = "refresh";
+  original.token_type = "Bearer";
+  original.expires_at_epoch_seconds = 123456;
+
+  const std::string json = vsm::serialize_google_token_cache(original);
+  const vsm::GoogleTokenCache cache = vsm::parse_google_token_cache(json);
+
+  EXPECT_TRUE(cache.ok);
+  EXPECT_EQ(cache.access_token, "access");
+  EXPECT_EQ(cache.refresh_token, "refresh");
+  EXPECT_EQ(cache.token_type, "Bearer");
+  EXPECT_EQ(cache.expires_at_epoch_seconds, static_cast<long long>(123456));
+}
+
 } // namespace
 
 int main() {
@@ -358,6 +386,8 @@ int main() {
   test_google_auth_parses_device_code_success_response();
   test_google_auth_parses_token_pending_error();
   test_google_auth_parses_token_success_response();
+  test_google_config_parses_downloaded_client_json();
+  test_google_config_serializes_and_parses_token_cache();
 
   std::cout << "vsm_core_tests passed\n";
   return 0;
