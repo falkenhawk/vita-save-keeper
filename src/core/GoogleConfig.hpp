@@ -19,6 +19,7 @@ struct GoogleTokenCache {
 };
 
 GoogleClientCredentials parse_google_client_credentials(const std::string &json);
+GoogleClientCredentials embedded_google_client_credentials();
 std::string serialize_google_token_cache(const GoogleTokenCache &cache);
 GoogleTokenCache parse_google_token_cache(const std::string &json);
 

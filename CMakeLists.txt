@@ -5,6 +5,14 @@ project(save_keeper VERSION 0.1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(SAVE_KEEPER_GOOGLE_CLIENT_ID "" CACHE STRING "Google OAuth client ID to embed in the Vita app")
+set(SAVE_KEEPER_GOOGLE_CLIENT_SECRET "" CACHE STRING "Google OAuth client secret to embed in the Vita app")
+
+function(save_keeper_escape_definition OUTPUT_NAME VALUE)
+  string(REPLACE "\\" "\\\\" ESCAPED_VALUE "${VALUE}")
+  string(REPLACE "\"" "\\\"" ESCAPED_VALUE "${ESCAPED_VALUE}")
+  set(${OUTPUT_NAME} "${ESCAPED_VALUE}" PARENT_SCOPE)
+endfunction()
 
 add_library(vsm_core
   src/core/BackupArchive.cpp
@@ -22,6 +30,16 @@ add_library(vsm_core
 target_include_directories(vsm_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
+if(SAVE_KEEPER_GOOGLE_CLIENT_ID AND SAVE_KEEPER_GOOGLE_CLIENT_SECRET)
+  save_keeper_escape_definition(SAVE_KEEPER_ESCAPED_GOOGLE_CLIENT_ID
+                                "${SAVE_KEEPER_GOOGLE_CLIENT_ID}")
+  save_keeper_escape_definition(SAVE_KEEPER_ESCAPED_GOOGLE_CLIENT_SECRET
+                                "${SAVE_KEEPER_GOOGLE_CLIENT_SECRET}")
+  target_compile_definitions(vsm_core PUBLIC
+    SAVE_KEEPER_GOOGLE_CLIENT_ID="${SAVE_KEEPER_ESCAPED_GOOGLE_CLIENT_ID}"
+    SAVE_KEEPER_GOOGLE_CLIENT_SECRET="${SAVE_KEEPER_ESCAPED_GOOGLE_CLIENT_SECRET}"
+  )
+endif()
 
 if(NOT VITA)
   include(CTest)
@@ -89,5 +107,6 @@ else()
     FILE sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
     FILE sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
     FILE sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
+    FILE sce_sys/resources/font.pgf sce_sys/resources/font.pgf
   )
 endif()

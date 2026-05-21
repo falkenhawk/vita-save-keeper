@@ -442,6 +442,12 @@ void test_google_config_parses_downloaded_client_json() {
   EXPECT_EQ(credentials.client_secret, "client-secret");
 }
 
+void test_embedded_google_client_credentials_default_empty() {
+  const vsm::GoogleClientCredentials credentials = vsm::embedded_google_client_credentials();
+
+  EXPECT_TRUE(!credentials.ok);
+}
+
 void test_google_config_serializes_and_parses_token_cache() {
   vsm::GoogleTokenCache original;
   original.access_token = "access";
@@ -516,6 +522,7 @@ int main() {
   test_google_auth_parses_token_pending_error();
   test_google_auth_parses_token_success_response();
   test_google_config_parses_downloaded_client_json();
+  test_embedded_google_client_credentials_default_empty();
   test_google_config_serializes_and_parses_token_cache();
   test_google_drive_builds_folder_metadata_json();
   test_google_drive_builds_find_folder_query();

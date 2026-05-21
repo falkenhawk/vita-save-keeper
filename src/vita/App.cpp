@@ -296,9 +296,14 @@ bool App::load_google_credentials() {
     return true;
   }
 
+  google_credentials_ = embedded_google_client_credentials();
+  if (google_credentials_.ok) {
+    return true;
+  }
+
   std::string json;
   if (!read_text_file(kGoogleClientPath, &json)) {
-    status_message_ = "Google setup: add ux0:data/save-keeper/google-client.json.";
+    status_message_ = "This build has no bundled Google client.";
     return false;
   }
 

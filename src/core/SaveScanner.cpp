@@ -110,6 +110,7 @@ void apply_sfo_metadata(SaveRecord *save) {
     save->icon_path = first_existing_file({
         join_path(join_path(save->path, "sce_sys"), "icon0.png"),
         join_path(join_path(save->path, "sce_sys"), "ICON0.PNG"),
+        join_path(join_path("ur0:appmeta", metadata_title_id), "icon0.png"),
         join_path(join_path("ux0:appmeta", metadata_title_id), "icon0.png"),
     });
   }

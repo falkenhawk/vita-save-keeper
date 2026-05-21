@@ -1,9 +1,11 @@
 #include "vita/SaveAppDbMetadata.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
 #include <psp2/sysmodule.h>
 #include <string>
+#include <sys/stat.h>
 #include <unordered_map>
 #include <utility>
 
@@ -24,6 +26,8 @@ constexpr int kSqliteOk = 0;
 constexpr int kSqliteOpenReadwrite = 0x00000002;
 constexpr int kSqliteOpenReadonly = 0x00000001;
 constexpr const char *kAppDbPath = "ur0:/shell/db/app.db";
+constexpr const char *kDataRoot = "ux0:data/save-keeper";
+constexpr const char *kAppDbCopyPath = "ux0:data/save-keeper/app.db";
 
 struct AppDbTitle {
   std::string title_id;
@@ -81,6 +85,42 @@ index_by_title_id(const std::vector<AppDbTitle> &titles) {
   return indexed;
 }
 
+bool ensure_directory(const char *path) {
+  return mkdir(path, 0777) == 0 || errno == EEXIST;
+}
+
+bool copy_file(const char *source_path, const char *target_path) {
+  FILE *source = std::fopen(source_path, "rb");
+  if (!source) {
+    return false;
+  }
+
+  ensure_directory(kDataRoot);
+  FILE *target = std::fopen(target_path, "wb");
+  if (!target) {
+    std::fclose(source);
+    return false;
+  }
+
+  char buffer[16 * 1024];
+  bool ok = true;
+  while (true) {
+    const std::size_t read = std::fread(buffer, 1, sizeof(buffer), source);
+    if (read > 0 && std::fwrite(buffer, 1, read, target) != read) {
+      ok = false;
+      break;
+    }
+    if (read < sizeof(buffer)) {
+      ok = std::ferror(source) == 0;
+      break;
+    }
+  }
+
+  ok = std::fclose(target) == 0 && ok;
+  std::fclose(source);
+  return ok;
+}
+
 void apply_title_metadata(const AppDbTitle &title, SaveRecord *save) {
   save->title_id = title.title_id;
   if (!title.title.empty()) {
@@ -111,15 +151,23 @@ AppDbMetadataResult apply_app_db_metadata(std::vector<SaveRecord> *saves) {
   sceSysmoduleLoadModule(SCE_SYSMODULE_SQLITE);
 
   sqlite3 *database = nullptr;
-  // SaveCloud Vita opens the shell app database read/write before querying title/icon metadata.
-  // Matching that mode avoids a Vita-side open failure seen with read-only access on hardware.
-  int open_result = sqlite3_open_v2(kAppDbPath, &database, kSqliteOpenReadwrite, nullptr);
+  int open_result = sqlite3_open_v2(kAppDbPath, &database, kSqliteOpenReadonly, nullptr);
   if (open_result != kSqliteOk && database) {
     sqlite3_close(database);
     database = nullptr;
   }
   if (open_result != kSqliteOk || !database) {
-    open_result = sqlite3_open_v2(kAppDbPath, &database, kSqliteOpenReadonly, nullptr);
+    // Some Vita homebrew uses sqlite3_rw_init before opening app.db directly. That private helper
+    // is not available in this build, so if SQLite refuses the shell DB path, copy the DB with
+    // plain file I/O and query the local snapshot instead.
+    if (!copy_file(kAppDbPath, kAppDbCopyPath)) {
+      result.error = format_sqlite_open_error(open_result, database);
+      if (database) {
+        sqlite3_close(database);
+      }
+      return result;
+    }
+    open_result = sqlite3_open_v2(kAppDbCopyPath, &database, kSqliteOpenReadonly, nullptr);
   }
   if (open_result != kSqliteOk || !database) {
     result.error = format_sqlite_open_error(open_result, database);
@@ -132,27 +180,17 @@ AppDbMetadataResult apply_app_db_metadata(std::vector<SaveRecord> *saves) {
   AppDbContext context;
   char *error = nullptr;
   // SaveCloud Vita uses this same app.db relationship: tbl_appinfo stores a game title ID and a
-  // separate "realid" value, and the save directory is named by that realid. tbl_appinfo_icon
-  // supplies both the human title and the system icon path. Querying this table avoids guessing
-  // titles from save folder names such as ADRBUBMAN.
+  // separate "realid" value, and the save directory is often named by that realid. Querying every
+  // title with an icon covers homebrew saves such as BHBB00001 as well as retail PCSB/PCSE games.
   constexpr const char *kQuery =
-      "select a.titleid, b.realid, c.title, e.iconpath"
-      "  from (select titleid"
+      "select b.titleid, b.realid, c.title, c.iconpath"
+      "  from (select titleid, val as realid"
       "          from tbl_appinfo"
-      "         where key = 566916785"
-      "           and titleid like 'PCS%'"
-      "         order by titleid) a,"
-      "       (select titleid, val as realid"
-      "          from tbl_appinfo"
-      "         where key = 278217076) b,"
-      "       tbl_appinfo_icon c,"
-      "       (select titleid, iconpath"
-      "          from tbl_appinfo_icon"
-      "         where type = 0) e"
-      " where a.titleid = b.titleid"
-      "   and a.titleid = c.titleid"
-      "   and a.titleid = e.titleid"
-      " order by a.titleid";
+      "         where key = 278217076) b"
+      "  join tbl_appinfo_icon c"
+      "    on b.titleid = c.titleid"
+      "   and c.type = 0"
+      " order by b.titleid";
 
   const int exec_result = sqlite3_exec(database, kQuery, app_db_callback, &context, &error);
   if (error) {

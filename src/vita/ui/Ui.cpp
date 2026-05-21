@@ -21,10 +21,11 @@ constexpr unsigned int kColorAccent = RGBA8(56, 189, 248, 255);
 constexpr unsigned int kColorAccentSoft = RGBA8(56, 189, 248, 40);
 constexpr unsigned int kColorText = RGBA8(232, 238, 246, 255);
 constexpr unsigned int kColorMuted = RGBA8(166, 178, 198, 255);
+constexpr const char *kBundledFontPath = "app0:sce_sys/resources/font.pgf";
 
-constexpr float kTextScaleSmall = 0.82f;
-constexpr float kTextScaleNormal = 0.98f;
-constexpr float kTextScaleTitle = 1.16f;
+constexpr float kTextScaleSmall = 0.84f;
+constexpr float kTextScaleNormal = 1.0f;
+constexpr float kTextScaleTitle = 1.0f;
 
 enum class ButtonSymbol {
   Circle,
@@ -34,10 +35,10 @@ enum class ButtonSymbol {
   Select,
 };
 
-void draw_text(vita2d_pvf *font, int x, int y, unsigned int color, float scale,
+void draw_text(vita2d_pgf *font, int x, int y, unsigned int color, float scale,
                const char *text) {
   if (font) {
-    vita2d_pvf_draw_text(font, x, y, color, scale, text);
+    vita2d_pgf_draw_text(font, x, y, color, scale, text);
   }
 }
 
@@ -139,7 +140,7 @@ void draw_texture_fit(vita2d_texture *texture, int x, int y, int size) {
                             y + (size - draw_height) / 2.0f, scale, scale);
 }
 
-void draw_placeholder_icon(vita2d_pvf *font, const SaveRecord &save, int x, int y, int size,
+void draw_placeholder_icon(vita2d_pgf *font, const SaveRecord &save, int x, int y, int size,
                            bool selected) {
   const unsigned int tile = selected ? RGBA8(29, 49, 69, 255) : RGBA8(35, 49, 69, 255);
   vita2d_draw_rectangle(x, y, size, size, tile);
@@ -157,7 +158,7 @@ void draw_placeholder_icon(vita2d_pvf *font, const SaveRecord &save, int x, int 
 }
 
 void draw_button_shape(int x, int y, ButtonSymbol symbol, unsigned int color,
-                       vita2d_pvf *font) {
+                       vita2d_pgf *font) {
   switch (symbol) {
   case ButtonSymbol::Circle:
     vita2d_draw_fill_circle(x + 8, y + 8, 8, color);
@@ -185,7 +186,7 @@ void draw_button_shape(int x, int y, ButtonSymbol symbol, unsigned int color,
   }
 }
 
-void draw_hint(vita2d_pvf *font, int x, ButtonSymbol symbol, const char *label) {
+void draw_hint(vita2d_pgf *font, int x, ButtonSymbol symbol, const char *label) {
   const int y = 518;
   draw_button_shape(x, y - 10, symbol, kColorMuted, font);
   const int label_x = symbol == ButtonSymbol::Select ? x + 42 : x + 22;
@@ -200,7 +201,10 @@ bool Ui::initialize() {
   }
 
   vita2d_set_clear_color(kColorBackground);
-  font_ = vita2d_load_default_pvf();
+  font_ = vita2d_load_custom_pgf(kBundledFontPath);
+  if (!font_) {
+    font_ = vita2d_load_default_pgf();
+  }
   return font_ != nullptr;
 }
 
@@ -213,7 +217,7 @@ void Ui::shutdown() {
   icon_cache_.clear();
 
   if (font_) {
-    vita2d_free_pvf(font_);
+    vita2d_free_pgf(font_);
     font_ = nullptr;
   }
   vita2d_fini();

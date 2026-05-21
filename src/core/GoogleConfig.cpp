@@ -6,6 +6,14 @@
 #include <sstream>
 #include <string>
 
+#ifndef SAVE_KEEPER_GOOGLE_CLIENT_ID
+#define SAVE_KEEPER_GOOGLE_CLIENT_ID ""
+#endif
+
+#ifndef SAVE_KEEPER_GOOGLE_CLIENT_SECRET
+#define SAVE_KEEPER_GOOGLE_CLIENT_SECRET ""
+#endif
+
 namespace vsm {
 namespace {
 
@@ -84,6 +92,14 @@ GoogleClientCredentials parse_google_client_credentials(const std::string &json)
   GoogleClientCredentials credentials;
   find_json_string(json, "client_id", &credentials.client_id);
   find_json_string(json, "client_secret", &credentials.client_secret);
+  credentials.ok = !credentials.client_id.empty() && !credentials.client_secret.empty();
+  return credentials;
+}
+
+GoogleClientCredentials embedded_google_client_credentials() {
+  GoogleClientCredentials credentials;
+  credentials.client_id = SAVE_KEEPER_GOOGLE_CLIENT_ID;
+  credentials.client_secret = SAVE_KEEPER_GOOGLE_CLIENT_SECRET;
   credentials.ok = !credentials.client_id.empty() && !credentials.client_secret.empty();
   return credentials;
 }
