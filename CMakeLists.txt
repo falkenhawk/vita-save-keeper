@@ -42,6 +42,7 @@ else()
   add_executable(save-keeper
     src/vita/App.cpp
     src/vita/main.cpp
+    src/vita/net/HttpClient.cpp
     src/vita/ui/Ui.cpp
   )
   target_include_directories(save-keeper PRIVATE
@@ -49,6 +50,10 @@ else()
   )
   target_link_libraries(save-keeper PRIVATE
     vsm_core
+    curl
+    ssl
+    crypto
+    zstd
     vita2d
     png
     z
@@ -59,10 +64,14 @@ else()
     SceCommonDialog_stub
     SceDisplay_stub
     SceGxm_stub
+    SceHttp_stub
     SceKernelThreadMgr_stub
     SceLibKernel_stub
+    SceNetCtl_stub
+    SceNet_stub
     ScePgf_stub
     ScePvf_stub
+    SceSsl_stub
     SceSysmodule_stub
   )
 
