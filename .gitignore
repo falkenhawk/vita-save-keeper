@@ -1,0 +1,11 @@
+.serena/
+.superpowers/
+
+build/
+*.elf
+*.self
+*.vpk
+*.o
+*.a
+*.d
+*.log
