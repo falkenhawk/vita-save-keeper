@@ -96,6 +96,12 @@ std::string build_drive_find_folder_query(const std::string &folder_name,
   return "q=" + form_url_encode(query) + "&fields=files%28id%2Cname%29";
 }
 
+std::string build_drive_list_children_query(const std::string &parent_id) {
+  const std::string query =
+      "'" + drive_query_escape(parent_id) + "' in parents and trashed=false";
+  return "q=" + form_url_encode(query) + "&fields=files%28id%2Cname%29";
+}
+
 DriveFileList parse_drive_file_list(const std::string &json) {
   DriveFileList result;
   std::size_t cursor = 0;

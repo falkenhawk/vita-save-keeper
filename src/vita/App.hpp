@@ -11,6 +11,11 @@
 
 namespace vsm::vita {
 
+struct RemoteBackup {
+  std::string name;
+  std::string file_id;
+};
+
 class App {
 public:
   int run();
@@ -29,6 +34,11 @@ private:
   bool ensure_google_access_token();
   std::string find_or_create_drive_folder(const std::string &folder_name,
                                           const std::string &parent_id);
+  void refresh_remote_backups();
+  std::vector<std::string> remote_backup_names() const;
+  std::size_t backup_count() const;
+  bool selected_backup_is_remote() const;
+  std::string selected_backup_name() const;
   void handle_upload_button();
 
   GoogleClientCredentials google_credentials_;
@@ -36,6 +46,7 @@ private:
   DeviceCodeResponse device_code_;
   std::vector<SaveRecord> saves_;
   std::vector<std::string> local_backups_;
+  std::vector<RemoteBackup> remote_backups_;
   std::size_t selected_save_{};
   std::size_t selected_backup_{};
   bool restore_confirmation_pending_{};

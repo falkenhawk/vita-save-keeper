@@ -83,6 +83,7 @@ void Ui::shutdown() {
 }
 
 void Ui::draw(const std::vector<SaveRecord> &saves, std::size_t selected_save,
+              const std::vector<std::string> &remote_backups,
               const std::vector<std::string> &local_backups, std::size_t selected_backup,
               bool restore_confirmation_pending, bool google_connected, bool google_auth_pending,
               const std::string &google_verification_url, const std::string &google_user_code,
@@ -92,7 +93,7 @@ void Ui::draw(const std::vector<SaveRecord> &saves, std::size_t selected_save,
 
   draw_header(google_connected, google_auth_pending);
   draw_title_grid(saves, selected_save);
-  draw_backup_panel(saves, selected_save, local_backups, selected_backup,
+  draw_backup_panel(saves, selected_save, remote_backups, local_backups, selected_backup,
                     restore_confirmation_pending, google_verification_url, google_user_code,
                     status_message);
   draw_footer();
@@ -167,6 +168,7 @@ void Ui::draw_title_grid(const std::vector<SaveRecord> &saves, std::size_t selec
 }
 
 void Ui::draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t selected_save,
+                           const std::vector<std::string> &remote_backups,
                            const std::vector<std::string> &local_backups,
                            std::size_t selected_backup, bool restore_confirmation_pending,
                            const std::string &google_verification_url,
@@ -189,28 +191,25 @@ void Ui::draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t sel
   const std::string selected_label = truncate_label(save->display_name, 36);
   draw_text(font_, 456, 110, kColorMuted, kTextScaleSmall, selected_label.c_str());
 
-  constexpr std::size_t kVisibleLocalBackups = 5;
-  const std::size_t selected_local =
-      local_backups.empty() ? 0 : selected_backup % local_backups.size();
+  constexpr std::size_t kVisibleBackups = 5;
+  const std::vector<BackupEntry> all_entries = build_backup_menu(remote_backups, local_backups);
+  const std::size_t selectable_count = remote_backups.size() + local_backups.size();
+  const std::size_t selected_entry = selectable_count == 0 ? 0 : 1 + selected_backup;
   const std::size_t backup_window =
-      local_backups.size() <= kVisibleLocalBackups
+      all_entries.size() <= kVisibleBackups + 1
           ? 0
-          : std::min(selected_local, local_backups.size() - kVisibleLocalBackups);
+          : std::min(selected_entry, all_entries.size() - (kVisibleBackups + 1));
 
-  std::vector<std::string> visible_local_backups;
+  std::vector<BackupEntry> entries;
   for (std::size_t i = backup_window;
-       i < local_backups.size() && visible_local_backups.size() < kVisibleLocalBackups; ++i) {
-    visible_local_backups.push_back(local_backups[i]);
+       i < all_entries.size() && entries.size() < kVisibleBackups + 1; ++i) {
+    entries.push_back(all_entries[i]);
   }
 
-  const std::vector<BackupEntry> entries = build_backup_menu({}, visible_local_backups);
-
   int y = 136;
-  const std::size_t selected_entry =
-      local_backups.empty() ? 0 : 1 + (selected_local - backup_window);
   const std::size_t visible_count = entries.size();
   for (std::size_t i = 0; i < visible_count; ++i) {
-    const bool selected = i == selected_entry;
+    const bool selected = (i + backup_window) == selected_entry;
     const unsigned int bg = selected ? kColorAccentSoft : RGBA8(255, 255, 255, 18);
     vita2d_draw_rectangle(456, y, 460, 38, bg);
     if (selected) {
@@ -223,9 +222,9 @@ void Ui::draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t sel
     y += 46;
   }
 
-  if (local_backups.empty()) {
-    draw_text(font_, 470, 208, kColorMuted, kTextScaleSmall, "No local backups yet");
-  } else if (entries.size() > visible_count && google_user_code.empty()) {
+  if (selectable_count == 0) {
+    draw_text(font_, 470, 208, kColorMuted, kTextScaleSmall, "No backups yet");
+  } else if (all_entries.size() > entries.size() && google_user_code.empty()) {
     draw_text(font_, 470, 414, kColorMuted, kTextScaleSmall, "More backups hidden");
   }
 

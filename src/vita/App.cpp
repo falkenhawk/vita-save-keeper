@@ -67,6 +67,38 @@ bool ensure_directory(const char *path) {
   return false;
 }
 
+bool ensure_directory_path(const std::string &path) {
+  std::string current;
+  std::size_t start = 0;
+  while (start <= path.size()) {
+    const std::size_t slash = path.find('/', start);
+    const std::size_t end = slash == std::string::npos ? path.size() : slash;
+    const std::string part = path.substr(start, end - start);
+    if (!part.empty()) {
+      if (!current.empty()) {
+        current += "/";
+      }
+      current += part;
+      if (mkdir(current.c_str(), 0777) != 0 && errno != EEXIST) {
+        return false;
+      }
+    }
+    if (slash == std::string::npos) {
+      break;
+    }
+    start = slash + 1;
+  }
+  return true;
+}
+
+bool ensure_parent_directory(const std::string &path) {
+  const std::size_t slash = path.find_last_of('/');
+  if (slash == std::string::npos) {
+    return true;
+  }
+  return ensure_directory_path(path.substr(0, slash));
+}
+
 bool read_text_file(const char *path, std::string *contents) {
   FILE *file = std::fopen(path, "rb");
   if (!file) {
@@ -116,7 +148,7 @@ void App::refresh_local_backups() {
 
   const SaveRecord &save = saves_[selected_save_ % saves_.size()];
   local_backups_ = scan_local_backup_names(kBackupRoot, save.id);
-  if (selected_backup_ >= local_backups_.size()) {
+  if (selected_backup_ >= backup_count()) {
     selected_backup_ = 0;
   }
 }
@@ -126,13 +158,14 @@ void App::move_selected_save(int delta) {
   selected_save_ = move_selection(selected_save_, saves_.size(), delta);
   if (selected_save_ != previous) {
     cancel_restore_confirmation();
+    remote_backups_.clear();
     refresh_local_backups();
   }
 }
 
 void App::move_selected_backup(int delta) {
   const std::size_t previous = selected_backup_;
-  selected_backup_ = move_selection(selected_backup_, local_backups_.size(), delta);
+  selected_backup_ = move_selection(selected_backup_, backup_count(), delta);
   if (selected_backup_ != previous) {
     cancel_restore_confirmation();
   }
@@ -150,12 +183,11 @@ void App::handle_restore_button() {
     status_message_ = "No save selected.";
     return;
   }
-  if (local_backups_.empty()) {
-    status_message_ = "No local backup selected.";
+  if (backup_count() == 0) {
+    status_message_ = "No backup selected.";
     return;
   }
-
-  const std::string &backup_name = local_backups_[selected_backup_ % local_backups_.size()];
+  const std::string backup_name = selected_backup_name();
   if (!restore_confirmation_pending_) {
     restore_confirmation_pending_ = true;
     status_message_ = "Press Square again to restore " + backup_name + ".";
@@ -163,12 +195,40 @@ void App::handle_restore_button() {
   }
 
   const SaveRecord &save = saves_[selected_save_ % saves_.size()];
+  std::string archive_path = local_backup_archive_path(kBackupRoot, save.id, backup_name);
+  const bool remote_restore = selected_backup_is_remote();
+  if (remote_restore) {
+    if (!ensure_google_access_token()) {
+      restore_confirmation_pending_ = false;
+      return;
+    }
+    const RemoteBackup &remote = remote_backups_[selected_backup_ % remote_backups_.size()];
+    if (!ensure_parent_directory(archive_path)) {
+      status_message_ = "Could not create local backup folder.";
+      restore_confirmation_pending_ = false;
+      return;
+    }
+    HttpClient http;
+    const std::string download_url = std::string(kDriveFilesEndpoint) + "/" +
+                                     form_url_encode(remote.file_id) + "?alt=media";
+    const HttpResponse download =
+        http.download_file(download_url, archive_path, google_token_cache_.access_token);
+    if (!download.ok) {
+      restore_confirmation_pending_ = false;
+      status_message_ = "Drive download failed.";
+      return;
+    }
+    refresh_local_backups();
+  }
+
   const RestoreResult result = restore_backup_archive({
-      local_backup_archive_path(kBackupRoot, save.id, backup_name),
+      archive_path,
       save.path,
   });
   restore_confirmation_pending_ = false;
-  status_message_ = result.ok ? "Restored " + backup_name : "Restore failed: " + result.error;
+  status_message_ = result.ok ? (remote_restore ? "Downloaded and restored [GD] " + backup_name
+                                                : "Restored " + backup_name)
+                              : "Restore failed: " + result.error;
 }
 
 void App::load_google_token_cache() {
@@ -207,6 +267,11 @@ void App::handle_google_button() {
 
   HttpClient http;
   if (!google_auth_pending_) {
+    if (google_connected_) {
+      refresh_remote_backups();
+      return;
+    }
+
     const HttpResponse response =
         http.post_form(kGoogleDeviceCodeEndpoint,
                        build_device_code_request_body(google_credentials_.client_id));
@@ -334,12 +399,94 @@ std::string App::find_or_create_drive_folder(const std::string &folder_name,
   return created.files[0].id;
 }
 
+void App::refresh_remote_backups() {
+  remote_backups_.clear();
+  if (selected_backup_ >= backup_count()) {
+    selected_backup_ = 0;
+  }
+  if (saves_.empty()) {
+    status_message_ = "No save selected.";
+    return;
+  }
+  if (!ensure_google_access_token()) {
+    return;
+  }
+
+  const SaveRecord &save = saves_[selected_save_ % saves_.size()];
+  const std::string root_id = find_or_create_drive_folder(kGoogleDriveRootFolderName, "root");
+  if (root_id.empty()) {
+    return;
+  }
+
+  std::string save_folder_name = normalize_path_component(save.id);
+  if (save_folder_name.empty()) {
+    save_folder_name = "unknown-save";
+  }
+  const std::string save_folder_id = find_or_create_drive_folder(save_folder_name, root_id);
+  if (save_folder_id.empty()) {
+    return;
+  }
+
+  HttpClient http;
+  const std::string list_url = std::string(kDriveFilesEndpoint) + "?" +
+                               build_drive_list_children_query(save_folder_id);
+  const HttpResponse list_response = http.get_json(list_url, google_token_cache_.access_token);
+  if (!list_response.ok) {
+    status_message_ = "Drive list failed.";
+    return;
+  }
+
+  const DriveFileList files = parse_drive_file_list(list_response.body);
+  if (!files.ok) {
+    status_message_ = "Drive list response invalid.";
+    return;
+  }
+  for (const DriveFile &file : files.files) {
+    if (file.name.size() >= 4 && file.name.compare(file.name.size() - 4, 4, ".zip") == 0) {
+      remote_backups_.push_back({file.name, file.id});
+    }
+  }
+  if (selected_backup_ >= backup_count()) {
+    selected_backup_ = 0;
+  }
+  status_message_ = remote_backups_.empty() ? "No Drive backups for this save."
+                                            : "Drive backups refreshed.";
+}
+
+std::vector<std::string> App::remote_backup_names() const {
+  std::vector<std::string> names;
+  names.reserve(remote_backups_.size());
+  for (const RemoteBackup &backup : remote_backups_) {
+    names.push_back(backup.name);
+  }
+  return names;
+}
+
+std::size_t App::backup_count() const {
+  return remote_backups_.size() + local_backups_.size();
+}
+
+bool App::selected_backup_is_remote() const {
+  return !remote_backups_.empty() && selected_backup_ < remote_backups_.size();
+}
+
+std::string App::selected_backup_name() const {
+  if (selected_backup_is_remote()) {
+    return remote_backups_[selected_backup_].name;
+  }
+  if (local_backups_.empty()) {
+    return {};
+  }
+  const std::size_t local_index = selected_backup_ - remote_backups_.size();
+  return local_backups_[local_index % local_backups_.size()];
+}
+
 void App::handle_upload_button() {
   if (saves_.empty()) {
     status_message_ = "No save selected.";
     return;
   }
-  if (local_backups_.empty()) {
+  if (local_backups_.empty() || selected_backup_is_remote()) {
     status_message_ = "No local backup selected.";
     return;
   }
@@ -348,7 +495,7 @@ void App::handle_upload_button() {
   }
 
   const SaveRecord &save = saves_[selected_save_ % saves_.size()];
-  const std::string &backup_name = local_backups_[selected_backup_ % local_backups_.size()];
+  const std::string backup_name = selected_backup_name();
   const std::string archive_path = local_backup_archive_path(kBackupRoot, save.id, backup_name);
   const std::string root_id = find_or_create_drive_folder(kGoogleDriveRootFolderName, "root");
   if (root_id.empty()) {
@@ -370,6 +517,10 @@ void App::handle_upload_button() {
       archive_path, google_token_cache_.access_token);
   status_message_ = upload_response.ok ? "Uploaded [GD] " + backup_name
                                        : "Drive upload failed.";
+  if (upload_response.ok) {
+    refresh_remote_backups();
+    status_message_ = "Uploaded [GD] " + backup_name;
+  }
 }
 
 int App::run() {
@@ -447,7 +598,7 @@ int App::run() {
       handle_upload_button();
     }
 
-    ui_.draw(saves_, selected_save_, local_backups_, selected_backup_,
+    ui_.draw(saves_, selected_save_, remote_backup_names(), local_backups_, selected_backup_,
              restore_confirmation_pending_, google_connected_, google_auth_pending_,
              device_code_.verification_url, device_code_.user_code, status_message_);
     previous_buttons = pad.buttons;

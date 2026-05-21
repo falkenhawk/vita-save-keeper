@@ -394,6 +394,12 @@ void test_google_drive_builds_upload_metadata_json() {
             "{\"name\":\"2026-05-21 16-14.zip\",\"parents\":[\"folder-id\"]}");
 }
 
+void test_google_drive_builds_list_children_query() {
+  EXPECT_EQ(vsm::build_drive_list_children_query("folder-id"),
+            "q=%27folder-id%27%20in%20parents%20and%20trashed%3Dfalse&fields=files%28id%2Cname%"
+            "29");
+}
+
 } // namespace
 
 int main() {
@@ -421,6 +427,7 @@ int main() {
   test_google_drive_builds_find_folder_query();
   test_google_drive_parses_first_file_id();
   test_google_drive_builds_upload_metadata_json();
+  test_google_drive_builds_list_children_query();
 
   std::cout << "vsm_core_tests passed\n";
   return 0;

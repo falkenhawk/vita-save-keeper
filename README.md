@@ -15,9 +15,10 @@ This repository currently contains the first buildable foundation:
 - local backup restore with a second-press confirmation
 - Google OAuth device-code request and token polling controls
 - Google Drive upload for the selected local ZIP backup
+- Google Drive listing and download-then-restore for `[GD]` ZIP backups
 - a native `vita2d` UI preview that builds into a VPK
 
-Drive download is not implemented yet.
+Delete/rename flows and QR rendering are not implemented yet.
 
 ## Target behavior
 
@@ -73,6 +74,10 @@ Development builds expect OAuth client credentials at
 fields from a Google OAuth client of type TVs and Limited Input devices. Press `Triangle` once to
 request a device code, finish consent on a phone or PC, then press `Triangle` again to poll and save
 the token cache to `ux0:data/save-keeper/google-token.json`.
+
+After auth, press `Triangle` to refresh remote backups for the selected save. Press `Select` to
+upload the selected local backup. Press `Square` on a local backup to restore it, or on a `[GD]`
+backup to download it locally and then restore it.
 
 ## Comment style
 
