@@ -302,6 +302,41 @@ void test_google_drive_root_folder_name_is_psv_saves() {
   EXPECT_EQ(std::string(vsm::kGoogleDriveRootFolderName), "PSV Saves");
 }
 
+void test_google_auth_parses_device_code_success_response() {
+  const vsm::DeviceCodeResponse response = vsm::parse_device_code_response(
+      "{\"device_code\":\"4/device\",\"user_code\":\"GQVQ-JKEC\","
+      "\"verification_url\":\"https://www.google.com/device\",\"expires_in\":1800,"
+      "\"interval\":5}");
+
+  EXPECT_TRUE(response.ok);
+  EXPECT_EQ(response.device_code, "4/device");
+  EXPECT_EQ(response.user_code, "GQVQ-JKEC");
+  EXPECT_EQ(response.verification_url, "https://www.google.com/device");
+  EXPECT_EQ(response.expires_in, 1800);
+  EXPECT_EQ(response.interval, 5);
+}
+
+void test_google_auth_parses_token_pending_error() {
+  const vsm::TokenResponse response = vsm::parse_token_response(
+      "{\"error\":\"authorization_pending\",\"error_description\":\"Precondition Required\"}");
+
+  EXPECT_TRUE(!response.ok);
+  EXPECT_EQ(response.error, "authorization_pending");
+  EXPECT_EQ(response.error_description, "Precondition Required");
+}
+
+void test_google_auth_parses_token_success_response() {
+  const vsm::TokenResponse response = vsm::parse_token_response(
+      "{\"access_token\":\"access\",\"expires_in\":3920,\"scope\":\"https://www.googleapis.com/"
+      "auth/drive.file\",\"token_type\":\"Bearer\",\"refresh_token\":\"refresh\"}");
+
+  EXPECT_TRUE(response.ok);
+  EXPECT_EQ(response.access_token, "access");
+  EXPECT_EQ(response.refresh_token, "refresh");
+  EXPECT_EQ(response.token_type, "Bearer");
+  EXPECT_EQ(response.expires_in, 3920);
+}
+
 } // namespace
 
 int main() {
@@ -320,6 +355,9 @@ int main() {
   test_google_auth_builds_token_poll_request_body();
   test_google_auth_builds_refresh_request_body();
   test_google_drive_root_folder_name_is_psv_saves();
+  test_google_auth_parses_device_code_success_response();
+  test_google_auth_parses_token_pending_error();
+  test_google_auth_parses_token_success_response();
 
   std::cout << "vsm_core_tests passed\n";
   return 0;
