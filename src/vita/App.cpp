@@ -240,7 +240,7 @@ void App::refresh_local_backups() {
   }
 
   local_backups_ = scan_local_backup_names(kBackupRoot, save->id);
-  if (selected_backup_ >= backup_count()) {
+  if (selected_backup_ > backup_count()) {
     selected_backup_ = 0;
   }
 }
@@ -251,6 +251,8 @@ void App::move_selected_save(int delta) {
   if (selected_save_ != previous) {
     cancel_restore_confirmation();
     cancel_delete_confirmation();
+    // A different save means a different backup list; focus its "New Backup" entry.
+    selected_backup_ = 0;
     refresh_local_backups();
     refresh_remote_backups_view();
   }
@@ -268,10 +270,12 @@ void App::move_selected_category(int delta) {
     if (candidate == category_) {
       return;
     }
+    category_selection_[static_cast<std::size_t>(category_)] = selected_save_;
     category_ = candidate;
     cancel_restore_confirmation();
     cancel_delete_confirmation();
-    selected_save_ = 0;
+    selected_save_ = category_selection_[static_cast<std::size_t>(category_)];
+    selected_backup_ = 0;
     rebuild_visible_saves();
     refresh_local_backups();
     refresh_remote_backups_view();
@@ -281,7 +285,8 @@ void App::move_selected_category(int delta) {
 
 void App::move_selected_backup(int delta) {
   const std::size_t previous = selected_backup_;
-  selected_backup_ = move_selection(selected_backup_, backup_count(), delta);
+  // Menu size is the backups plus the "New Backup" entry at index 0.
+  selected_backup_ = move_selection(selected_backup_, backup_count() + 1, delta);
   if (selected_backup_ != previous) {
     cancel_restore_confirmation();
     cancel_delete_confirmation();
@@ -302,7 +307,7 @@ void App::cancel_delete_confirmation() {
   }
 }
 
-void App::handle_backup_button() {
+void App::create_new_backup() {
   restore_confirmation_pending_ = false;
   delete_confirmation_pending_ = false;
   const SaveRecord *selected = selected_save_record();
@@ -334,8 +339,8 @@ void App::handle_delete_button() {
     set_status(StatusKind::Info, "No save selected.");
     return;
   }
-  if (backup_count() == 0) {
-    set_status(StatusKind::Info, "No backup selected.");
+  if (selected_backup_ == 0 || backup_count() == 0) {
+    set_status(StatusKind::Info, "Select a backup to delete.");
     return;
   }
 
@@ -352,7 +357,7 @@ void App::handle_delete_button() {
     if (!ensure_google_access_token()) {
       return;
     }
-    const std::size_t remote_index = selected_backup_ % remote_backups_.size();
+    const std::size_t remote_index = (selected_backup_ - 1) % remote_backups_.size();
     const RemoteBackup remote = remote_backups_[remote_index];
     BusyLabelScope busy("Deleting Drive backup");
     const std::string url =
@@ -379,8 +384,8 @@ void App::handle_delete_button() {
       }
     }
     refresh_remote_backups_view();
-    if (selected_backup_ >= backup_count() && selected_backup_ > 0) {
-      selected_backup_ = backup_count() == 0 ? 0 : backup_count() - 1;
+    if (selected_backup_ > backup_count()) {
+      selected_backup_ = backup_count();
     }
     set_status(StatusKind::Success, "Deleted [GD] " + backup_name + ".");
     return;
@@ -393,27 +398,37 @@ void App::handle_delete_button() {
     return;
   }
   refresh_local_backups();
-  if (selected_backup_ >= backup_count() && selected_backup_ > 0) {
-    selected_backup_ = backup_count() == 0 ? 0 : backup_count() - 1;
+  if (selected_backup_ > backup_count()) {
+    selected_backup_ = backup_count();
   }
   set_status(StatusKind::Success, "Deleted " + backup_name + ".");
 }
 
-void App::handle_restore_button() {
+void App::handle_action_button() {
   const SaveRecord *selected = selected_save_record();
   if (!selected) {
     set_status(StatusKind::Info, "No save selected.");
     return;
   }
-  if (backup_count() == 0) {
-    set_status(StatusKind::Info, "No backup selected.");
+  // One context-sensitive action button: the "New Backup" entry creates a snapshot, a backup
+  // entry restores it (with a second press to confirm).
+  if (selected_backup_ == 0) {
+    create_new_backup();
+    return;
+  }
+  handle_restore();
+}
+
+void App::handle_restore() {
+  const SaveRecord *selected = selected_save_record();
+  if (!selected || selected_backup_ == 0 || backup_count() == 0) {
     return;
   }
   const std::string backup_name = selected_backup_name();
   if (!restore_confirmation_pending_) {
     delete_confirmation_pending_ = false;
     restore_confirmation_pending_ = true;
-    set_status(StatusKind::Info, "Press restore again to restore " + backup_name + ".");
+    set_status(StatusKind::Info, "Press again to restore " + backup_name + ".");
     return;
   }
 
@@ -425,7 +440,7 @@ void App::handle_restore_button() {
       restore_confirmation_pending_ = false;
       return;
     }
-    const RemoteBackup &remote = remote_backups_[selected_backup_ % remote_backups_.size()];
+    const RemoteBackup &remote = remote_backups_[(selected_backup_ - 1) % remote_backups_.size()];
     if (!ensure_parent_directory(archive_path)) {
       set_status(StatusKind::Error, "Could not create local backup folder.");
       restore_confirmation_pending_ = false;
@@ -503,7 +518,6 @@ void App::handle_google_button() {
   if (google_connected_) {
     if (sync_drive_index()) {
       refresh_remote_backups_view();
-      set_status(StatusKind::Success, "Drive backups refreshed.");
     }
     return;
   }
@@ -664,6 +678,7 @@ bool App::refresh_google_access_token() {
   const TokenResponse token = parse_token_response(response.body);
   if (!token.ok) {
     google_connected_ = false;
+    drive_synced_ = false;
     if (token.error == "invalid_grant") {
       // The refresh token was revoked or expired server-side (for example a consent screen still
       // in "Testing" status expires refresh tokens after seven days). Clear the stored token so
@@ -823,6 +838,7 @@ bool App::sync_drive_index() {
               [](const RemoteBackup &a, const RemoteBackup &b) { return a.name > b.name; });
   }
   drive_root_folder_id_ = root_id;
+  drive_synced_ = true;
   return true;
 }
 
@@ -839,7 +855,7 @@ void App::refresh_remote_backups_view() {
       remote_backups_ = found->second;
     }
   }
-  if (selected_backup_ >= backup_count()) {
+  if (selected_backup_ > backup_count()) {
     selected_backup_ = 0;
   }
 }
@@ -858,17 +874,20 @@ std::size_t App::backup_count() const {
 }
 
 bool App::selected_backup_is_remote() const {
-  return !remote_backups_.empty() && selected_backup_ < remote_backups_.size();
+  return selected_backup_ > 0 && selected_backup_ - 1 < remote_backups_.size();
 }
 
 std::string App::selected_backup_name() const {
+  if (selected_backup_ == 0) {
+    return {};
+  }
   if (selected_backup_is_remote()) {
-    return remote_backups_[selected_backup_].name;
+    return remote_backups_[selected_backup_ - 1].name;
   }
   if (local_backups_.empty()) {
     return {};
   }
-  const std::size_t local_index = selected_backup_ - remote_backups_.size();
+  const std::size_t local_index = selected_backup_ - 1 - remote_backups_.size();
   return local_backups_[local_index % local_backups_.size()];
 }
 
@@ -878,8 +897,8 @@ void App::handle_upload_button() {
     set_status(StatusKind::Info, "No save selected.");
     return;
   }
-  if (local_backups_.empty() || selected_backup_is_remote()) {
-    set_status(StatusKind::Info, "No local backup selected.");
+  if (selected_backup_ == 0 || selected_backup_is_remote() || local_backups_.empty()) {
+    set_status(StatusKind::Info, "Select a local backup to upload.");
     return;
   }
   if (!ensure_google_access_token()) {
@@ -993,7 +1012,6 @@ int App::run() {
   if (google_connected_) {
     if (sync_drive_index()) {
       refresh_remote_backups_view();
-      set_status(StatusKind::Success, "Google Drive synced.");
     }
   }
 
@@ -1050,10 +1068,7 @@ int App::run() {
     }
     rstick_direction_prev = rstick_direction;
     if ((pressed & backup_button) != 0) {
-      handle_backup_button();
-    }
-    if ((pressed & SCE_CTRL_SQUARE) != 0) {
-      handle_restore_button();
+      handle_action_button();
     }
     if ((pressed & cancel_button) != 0) {
       cancel_restore_confirmation();
@@ -1085,6 +1100,7 @@ int App::run() {
     ui_state.delete_confirmation_pending = delete_confirmation_pending_;
     ui_state.enter_is_cross = enter_is_cross_;
     ui_state.google_connected = google_connected_;
+    ui_state.drive_synced = drive_synced_;
     ui_state.google_auth_pending = google_auth_pending_;
     ui_state.google_verification_url = device_code_.verification_url;
     ui_state.google_user_code = device_code_.user_code;
@@ -1105,9 +1121,7 @@ int App::run() {
       pending_remote_refresh_ = false;
       if (sync_drive_index()) {
         refresh_remote_backups_view();
-        set_status(StatusKind::Success, remote_backups_.empty()
-                                            ? "Connected. No Drive backups here yet."
-                                            : "Connected. Drive backups loaded.");
+        set_status(StatusKind::Success, "Google Drive connected.");
       }
     }
 

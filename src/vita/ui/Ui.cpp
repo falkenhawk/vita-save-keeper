@@ -57,6 +57,17 @@ void draw_text(vita2d_font *font, vita2d_pgf *fallback_font, int x, int y,
   }
 }
 
+int text_width(vita2d_font *font, vita2d_pgf *fallback_font, unsigned int size,
+               const char *text) {
+  if (font) {
+    return vita2d_font_text_width(font, size, text);
+  }
+  if (fallback_font) {
+    return vita2d_pgf_text_width(fallback_font, 1.0f, text);
+  }
+  return 0;
+}
+
 const char *platform_label(SavePlatform platform) {
   switch (platform) {
   case SavePlatform::Vita:
@@ -221,11 +232,11 @@ void draw_hint(vita2d_font *font, vita2d_pgf *fallback_font, int x, ButtonSymbol
   const int y = 518;
   int label_x = x + 22;
   if (symbol == ButtonSymbol::Select || symbol == ButtonSymbol::Start) {
-    const bool is_start = symbol == ButtonSymbol::Start;
-    const int pill_w = is_start ? 52 : 38;
+    const char *pill_text = symbol == ButtonSymbol::Start ? "START" : "SEL";
+    // Size the pill from the measured text so the label never spills past its edge.
+    const int pill_w = text_width(font, fallback_font, kTextSizeTiny, pill_text) + 12;
     vita2d_draw_rectangle(x, y - 8, pill_w, 18, RGBA8(255, 255, 255, 30));
-    draw_text(font, fallback_font, x + 6, y + 5, kColorMuted, kTextSizeTiny,
-              is_start ? "START" : "SEL");
+    draw_text(font, fallback_font, x + 6, y + 5, kColorMuted, kTextSizeTiny, pill_text);
     label_x = x + pill_w + 8;
   } else {
     draw_button_shape(x, y - 10, symbol, kColorMuted);
@@ -324,14 +335,16 @@ void Ui::draw_header(const UiState &state) {
 
   draw_text(font_, fallback_font_, 18, 34, kColorText, kTextSizeTitle, "Save Keeper");
 
-  const char *drive_status = state.google_connected      ? "Google Drive connected"
-                             : state.google_auth_pending ? "Connecting to Google..."
-                                                         : "Google Drive not connected";
+  const char *drive_status = state.google_auth_pending ? "Connecting to Google..."
+                             : !state.google_connected ? "Google Drive not connected"
+                             : state.drive_synced      ? "Google Drive synced"
+                                                       : "Google Drive connected";
   const unsigned int dot_color = state.google_connected      ? kColorSuccess
                                  : state.google_auth_pending ? kColorPendingDot
                                                              : kColorIdleDot;
-  vita2d_draw_fill_circle(638, 26, 5, dot_color);
-  draw_text(font_, fallback_font_, 654, 32, kColorMuted, kTextSizeSmall, drive_status);
+  const int status_x = 960 - 18 - measure_text(kTextSizeSmall, drive_status);
+  vita2d_draw_fill_circle(status_x - 14, 26, 5, dot_color);
+  draw_text(font_, fallback_font_, status_x, 32, kColorMuted, kTextSizeSmall, drive_status);
 }
 
 void Ui::draw_title_grid(const UiState &state) {
@@ -466,7 +479,8 @@ void Ui::draw_backup_panel(const UiState &state) {
       build_backup_menu(state.remote_backups, *state.local_backups);
   const std::size_t selectable_count =
       state.remote_backups.size() + state.local_backups->size();
-  const std::size_t selected_entry = selectable_count == 0 ? 0 : 1 + state.selected_backup;
+  // Menu indices match the App: 0 is the always-selectable "New Backup" entry.
+  const std::size_t selected_entry = state.selected_backup;
   const std::size_t backup_window =
       all_entries.size() <= kVisibleBackups + 1
           ? 0
@@ -541,9 +555,10 @@ void Ui::draw_google_auth_panel(const UiState &state) {
 }
 
 void Ui::draw_status_line(const UiState &state) {
-  const std::string status =
-      state.status_message.empty() ? "Circle creates a timestamped ZIP snapshot."
-                                   : truncate_label(state.status_message, 58);
+  if (state.status_message.empty()) {
+    return;
+  }
+  const std::string status = truncate_label(state.status_message, 58);
   unsigned int color = kColorMuted;
   if (state.restore_confirmation_pending || state.delete_confirmation_pending) {
     color = kColorAccent;
@@ -577,7 +592,7 @@ void Ui::draw_footer(const UiState &state) {
     return;
   }
   if (state.restore_confirmation_pending) {
-    draw_hint(font_, fallback_font_, 28, ButtonSymbol::Square, "Confirm restore");
+    draw_hint(font_, fallback_font_, 28, confirm, "Confirm restore");
     draw_hint(font_, fallback_font_, 240, cancel, "Cancel");
     return;
   }
@@ -587,11 +602,12 @@ void Ui::draw_footer(const UiState &state) {
     return;
   }
 
-  draw_hint(font_, fallback_font_, 28, confirm, "Backup");
-  draw_hint(font_, fallback_font_, 156, ButtonSymbol::Square, "Restore");
-  draw_hint(font_, fallback_font_, 292, ButtonSymbol::Select, "Upload");
-  draw_hint(font_, fallback_font_, 436, ButtonSymbol::Start, "Delete");
-  draw_hint(font_, fallback_font_, 592, ButtonSymbol::Triangle,
+  // One context action: create a snapshot on the "New Backup" entry, restore on a backup entry.
+  draw_hint(font_, fallback_font_, 28, confirm,
+            state.selected_backup == 0 ? "Backup" : "Restore");
+  draw_hint(font_, fallback_font_, 168, ButtonSymbol::Select, "Upload");
+  draw_hint(font_, fallback_font_, 320, ButtonSymbol::Start, "Delete");
+  draw_hint(font_, fallback_font_, 484, ButtonSymbol::Triangle,
             state.google_connected ? "Refresh" : "Google");
 }
 

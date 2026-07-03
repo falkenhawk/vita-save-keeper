@@ -32,6 +32,7 @@ struct UiState {
   bool restore_confirmation_pending{};
   bool delete_confirmation_pending{};
   bool google_connected{};
+  bool drive_synced{};
   bool google_auth_pending{};
   // Which physical button the system treats as "enter"; western consoles use Cross, Japanese
   // consoles use Circle. Primary/cancel symbols in the footer follow it.

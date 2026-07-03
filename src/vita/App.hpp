@@ -7,6 +7,7 @@
 #include "vita/net/HttpClient.hpp"
 #include "vita/ui/Ui.hpp"
 
+#include <array>
 #include <cstddef>
 #include <functional>
 #include <map>
@@ -35,9 +36,10 @@ private:
   const SaveRecord *selected_save_record() const;
   void cancel_restore_confirmation();
   void cancel_delete_confirmation();
-  void handle_restore_button();
+  void handle_action_button();
+  void create_new_backup();
+  void handle_restore();
   void handle_delete_button();
-  void handle_backup_button();
   void load_google_token_cache();
   bool load_google_credentials();
   void handle_google_button();
@@ -67,6 +69,8 @@ private:
   // Indices into saves_ for the active category tab; selected_save_ indexes this list.
   std::vector<std::size_t> visible_saves_;
   SaveCategory category_{SaveCategory::VitaGame};
+  // Which save was focused in each category tab, so L/R returns to where the user left off.
+  std::array<std::size_t, kSaveCategoryCount> category_selection_{};
   std::vector<std::string> local_backups_;
   // remote_backups_ is the per-save view derived from drive_index_, which holds every backup in
   // Drive keyed by save folder name. The index is filled by one paginated sync instead of a
@@ -75,7 +79,9 @@ private:
   std::map<std::string, std::vector<RemoteBackup>> drive_index_;
   std::unordered_map<std::string, std::string> drive_folder_ids_;
   std::string drive_root_folder_id_;
+  bool drive_synced_{};
   std::size_t selected_save_{};
+  // Index into the backup menu: 0 is the "New Backup" entry, backups follow at 1..backup_count().
   std::size_t selected_backup_{};
   bool restore_confirmation_pending_{};
   bool delete_confirmation_pending_{};

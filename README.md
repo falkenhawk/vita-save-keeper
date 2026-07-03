@@ -104,14 +104,14 @@ verification stays enabled.
 ## Vita controls
 
 - D-Pad: move through the save grid
-- L/R: switch between the Vita / Homebrew / PSP save groups
-- Right stick: move through backups for the selected save
+- L/R: switch between the Vita / Homebrew / PSP save groups (focus per group is remembered)
+- Right stick: move through the backup menu ("New Backup" entry plus the backups)
 - Enter button (Cross on western consoles, Circle on Japanese ones, following the system
-  setting): create a new timestamped local backup
-- Square: restore selected local or `[GD]` backup, with a second press to confirm
+  setting): context action - create a snapshot on "New Backup", restore on a backup entry
+  (second press confirms)
 - Select: upload selected local backup to Google Drive
 - Start: delete selected local or `[GD]` backup, with a second press to confirm
-- Triangle: connect Google Drive (one press, then approve on a phone) or refresh remote backups
+- Triangle: connect Google Drive (one press, then approve on a phone) or re-sync remote backups
 - the other face button (Circle on western consoles): cancel a pending restore or delete
   confirmation, or the Google sign-in
 
