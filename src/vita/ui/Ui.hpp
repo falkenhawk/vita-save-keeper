@@ -48,6 +48,15 @@ struct UiState {
   StatusKind status_kind{StatusKind::Info};
 };
 
+// One vita2d_font instance per text size: the library caches each glyph bitmap at whatever size
+// it was first drawn with and bilinearly rescales it for any other size, which is what blurred
+// small text on hardware. Separate per-size instances keep every glyph pixel-exact.
+struct FontSet {
+  static constexpr unsigned int kMaxSize = 64;
+  vita2d_font *by_size[kMaxSize] = {};
+  vita2d_pgf *fallback = nullptr;
+};
+
 class Ui {
 public:
   bool initialize();
@@ -68,9 +77,9 @@ private:
   int measure_text(unsigned int size, const char *text) const;
   vita2d_texture *load_icon_texture(const std::string &path);
 
-  vita2d_font *font_{};
-  vita2d_pgf *fallback_font_{};
+  FontSet fonts_;
   std::size_t title_top_row_{};
+  std::size_t backup_top_row_{};
   unsigned int frame_counter_{};
   std::map<std::string, vita2d_texture *> icon_cache_;
 };

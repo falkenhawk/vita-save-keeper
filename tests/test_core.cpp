@@ -151,9 +151,9 @@ std::vector<std::string> read_zip_central_directory_names(const std::filesystem:
 }
 
 void test_timestamped_backup_name_uses_jksv_style_zip_name() {
-  const vsm::BackupTimestamp timestamp{2026, 5, 21, 16, 14};
+  const vsm::BackupTimestamp timestamp{2026, 5, 21, 16, 14, 9};
 
-  EXPECT_EQ(vsm::make_timestamped_backup_name(timestamp), "2026-05-21 16-14.zip");
+  EXPECT_EQ(vsm::make_timestamped_backup_name(timestamp), "2026-05-21 16-14-09.zip");
 }
 
 void test_remote_entries_are_prefixed_and_local_entries_are_plain() {
@@ -268,12 +268,12 @@ void test_backup_archive_creates_timestamped_zip_snapshot() {
       (base / "source").string(),
       (base / "backups").string(),
       "PCSE00120: Persona/4",
-      {2026, 5, 21, 16, 14},
+      {2026, 5, 21, 16, 14, 9},
   });
 
   EXPECT_TRUE(result.ok);
   EXPECT_EQ(result.archive_path,
-            (base / "backups" / "PCSE00120_ Persona_4" / "2026-05-21 16-14.zip").string());
+            (base / "backups" / "PCSE00120_ Persona_4" / "2026-05-21 16-14-09.zip").string());
   EXPECT_TRUE(std::filesystem::exists(result.archive_path));
 
   const std::vector<std::string> names = read_zip_central_directory_names(result.archive_path);

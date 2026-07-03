@@ -10,6 +10,7 @@ struct BackupTimestamp {
   int day{};
   int hour{};
   int minute{};
+  int second{};
 };
 
 std::string make_timestamped_backup_name(const BackupTimestamp &timestamp);

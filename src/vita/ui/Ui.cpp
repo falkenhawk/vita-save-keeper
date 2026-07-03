@@ -46,24 +46,25 @@ enum class ButtonSymbol {
   Start,
 };
 
-void draw_text(vita2d_font *font, vita2d_pgf *fallback_font, int x, int y,
-               unsigned int color, unsigned int size, const char *text) {
+void draw_text(const FontSet &fonts, int x, int y, unsigned int color, unsigned int size,
+               const char *text) {
+  vita2d_font *font = size < FontSet::kMaxSize ? fonts.by_size[size] : nullptr;
   if (font) {
     vita2d_font_draw_text(font, x, y, color, size, text);
-  } else if (fallback_font) {
+  } else if (fonts.fallback) {
     // The PGF fallback intentionally stays unscaled. Fractional PGF scaling is what looked bad on
     // hardware; it is better to keep fallback text consistent than to reintroduce that artifact.
-    vita2d_pgf_draw_text(fallback_font, x, y, color, 1.0f, text);
+    vita2d_pgf_draw_text(fonts.fallback, x, y, color, 1.0f, text);
   }
 }
 
-int text_width(vita2d_font *font, vita2d_pgf *fallback_font, unsigned int size,
-               const char *text) {
+int text_width(const FontSet &fonts, unsigned int size, const char *text) {
+  vita2d_font *font = size < FontSet::kMaxSize ? fonts.by_size[size] : nullptr;
   if (font) {
     return vita2d_font_text_width(font, size, text);
   }
-  if (fallback_font) {
-    return vita2d_pgf_text_width(fallback_font, 1.0f, text);
+  if (fonts.fallback) {
+    return vita2d_pgf_text_width(fonts.fallback, 1.0f, text);
   }
   return 0;
 }
@@ -182,8 +183,8 @@ void draw_texture_fit(vita2d_texture *texture, int x, int y, int size) {
                             y + (size - draw_height) / 2.0f, scale, scale);
 }
 
-void draw_placeholder_icon(vita2d_font *font, vita2d_pgf *fallback_font,
-                           const SaveRecord &save, int x, int y, int size, bool selected) {
+void draw_placeholder_icon(const FontSet &fonts, const SaveRecord &save, int x, int y, int size,
+                           bool selected) {
   const unsigned int tile = selected ? RGBA8(29, 49, 69, 255) : RGBA8(35, 49, 69, 255);
   vita2d_draw_rectangle(x, y, size, size, tile);
   const int card_x = x + size / 5;
@@ -195,7 +196,7 @@ void draw_placeholder_icon(vita2d_font *font, vita2d_pgf *fallback_font,
   vita2d_draw_rectangle(card_x + 10, card_y + 22, card_w - 20, 7, RGBA8(232, 238, 246, 255));
   vita2d_draw_rectangle(card_x + 14, card_y + 38, card_w - 28, 12, RGBA8(21, 33, 49, 255));
   const std::string text = placeholder_text(save);
-  draw_text(font, fallback_font, x + 18, y + size - 14,
+  draw_text(fonts, x + 18, y + size - 14,
             selected ? kColorText : RGBA8(198, 210, 226, 255), kTextSizeNormal, text.c_str());
 }
 
@@ -227,21 +228,48 @@ void draw_button_shape(int x, int y, ButtonSymbol symbol, unsigned int color) {
   }
 }
 
-void draw_hint(vita2d_font *font, vita2d_pgf *fallback_font, int x, ButtonSymbol symbol,
-               const char *label) {
-  const int y = 518;
+// The footer band spans y 508..544; everything below is laid out around its center line at 526.
+constexpr int kFooterSymbolTop = 518;
+constexpr int kFooterBaseline = 532;
+
+int hint_width(const FontSet &fonts, ButtonSymbol symbol, const char *label) {
+  const int label_w = text_width(fonts, kTextSizeSmall, label);
+  if (symbol == ButtonSymbol::Select || symbol == ButtonSymbol::Start) {
+    const char *pill_text = symbol == ButtonSymbol::Start ? "START" : "SEL";
+    return text_width(fonts, kTextSizeTiny, pill_text) + 12 + 8 + label_w;
+  }
+  return 22 + label_w;
+}
+
+void draw_hint(const FontSet &fonts, int x, ButtonSymbol symbol, const char *label) {
   int label_x = x + 22;
   if (symbol == ButtonSymbol::Select || symbol == ButtonSymbol::Start) {
     const char *pill_text = symbol == ButtonSymbol::Start ? "START" : "SEL";
     // Size the pill from the measured text so the label never spills past its edge.
-    const int pill_w = text_width(font, fallback_font, kTextSizeTiny, pill_text) + 12;
-    vita2d_draw_rectangle(x, y - 8, pill_w, 18, RGBA8(255, 255, 255, 30));
-    draw_text(font, fallback_font, x + 6, y + 5, kColorMuted, kTextSizeTiny, pill_text);
+    const int pill_w = text_width(fonts, kTextSizeTiny, pill_text) + 12;
+    vita2d_draw_rectangle(x, 516, pill_w, 20, RGBA8(255, 255, 255, 30));
+    draw_text(fonts, x + 6, 531, kColorMuted, kTextSizeTiny, pill_text);
     label_x = x + pill_w + 8;
   } else {
-    draw_button_shape(x, y - 10, symbol, kColorMuted);
+    draw_button_shape(x, kFooterSymbolTop, symbol, kColorMuted);
   }
-  draw_text(font, fallback_font, label_x, y + 4, kColorMuted, kTextSizeSmall, label);
+  draw_text(fonts, label_x, kFooterBaseline, kColorMuted, kTextSizeSmall, label);
+}
+
+// Lays hints out right-to-left so the primary action always sits at the right edge, the way the
+// system UI arranges its button hints.
+struct HintSpec {
+  ButtonSymbol symbol;
+  const char *label;
+};
+
+void draw_hints_right_aligned(const FontSet &fonts, const HintSpec *hints, int count) {
+  int x = 936;
+  for (int i = count - 1; i >= 0; --i) {
+    x -= hint_width(fonts, hints[i].symbol, hints[i].label);
+    draw_hint(fonts, x, hints[i].symbol, hints[i].label);
+    x -= 36;
+  }
 }
 
 std::string format_minutes_seconds(int total_seconds) {
@@ -261,14 +289,20 @@ bool Ui::initialize() {
   }
 
   vita2d_set_clear_color(kColorBackground);
-  font_ = vita2d_load_font_file(kBundledFontPath);
-  if (!font_) {
-    fallback_font_ = vita2d_load_custom_pgf(kFallbackFontPath);
-    if (!fallback_font_) {
-      fallback_font_ = vita2d_load_default_pgf();
+  const unsigned int sizes[] = {kTextSizeTiny, kTextSizeSmall, kTextSizeNormal, kTextSizeTitle,
+                                kTextSizeCode};
+  bool any_font = false;
+  for (const unsigned int size : sizes) {
+    fonts_.by_size[size] = vita2d_load_font_file(kBundledFontPath);
+    any_font = any_font || fonts_.by_size[size] != nullptr;
+  }
+  if (!any_font) {
+    fonts_.fallback = vita2d_load_custom_pgf(kFallbackFontPath);
+    if (!fonts_.fallback) {
+      fonts_.fallback = vita2d_load_default_pgf();
     }
   }
-  return font_ != nullptr || fallback_font_ != nullptr;
+  return any_font || fonts_.fallback != nullptr;
 }
 
 void Ui::shutdown() {
@@ -279,25 +313,21 @@ void Ui::shutdown() {
   }
   icon_cache_.clear();
 
-  if (font_) {
-    vita2d_free_font(font_);
-    font_ = nullptr;
+  for (unsigned int size = 0; size < FontSet::kMaxSize; ++size) {
+    if (fonts_.by_size[size]) {
+      vita2d_free_font(fonts_.by_size[size]);
+      fonts_.by_size[size] = nullptr;
+    }
   }
-  if (fallback_font_) {
-    vita2d_free_pgf(fallback_font_);
-    fallback_font_ = nullptr;
+  if (fonts_.fallback) {
+    vita2d_free_pgf(fonts_.fallback);
+    fonts_.fallback = nullptr;
   }
   vita2d_fini();
 }
 
 int Ui::measure_text(unsigned int size, const char *text) const {
-  if (font_) {
-    return vita2d_font_text_width(font_, size, text);
-  }
-  if (fallback_font_) {
-    return vita2d_pgf_text_width(fallback_font_, 1.0f, text);
-  }
-  return 0;
+  return text_width(fonts_, size, text);
 }
 
 vita2d_texture *Ui::load_icon_texture(const std::string &path) {
@@ -333,7 +363,7 @@ void Ui::draw_header(const UiState &state) {
   vita2d_draw_rectangle(0, 0, 960, 52, kColorHeader);
   vita2d_draw_line(0, 52, 960, 52, RGBA8(255, 255, 255, 20));
 
-  draw_text(font_, fallback_font_, 18, 34, kColorText, kTextSizeTitle, "Save Keeper");
+  draw_text(fonts_, 18, 34, kColorText, kTextSizeTitle, "Save Keeper");
 
   const char *drive_status = state.google_auth_pending ? "Connecting to Google..."
                              : !state.google_connected ? "Google Drive not connected"
@@ -344,7 +374,7 @@ void Ui::draw_header(const UiState &state) {
                                                              : kColorIdleDot;
   const int status_x = 960 - 18 - measure_text(kTextSizeSmall, drive_status);
   vita2d_draw_fill_circle(status_x - 14, 26, 5, dot_color);
-  draw_text(font_, fallback_font_, status_x, 32, kColorMuted, kTextSizeSmall, drive_status);
+  draw_text(fonts_, status_x, 32, kColorMuted, kTextSizeSmall, drive_status);
 }
 
 void Ui::draw_title_grid(const UiState &state) {
@@ -363,7 +393,7 @@ void Ui::draw_title_grid(const UiState &state) {
     const bool active = category == state.active_category;
     const bool empty = state.category_counts[static_cast<std::size_t>(i)] == 0;
     const unsigned int color = active ? kColorText : empty ? kColorIdleDot : kColorMuted;
-    draw_text(font_, fallback_font_, tab_x, 84, color, kTextSizeSmall, label.c_str());
+    draw_text(fonts_, tab_x, 84, color, kTextSizeSmall, label.c_str());
     const int width = measure_text(kTextSizeSmall, label.c_str());
     if (active) {
       vita2d_draw_rectangle(tab_x, 90, width, 3, kColorAccent);
@@ -371,8 +401,8 @@ void Ui::draw_title_grid(const UiState &state) {
     tab_x += width + 20;
   }
   // Small L/R chips around the tab row show which buttons switch groups.
-  draw_text(font_, fallback_font_, 16, 84, kColorIdleDot, kTextSizeTiny, "L");
-  draw_text(font_, fallback_font_, tab_x, 84, kColorIdleDot, kTextSizeTiny, "R");
+  draw_text(fonts_, 16, 84, kColorIdleDot, kTextSizeTiny, "L");
+  draw_text(fonts_, tab_x, 84, kColorIdleDot, kTextSizeTiny, "R");
 
   constexpr int kColumns = kSaveGridColumns;
   constexpr int kRows = 4;
@@ -388,7 +418,7 @@ void Ui::draw_title_grid(const UiState &state) {
   if (!visible.empty()) {
     const std::string count =
         std::to_string(selected + 1) + "/" + std::to_string(visible.size());
-    draw_text(font_, fallback_font_, 504 - 16 - measure_text(kTextSizeSmall, count.c_str()), 84,
+    draw_text(fonts_, 504 - 16 - measure_text(kTextSizeSmall, count.c_str()), 84,
               kColorMuted, kTextSizeSmall, count.c_str());
   }
 
@@ -416,7 +446,7 @@ void Ui::draw_title_grid(const UiState &state) {
         vita2d_draw_rectangle(x + pad, y + pad, icon_size, icon_size, RGBA8(0, 0, 0, 120));
         draw_texture_fit(texture, x + pad, y + pad, icon_size);
       } else {
-        draw_placeholder_icon(font_, fallback_font_, save, x + pad, y + pad, icon_size,
+        draw_placeholder_icon(fonts_, save, x + pad, y + pad, icon_size,
                               is_selected);
       }
     }
@@ -426,13 +456,13 @@ void Ui::draw_title_grid(const UiState &state) {
     // Selected-save details live at the top of the right pane; the grid area only needs the
     // empty states.
     if (saves.empty()) {
-      draw_text(font_, fallback_font_, 120, 280, kColorText, kTextSizeNormal, "No saves found");
-      draw_text(font_, fallback_font_, 120, 306, kColorMuted, kTextSizeSmall,
+      draw_text(fonts_, 120, 280, kColorText, kTextSizeNormal, "No saves found");
+      draw_text(fonts_, 120, 306, kColorMuted, kTextSizeSmall,
                 "Checked Vita, game card, and PSP roots");
     } else {
-      draw_text(font_, fallback_font_, 120, 280, kColorText, kTextSizeNormal,
+      draw_text(fonts_, 120, 280, kColorText, kTextSizeNormal,
                 "No saves in this group");
-      draw_text(font_, fallback_font_, 120, 306, kColorMuted, kTextSizeSmall,
+      draw_text(fonts_, 120, 306, kColorMuted, kTextSizeSmall,
                 "L / R switches groups");
     }
   }
@@ -449,7 +479,7 @@ void Ui::draw_backup_panel(const UiState &state) {
 
   const SaveRecord *save = selected_visible_record(state);
   if (!save) {
-    draw_text(font_, fallback_font_, 528, 96, kColorMuted, kTextSizeSmall,
+    draw_text(fonts_, 528, 96, kColorMuted, kTextSizeSmall,
               "Install or create saves, then reopen Save Keeper.");
     draw_status_line(state);
     return;
@@ -459,18 +489,19 @@ void Ui::draw_backup_panel(const UiState &state) {
   const std::string title = truncate_label(save->display_name, 30);
   const std::string details = truncate_label(
       title_id_label(*save) + "  |  " + platform_label(save->platform) + " save", 44);
-  draw_text(font_, fallback_font_, 528, 88, kColorText, kTextSizeNormal, title.c_str());
-  draw_text(font_, fallback_font_, 528, 112, kColorMuted, kTextSizeSmall, details.c_str());
+  // Baseline 84 matches the tab row in the left pane so the top lines read as one row.
+  draw_text(fonts_, 528, 84, kColorText, kTextSizeNormal, title.c_str());
+  draw_text(fonts_, 528, 110, kColorMuted, kTextSizeSmall, details.c_str());
 
   constexpr std::size_t kVisibleEntries = 7;
   const std::vector<BackupEntry> all_entries =
       build_backup_menu(state.remote_backups, *state.local_backups);
-  // Menu indices match the App: 0 is the always-selectable "New Backup" entry.
+  // Menu indices match the App: 0 is the always-selectable "New Backup" entry. The window only
+  // scrolls when the selection reaches its edge, like the save grid.
   const std::size_t selected_entry = state.selected_backup;
-  const std::size_t backup_window =
-      all_entries.size() <= kVisibleEntries
-          ? 0
-          : std::min(selected_entry, all_entries.size() - kVisibleEntries);
+  backup_top_row_ = grid_window_top_row(backup_top_row_, selected_entry, all_entries.size(), 1,
+                                        kVisibleEntries);
+  const std::size_t backup_window = backup_top_row_;
 
   std::vector<BackupEntry> entries;
   for (std::size_t i = backup_window;
@@ -489,13 +520,17 @@ void Ui::draw_backup_panel(const UiState &state) {
     }
 
     const std::string label = truncate_label(entries[i].display_name(), 42);
-    draw_text(font_, fallback_font_, 542, y + 24, selected ? kColorText : kColorMuted,
+    draw_text(fonts_, 542, y + 24, selected ? kColorText : kColorMuted,
               kTextSizeSmall, label.c_str());
     y += 42;
   }
 
+  if (backup_window > 0) {
+    // Chevrons say "more above/below" without spending a text row on them.
+    vita2d_draw_line(714, 132, 720, 126, kColorMuted);
+    vita2d_draw_line(720, 126, 726, 132, kColorMuted);
+  }
   if (all_entries.size() > backup_window + entries.size()) {
-    // A small chevron says "more below" without spending a text row on it.
     vita2d_draw_line(714, 436, 720, 442, kColorMuted);
     vita2d_draw_line(720, 442, 726, 436, kColorMuted);
   }
@@ -510,7 +545,7 @@ void Ui::draw_backup_panel(const UiState &state) {
 void Ui::draw_rstick_hint(int cx, int cy) {
   // Right-stick pictogram: a stick cap marked R with up/down chevrons.
   vita2d_draw_fill_circle(cx, cy, 9, RGBA8(255, 255, 255, 26));
-  draw_text(font_, fallback_font_, cx - 4, cy + 5, kColorIdleDot, kTextSizeTiny, "R");
+  draw_text(fonts_, cx - 4, cy + 5, kColorIdleDot, kTextSizeTiny, "R");
   vita2d_draw_line(cx - 4, cy - 14, cx, cy - 18, kColorIdleDot);
   vita2d_draw_line(cx, cy - 18, cx + 4, cy - 14, kColorIdleDot);
   vita2d_draw_line(cx - 4, cy + 14, cx, cy + 18, kColorIdleDot);
@@ -518,20 +553,20 @@ void Ui::draw_rstick_hint(int cx, int cy) {
 }
 
 void Ui::draw_google_auth_panel(const UiState &state) {
-  draw_text(font_, fallback_font_, 528, 90, kColorText, kTextSizeTitle, "Connect Google Drive");
+  draw_text(fonts_, 528, 90, kColorText, kTextSizeTitle, "Connect Google Drive");
 
   // Short step lines: the QR block occupies the pane's right edge from x=804.
-  draw_text(font_, fallback_font_, 528, 138, kColorText, kTextSizeNormal,
+  draw_text(fonts_, 528, 138, kColorText, kTextSizeNormal,
             "1  Scan the QR code");
-  draw_text(font_, fallback_font_, 528, 168, kColorText, kTextSizeNormal,
+  draw_text(fonts_, 528, 168, kColorText, kTextSizeNormal,
             "2  Approve Save Keeper");
-  draw_text(font_, fallback_font_, 528, 198, kColorText, kTextSizeNormal,
+  draw_text(fonts_, 528, 198, kColorText, kTextSizeNormal,
             "3  Finishes by itself");
 
   const std::string url = "Or enter the code at " + display_url(state.google_verification_url);
-  draw_text(font_, fallback_font_, 528, 246, kColorMuted, kTextSizeTiny,
+  draw_text(fonts_, 528, 246, kColorMuted, kTextSizeTiny,
             truncate_label(url, 40).c_str());
-  draw_text(font_, fallback_font_, 528, 300, kColorAccent, kTextSizeCode,
+  draw_text(fonts_, 528, 300, kColorAccent, kTextSizeCode,
             state.google_user_code.c_str());
 
   // The QR code carries the verification URL with the user code pre-filled, so scanning skips the
@@ -546,11 +581,11 @@ void Ui::draw_google_auth_panel(const UiState &state) {
   for (int i = 0; i < dot_count; ++i) {
     waiting.push_back('.');
   }
-  draw_text(font_, fallback_font_, 528, 360, kColorMuted, kTextSizeNormal, waiting.c_str());
+  draw_text(fonts_, 528, 360, kColorMuted, kTextSizeNormal, waiting.c_str());
 
   const std::string validity =
       "Code valid for " + format_minutes_seconds(state.auth_seconds_left);
-  draw_text(font_, fallback_font_, 528, 388, kColorMuted, kTextSizeTiny, validity.c_str());
+  draw_text(fonts_, 528, 388, kColorMuted, kTextSizeTiny, validity.c_str());
 }
 
 void Ui::draw_status_line(const UiState &state) {
@@ -574,7 +609,8 @@ void Ui::draw_status_line(const UiState &state) {
       break;
     }
   }
-  draw_text(font_, fallback_font_, 528, 462, color, kTextSizeSmall, status.c_str());
+  // Baseline chosen so the text centers on the R-stick pictogram (cy = 470) next to it.
+  draw_text(fonts_, 528, 476, color, kTextSizeSmall, status.c_str());
 }
 
 void Ui::draw_footer(const UiState &state) {
@@ -584,30 +620,31 @@ void Ui::draw_footer(const UiState &state) {
   const ButtonSymbol cancel = state.enter_is_cross ? ButtonSymbol::Circle : ButtonSymbol::Cross;
 
   // The footer follows the current mode so a cancel hint only appears when there is actually
-  // something to cancel.
+  // something to cancel. Hints are right-aligned with the primary action at the right edge.
   if (state.google_auth_pending) {
-    draw_hint(font_, fallback_font_, 28, ButtonSymbol::Triangle, "Check now");
-    draw_hint(font_, fallback_font_, 210, cancel, "Cancel sign-in");
+    const HintSpec hints[] = {{cancel, "Cancel sign-in"}, {ButtonSymbol::Triangle, "Check now"}};
+    draw_hints_right_aligned(fonts_, hints, 2);
     return;
   }
   if (state.restore_confirmation_pending) {
-    draw_hint(font_, fallback_font_, 28, confirm, "Confirm restore");
-    draw_hint(font_, fallback_font_, 240, cancel, "Cancel");
+    const HintSpec hints[] = {{cancel, "Cancel"}, {confirm, "Confirm restore"}};
+    draw_hints_right_aligned(fonts_, hints, 2);
     return;
   }
   if (state.delete_confirmation_pending) {
-    draw_hint(font_, fallback_font_, 28, ButtonSymbol::Start, "Confirm delete");
-    draw_hint(font_, fallback_font_, 240, cancel, "Cancel");
+    const HintSpec hints[] = {{cancel, "Cancel"}, {ButtonSymbol::Start, "Confirm delete"}};
+    draw_hints_right_aligned(fonts_, hints, 2);
     return;
   }
 
   // One context action: create a snapshot on the "New Backup" entry, restore on a backup entry.
-  draw_hint(font_, fallback_font_, 28, confirm,
-            state.selected_backup == 0 ? "Backup" : "Restore");
-  draw_hint(font_, fallback_font_, 168, ButtonSymbol::Select, "Upload");
-  draw_hint(font_, fallback_font_, 320, ButtonSymbol::Start, "Delete");
-  draw_hint(font_, fallback_font_, 484, ButtonSymbol::Triangle,
-            state.google_connected ? "Refresh" : "Google");
+  const HintSpec hints[] = {
+      {ButtonSymbol::Triangle, state.google_connected ? "Refresh" : "Google"},
+      {ButtonSymbol::Start, "Delete"},
+      {ButtonSymbol::Select, "Upload"},
+      {confirm, state.selected_backup == 0 ? "Backup" : "Restore"},
+  };
+  draw_hints_right_aligned(fonts_, hints, 4);
 }
 
 void Ui::draw_busy(const std::string &label, long long done, long long total) {
@@ -622,7 +659,7 @@ void Ui::draw_busy(const std::string &label, long long done, long long total) {
   vita2d_draw_rectangle(kBoxX, kBoxY, kBoxW, kBoxH, kColorPanelAlt);
   vita2d_draw_rectangle(kBoxX, kBoxY, kBoxW, 4, kColorAccent);
 
-  draw_text(font_, fallback_font_, kBoxX + 24, kBoxY + 42, kColorText, kTextSizeNormal,
+  draw_text(fonts_, kBoxX + 24, kBoxY + 42, kColorText, kTextSizeNormal,
             label.c_str());
 
   const int bar_x = kBoxX + 24;
@@ -637,7 +674,7 @@ void Ui::draw_busy(const std::string &label, long long done, long long total) {
     vita2d_draw_rectangle(bar_x, bar_y, static_cast<int>(bar_w * fraction), bar_h, kColorAccent);
     char percent[16];
     std::snprintf(percent, sizeof(percent), "%d%%", static_cast<int>(fraction * 100.0f));
-    draw_text(font_, fallback_font_, bar_x, kBoxY + 98, kColorMuted, kTextSizeSmall, percent);
+    draw_text(fonts_, bar_x, kBoxY + 98, kColorMuted, kTextSizeSmall, percent);
   } else {
     // Unknown size: sweep a segment across the bar so the app visibly keeps working.
     const int segment = bar_w / 4;

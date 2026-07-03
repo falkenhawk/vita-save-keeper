@@ -62,7 +62,7 @@ BackupTimestamp current_backup_timestamp() {
   const std::time_t now = std::time(nullptr);
   const std::tm *local = std::localtime(&now);
   if (!local) {
-    return {1980, 1, 1, 0, 0};
+    return {1980, 1, 1, 0, 0, 0};
   }
 
   return {
@@ -71,6 +71,7 @@ BackupTimestamp current_backup_timestamp() {
       local->tm_mday,
       local->tm_hour,
       local->tm_min,
+      local->tm_sec,
   };
 }
 
