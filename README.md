@@ -21,7 +21,10 @@ This repository currently contains the first buildable foundation:
 - Google Drive listing and download-then-restore for `[GD]` ZIP backups
 - a native `vita2d` grid UI with game icons, QR auth display, and packaged LiveArea assets
 
-Delete/rename flows are not implemented yet.
+- local and Google Drive backup deletion with a second-press confirmation
+- progress overlay during uploads, downloads, and other blocking work
+
+Rename flows are not implemented yet.
 
 ## Target behavior
 
@@ -102,11 +105,14 @@ verification stays enabled.
 
 - D-Pad: move through the save grid
 - L/R: move through backups for the selected save
-- Circle: create a new timestamped local backup
+- Enter button (Cross on western consoles, Circle on Japanese ones, following the system
+  setting): create a new timestamped local backup
 - Square: restore selected local or `[GD]` backup, with a second press to confirm
 - Select: upload selected local backup to Google Drive
+- Start: delete selected local or `[GD]` backup, with a second press to confirm
 - Triangle: connect Google Drive (one press, then approve on a phone) or refresh remote backups
-- Cross: cancel restore confirmation or the Google sign-in
+- the other face button (Circle on western consoles): cancel a pending restore or delete
+  confirmation, or the Google sign-in
 
 The app does not expose a START exit shortcut; use the Vita home button to leave the app.
 

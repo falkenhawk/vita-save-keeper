@@ -24,8 +24,12 @@ struct UiState {
   const std::vector<std::string> *local_backups{};
   std::size_t selected_backup{};
   bool restore_confirmation_pending{};
+  bool delete_confirmation_pending{};
   bool google_connected{};
   bool google_auth_pending{};
+  // Which physical button the system treats as "enter"; western consoles use Cross, Japanese
+  // consoles use Circle. Primary/cancel symbols in the footer follow it.
+  bool enter_is_cross{true};
   std::string google_verification_url;
   std::string google_user_code;
   int auth_seconds_left{};
@@ -38,6 +42,9 @@ public:
   bool initialize();
   void shutdown();
   void draw(const UiState &state);
+  // Full-screen modal frame for blocking work; safe to call from transfer callbacks because all
+  // network requests run on the UI thread. total <= 0 draws an indeterminate sweep.
+  void draw_busy(const std::string &label, long long done, long long total);
 
 private:
   void draw_header(const UiState &state);

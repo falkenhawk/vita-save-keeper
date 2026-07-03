@@ -89,6 +89,7 @@ else()
     c
     SceCtrl_stub
     SceAppMgr_stub
+    SceAppUtil_stub
     SceCommonDialog_stub
     SceDisplay_stub
     SceGxm_stub

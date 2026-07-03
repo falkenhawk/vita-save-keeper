@@ -43,6 +43,7 @@ enum class ButtonSymbol {
   Square,
   Triangle,
   Select,
+  Start,
 };
 
 void draw_text(vita2d_font *font, vita2d_pgf *fallback_font, int x, int y,
@@ -209,9 +210,8 @@ void draw_button_shape(int x, int y, ButtonSymbol symbol, unsigned int color) {
     vita2d_draw_line(x, y + 15, x + 8, y, color);
     break;
   case ButtonSymbol::Select:
-    vita2d_draw_rectangle(x, y + 2, 36, 14, RGBA8(255, 255, 255, 18));
-    vita2d_draw_line(x + 7, y + 7, x + 29, y + 7, color);
-    vita2d_draw_line(x + 7, y + 11, x + 29, y + 11, color);
+  case ButtonSymbol::Start:
+    // Handled in draw_hint as labeled pills; the abstract line glyphs read poorly on hardware.
     break;
   }
 }
@@ -219,8 +219,17 @@ void draw_button_shape(int x, int y, ButtonSymbol symbol, unsigned int color) {
 void draw_hint(vita2d_font *font, vita2d_pgf *fallback_font, int x, ButtonSymbol symbol,
                const char *label) {
   const int y = 518;
-  draw_button_shape(x, y - 10, symbol, kColorMuted);
-  const int label_x = symbol == ButtonSymbol::Select ? x + 42 : x + 22;
+  int label_x = x + 22;
+  if (symbol == ButtonSymbol::Select || symbol == ButtonSymbol::Start) {
+    const bool is_start = symbol == ButtonSymbol::Start;
+    const int pill_w = is_start ? 52 : 38;
+    vita2d_draw_rectangle(x, y - 8, pill_w, 18, RGBA8(255, 255, 255, 30));
+    draw_text(font, fallback_font, x + 6, y + 5, kColorMuted, kTextSizeTiny,
+              is_start ? "START" : "SEL");
+    label_x = x + pill_w + 8;
+  } else {
+    draw_button_shape(x, y - 10, symbol, kColorMuted);
+  }
   draw_text(font, fallback_font, label_x, y + 4, kColorMuted, kTextSizeSmall, label);
 }
 
@@ -401,6 +410,10 @@ void Ui::draw_backup_panel(const UiState &state) {
                                   : "Triangle connects Google Drive";
   draw_text(font_, fallback_font_, 456, 112, kColorMuted, kTextSizeSmall, google_action);
 
+  if (state.remote_backups.size() + state.local_backups->size() > 0) {
+    draw_text(font_, fallback_font_, 812, 84, kColorMuted, kTextSizeTiny, "L / R selects");
+  }
+
   if (!save) {
     draw_text(font_, fallback_font_, 456, 150, kColorMuted, kTextSizeSmall,
               "Install or create saves, then reopen Save Keeper.");
@@ -496,7 +509,7 @@ void Ui::draw_status_line(const UiState &state) {
       state.status_message.empty() ? "Circle creates a timestamped ZIP snapshot."
                                    : truncate_label(state.status_message, 58);
   unsigned int color = kColorMuted;
-  if (state.restore_confirmation_pending) {
+  if (state.restore_confirmation_pending || state.delete_confirmation_pending) {
     color = kColorAccent;
   } else if (!state.status_message.empty()) {
     switch (state.status_kind) {
@@ -517,20 +530,64 @@ void Ui::draw_status_line(const UiState &state) {
 void Ui::draw_footer(const UiState &state) {
   vita2d_draw_rectangle(0, 508, 960, 36, RGBA8(3, 7, 18, 230));
 
+  const ButtonSymbol confirm = state.enter_is_cross ? ButtonSymbol::Cross : ButtonSymbol::Circle;
+  const ButtonSymbol cancel = state.enter_is_cross ? ButtonSymbol::Circle : ButtonSymbol::Cross;
+
   if (state.google_auth_pending) {
     draw_hint(font_, fallback_font_, 28, ButtonSymbol::Triangle, "Check now");
-    draw_hint(font_, fallback_font_, 200, ButtonSymbol::Cross, "Cancel sign-in");
+    draw_hint(font_, fallback_font_, 200, cancel, "Cancel sign-in");
     return;
   }
 
-  draw_text(font_, fallback_font_, 18, 522, kColorMuted, kTextSizeTiny,
-            "D-Pad saves   L/R backups");
-  draw_hint(font_, fallback_font_, 250, ButtonSymbol::Circle, "Backup");
-  draw_hint(font_, fallback_font_, 370, ButtonSymbol::Square, "Restore");
-  draw_hint(font_, fallback_font_, 500, ButtonSymbol::Select, "Upload");
-  draw_hint(font_, fallback_font_, 650, ButtonSymbol::Triangle,
+  draw_text(font_, fallback_font_, 18, 522, kColorMuted, kTextSizeTiny, "D-Pad  L/R");
+  draw_hint(font_, fallback_font_, 140, confirm, "Backup");
+  draw_hint(font_, fallback_font_, 258, ButtonSymbol::Square, "Restore");
+  draw_hint(font_, fallback_font_, 384, ButtonSymbol::Select, "Upload");
+  draw_hint(font_, fallback_font_, 520, ButtonSymbol::Start, "Delete");
+  draw_hint(font_, fallback_font_, 672, ButtonSymbol::Triangle,
             state.google_connected ? "Refresh" : "Google");
-  draw_hint(font_, fallback_font_, 790, ButtonSymbol::Cross, "Cancel");
+  draw_hint(font_, fallback_font_, 806, cancel, "Cancel");
+}
+
+void Ui::draw_busy(const std::string &label, long long done, long long total) {
+  ++frame_counter_;
+  vita2d_start_drawing();
+  vita2d_clear_screen();
+
+  constexpr int kBoxX = 280;
+  constexpr int kBoxY = 216;
+  constexpr int kBoxW = 400;
+  constexpr int kBoxH = 112;
+  vita2d_draw_rectangle(kBoxX, kBoxY, kBoxW, kBoxH, kColorPanelAlt);
+  vita2d_draw_rectangle(kBoxX, kBoxY, kBoxW, 4, kColorAccent);
+
+  draw_text(font_, fallback_font_, kBoxX + 24, kBoxY + 42, kColorText, kTextSizeNormal,
+            label.c_str());
+
+  const int bar_x = kBoxX + 24;
+  const int bar_y = kBoxY + 62;
+  const int bar_w = kBoxW - 48;
+  const int bar_h = 12;
+  vita2d_draw_rectangle(bar_x, bar_y, bar_w, bar_h, RGBA8(255, 255, 255, 24));
+
+  if (total > 0) {
+    float fraction = static_cast<float>(done) / static_cast<float>(total);
+    fraction = std::max(0.0f, std::min(1.0f, fraction));
+    vita2d_draw_rectangle(bar_x, bar_y, static_cast<int>(bar_w * fraction), bar_h, kColorAccent);
+    char percent[16];
+    std::snprintf(percent, sizeof(percent), "%d%%", static_cast<int>(fraction * 100.0f));
+    draw_text(font_, fallback_font_, bar_x, kBoxY + 98, kColorMuted, kTextSizeSmall, percent);
+  } else {
+    // Unknown size: sweep a segment across the bar so the app visibly keeps working.
+    const int segment = bar_w / 4;
+    const int travel = bar_w - segment;
+    const int offset = static_cast<int>((frame_counter_ * 8U) % static_cast<unsigned int>(travel * 2));
+    const int start = offset <= travel ? offset : travel * 2 - offset;
+    vita2d_draw_rectangle(bar_x + start, bar_y, segment, bar_h, kColorAccent);
+  }
+
+  vita2d_end_drawing();
+  vita2d_swap_buffers();
 }
 
 } // namespace vsm::vita

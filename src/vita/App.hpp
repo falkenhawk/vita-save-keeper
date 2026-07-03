@@ -27,7 +27,10 @@ private:
   void move_selected_save(int delta);
   void move_selected_backup(int delta);
   void cancel_restore_confirmation();
+  void cancel_delete_confirmation();
   void handle_restore_button();
+  void handle_delete_button();
+  void handle_backup_button();
   void load_google_token_cache();
   bool load_google_credentials();
   void handle_google_button();
@@ -58,7 +61,12 @@ private:
   std::size_t selected_save_{};
   std::size_t selected_backup_{};
   bool restore_confirmation_pending_{};
+  bool delete_confirmation_pending_{};
   bool google_connected_{};
+  // Set when sign-in completes so the first Drive listing runs one frame later, after the
+  // "connected" state has been drawn, instead of freezing the sign-in screen.
+  bool pending_remote_refresh_{};
+  bool enter_is_cross_{true};
   // Device-flow state: while a device code is active the main loop polls Google automatically at
   // the server-provided interval, so connecting only takes one Triangle press plus phone approval.
   bool google_auth_pending_{};

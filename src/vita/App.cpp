@@ -11,9 +11,11 @@
 #include "vita/SaveAppDbMetadata.hpp"
 #include "vita/net/HttpClient.hpp"
 
+#include <psp2/apputil.h>
 #include <psp2/ctrl.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
+#include <psp2/system_param.h>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -218,6 +220,7 @@ void App::move_selected_save(int delta) {
   selected_save_ = move_selection(selected_save_, saves_.size(), delta);
   if (selected_save_ != previous) {
     cancel_restore_confirmation();
+    cancel_delete_confirmation();
     remote_backups_.clear();
     refresh_local_backups();
   }
@@ -228,6 +231,7 @@ void App::move_selected_backup(int delta) {
   selected_backup_ = move_selection(selected_backup_, backup_count(), delta);
   if (selected_backup_ != previous) {
     cancel_restore_confirmation();
+    cancel_delete_confirmation();
   }
 }
 
@@ -236,6 +240,94 @@ void App::cancel_restore_confirmation() {
     restore_confirmation_pending_ = false;
     set_status(StatusKind::Info, "Restore cancelled.");
   }
+}
+
+void App::cancel_delete_confirmation() {
+  if (delete_confirmation_pending_) {
+    delete_confirmation_pending_ = false;
+    set_status(StatusKind::Info, "Delete cancelled.");
+  }
+}
+
+void App::handle_backup_button() {
+  restore_confirmation_pending_ = false;
+  delete_confirmation_pending_ = false;
+  if (saves_.empty()) {
+    set_status(StatusKind::Info, "No save selected.");
+    return;
+  }
+
+  const SaveRecord &save = saves_[selected_save_ % saves_.size()];
+  // One busy frame before the blocking ZIP work, so the screen does not look frozen.
+  ui_.draw_busy("Creating backup", 0, -1);
+  const BackupResult result = create_backup_archive({
+      save.path,
+      kBackupRoot,
+      save.id,
+      current_backup_timestamp(),
+  });
+  if (result.ok) {
+    refresh_local_backups();
+    set_status(StatusKind::Success, "Created " + result.archive_path);
+  } else {
+    set_status(StatusKind::Error, "Backup failed: " + result.error);
+  }
+}
+
+void App::handle_delete_button() {
+  if (saves_.empty()) {
+    set_status(StatusKind::Info, "No save selected.");
+    return;
+  }
+  if (backup_count() == 0) {
+    set_status(StatusKind::Info, "No backup selected.");
+    return;
+  }
+
+  const std::string backup_name = selected_backup_name();
+  if (!delete_confirmation_pending_) {
+    restore_confirmation_pending_ = false;
+    delete_confirmation_pending_ = true;
+    set_status(StatusKind::Info, "Press Start again to delete " + backup_name + ".");
+    return;
+  }
+  delete_confirmation_pending_ = false;
+
+  if (selected_backup_is_remote()) {
+    if (!ensure_google_access_token()) {
+      return;
+    }
+    const std::size_t remote_index = selected_backup_ % remote_backups_.size();
+    const RemoteBackup remote = remote_backups_[remote_index];
+    BusyLabelScope busy("Deleting Drive backup");
+    const std::string url =
+        std::string(kDriveFilesEndpoint) + "/" + form_url_encode(remote.file_id);
+    const HttpResponse response = drive_request([&](const std::string &token) {
+      return HttpClient().delete_request(url, token);
+    });
+    if (!response.ok) {
+      set_status(StatusKind::Error, "Drive delete failed.");
+      return;
+    }
+    remote_backups_.erase(remote_backups_.begin() + static_cast<long>(remote_index));
+    if (selected_backup_ >= backup_count() && selected_backup_ > 0) {
+      selected_backup_ = backup_count() == 0 ? 0 : backup_count() - 1;
+    }
+    set_status(StatusKind::Success, "Deleted [GD] " + backup_name + ".");
+    return;
+  }
+
+  const SaveRecord &save = saves_[selected_save_ % saves_.size()];
+  const std::string archive_path = local_backup_archive_path(kBackupRoot, save.id, backup_name);
+  if (std::remove(archive_path.c_str()) != 0) {
+    set_status(StatusKind::Error, "Could not delete " + backup_name + ".");
+    return;
+  }
+  refresh_local_backups();
+  if (selected_backup_ >= backup_count() && selected_backup_ > 0) {
+    selected_backup_ = backup_count() == 0 ? 0 : backup_count() - 1;
+  }
+  set_status(StatusKind::Success, "Deleted " + backup_name + ".");
 }
 
 void App::handle_restore_button() {
@@ -249,6 +341,7 @@ void App::handle_restore_button() {
   }
   const std::string backup_name = selected_backup_name();
   if (!restore_confirmation_pending_) {
+    delete_confirmation_pending_ = false;
     restore_confirmation_pending_ = true;
     set_status(StatusKind::Info, "Press restore again to restore " + backup_name + ".");
     return;
@@ -268,6 +361,7 @@ void App::handle_restore_button() {
       restore_confirmation_pending_ = false;
       return;
     }
+    BusyLabelScope busy("Downloading backup");
     const std::string download_url = std::string(kDriveFilesEndpoint) + "/" +
                                      form_url_encode(remote.file_id) + "?alt=media";
     const HttpResponse download = drive_request([&](const std::string &token) {
@@ -281,6 +375,7 @@ void App::handle_restore_button() {
     refresh_local_backups();
   }
 
+  ui_.draw_busy("Restoring save", 0, -1);
   const RestoreResult result = restore_backup_archive({
       archive_path,
       save.path,
@@ -347,6 +442,7 @@ void App::begin_google_auth() {
     return;
   }
 
+  BusyLabelScope busy("Contacting Google");
   HttpClient http;
   const HttpResponse response =
       http.post_form(kGoogleDeviceCodeEndpoint,
@@ -446,7 +542,9 @@ void App::poll_google_token() {
       return;
     }
 
-    refresh_remote_backups();
+    // The first Drive listing runs from the main loop on the next frame; doing it here would
+    // keep the sign-in screen frozen for several more requests.
+    pending_remote_refresh_ = true;
     set_status(StatusKind::Success, "Google Drive connected.");
     return;
   }
@@ -484,6 +582,7 @@ bool App::refresh_google_access_token() {
     return false;
   }
 
+  BusyLabelScope busy("Refreshing Google session");
   HttpClient http;
   const HttpResponse response = http.post_form(
       kGoogleTokenEndpoint,
@@ -568,6 +667,7 @@ std::string App::find_or_create_drive_folder(const std::string &folder_name,
 }
 
 void App::refresh_remote_backups() {
+  BusyLabelScope busy("Syncing with Google Drive");
   remote_backups_.clear();
   if (selected_backup_ >= backup_count()) {
     selected_backup_ = 0;
@@ -683,6 +783,7 @@ void App::handle_upload_button() {
     return;
   }
 
+  BusyLabelScope busy("Uploading backup");
   const HttpResponse upload_response = drive_request([&](const std::string &token) {
     return HttpClient().post_multipart_file(
         kDriveUploadEndpoint, build_drive_upload_metadata_json(backup_name, save_folder_id),
@@ -717,6 +818,21 @@ int App::run() {
   if (!HttpClient::network_startup(&network_error)) {
     set_status(StatusKind::Error, network_error);
   }
+  HttpClient::set_progress_hook([this](const std::string &label, long long done, long long total) {
+    ui_.draw_busy(label, done, total);
+  });
+
+  // Follow the console's enter-button setting: western consoles confirm with Cross, Japanese
+  // consoles with Circle. The primary Backup action sits on the confirm button and Cancel on the
+  // other one, and the footer hints follow.
+  SceAppUtilInitParam apputil_init_param {};
+  SceAppUtilBootParam apputil_boot_param {};
+  sceAppUtilInit(&apputil_init_param, &apputil_boot_param);
+  int enter_button = SCE_SYSTEM_PARAM_ENTER_BUTTON_CROSS;
+  sceAppUtilSystemParamGetInt(SCE_SYSTEM_PARAM_ID_ENTER_BUTTON, &enter_button);
+  enter_is_cross_ = enter_button != SCE_SYSTEM_PARAM_ENTER_BUTTON_CIRCLE;
+  const unsigned int backup_button = enter_is_cross_ ? SCE_CTRL_CROSS : SCE_CTRL_CIRCLE;
+  const unsigned int cancel_button = enter_is_cross_ ? SCE_CTRL_CIRCLE : SCE_CTRL_CROSS;
 
   sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
 
@@ -749,31 +865,15 @@ int App::run() {
     if ((pressed & SCE_CTRL_RTRIGGER) != 0) {
       move_selected_backup(1);
     }
-    if ((pressed & SCE_CTRL_CIRCLE) != 0) {
-      restore_confirmation_pending_ = false;
-      if (saves_.empty()) {
-        set_status(StatusKind::Info, "No save selected.");
-      } else {
-        const SaveRecord &save = saves_[selected_save_ % saves_.size()];
-        const BackupResult result = create_backup_archive({
-            save.path,
-            kBackupRoot,
-            save.id,
-            current_backup_timestamp(),
-        });
-        if (result.ok) {
-          refresh_local_backups();
-          set_status(StatusKind::Success, "Created " + result.archive_path);
-        } else {
-          set_status(StatusKind::Error, "Backup failed: " + result.error);
-        }
-      }
+    if ((pressed & backup_button) != 0) {
+      handle_backup_button();
     }
     if ((pressed & SCE_CTRL_SQUARE) != 0) {
       handle_restore_button();
     }
-    if ((pressed & SCE_CTRL_CROSS) != 0) {
+    if ((pressed & cancel_button) != 0) {
       cancel_restore_confirmation();
+      cancel_delete_confirmation();
       cancel_google_auth();
     }
     if ((pressed & SCE_CTRL_TRIANGLE) != 0) {
@@ -781,6 +881,9 @@ int App::run() {
     }
     if ((pressed & SCE_CTRL_SELECT) != 0) {
       handle_upload_button();
+    }
+    if ((pressed & SCE_CTRL_START) != 0) {
+      handle_delete_button();
     }
 
     UiState ui_state;
@@ -790,6 +893,8 @@ int App::run() {
     ui_state.local_backups = &local_backups_;
     ui_state.selected_backup = selected_backup_;
     ui_state.restore_confirmation_pending = restore_confirmation_pending_;
+    ui_state.delete_confirmation_pending = delete_confirmation_pending_;
+    ui_state.enter_is_cross = enter_is_cross_;
     ui_state.google_connected = google_connected_;
     ui_state.google_auth_pending = google_auth_pending_;
     ui_state.google_verification_url = device_code_.verification_url;
@@ -806,6 +911,16 @@ int App::run() {
     // Poll after drawing so the frame on screen already shows the waiting state while the
     // blocking token request runs.
     update_google_auth();
+
+    if (pending_remote_refresh_ && !google_auth_pending_) {
+      pending_remote_refresh_ = false;
+      refresh_remote_backups();
+      if (google_connected_) {
+        set_status(StatusKind::Success, remote_backups_.empty()
+                                            ? "Connected. No Drive backups here yet."
+                                            : "Connected. Drive backups loaded.");
+      }
+    }
 
     // This keeps the placeholder loop from busy-spinning. Vita2d swaps on vblank when configured,
     // but the small delay also keeps CPU use reasonable if vblank wait is disabled by a future build.

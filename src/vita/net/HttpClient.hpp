@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <string>
 
 namespace vsm::vita {
@@ -13,11 +14,22 @@ struct HttpResponse {
 
 class HttpClient {
 public:
+  // Called during transfers so the UI can draw progress frames. total <= 0 means the size is
+  // unknown and the UI should show an indeterminate busy state.
+  using ProgressHook =
+      std::function<void(const std::string &label, long long done, long long total)>;
+
   // Initializes the Sony network stack and libcurl once for the whole app run. Re-initializing
   // per request (the previous design) breaks when the stack is already up: sceNetInit fails and
   // every request afterwards reported "curl init failed". Safe to call repeatedly.
   static bool network_startup(std::string *error_message);
   static void network_shutdown();
+
+  static void set_progress_hook(ProgressHook hook);
+  // Requests report progress only while a busy label is set; label-less requests (such as the
+  // background sign-in polls) stay silent instead of flashing a modal every few seconds.
+  static void set_busy_label(std::string label);
+  static const std::string &busy_label();
 
   HttpResponse post_form(const std::string &url, const std::string &body) const;
   HttpResponse get_json(const std::string &url, const std::string &bearer_token) const;
@@ -28,6 +40,21 @@ public:
                                    const std::string &bearer_token) const;
   HttpResponse download_file(const std::string &url, const std::string &file_path,
                              const std::string &bearer_token) const;
+  HttpResponse delete_request(const std::string &url, const std::string &bearer_token) const;
+};
+
+// Sets the busy label for the enclosing operation and restores the previous one on scope exit,
+// so nested helpers (token refresh inside an upload) keep the outer label.
+class BusyLabelScope {
+public:
+  explicit BusyLabelScope(const char *label);
+  ~BusyLabelScope();
+
+  BusyLabelScope(const BusyLabelScope &) = delete;
+  BusyLabelScope &operator=(const BusyLabelScope &) = delete;
+
+private:
+  std::string previous_;
 };
 
 } // namespace vsm::vita
