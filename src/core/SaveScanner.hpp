@@ -13,5 +13,6 @@ struct SaveRoot {
 };
 
 std::vector<SaveRecord> scan_save_roots(const std::vector<SaveRoot> &roots);
+void sort_saves_by_display_name(std::vector<SaveRecord> *saves);
 
 } // namespace vsm

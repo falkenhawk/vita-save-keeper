@@ -2,13 +2,16 @@
 
 #include "core/GoogleAuth.hpp"
 #include "core/GoogleConfig.hpp"
+#include "core/SaveCategory.hpp"
 #include "core/SaveRecord.hpp"
 #include "vita/net/HttpClient.hpp"
 #include "vita/ui/Ui.hpp"
 
 #include <cstddef>
 #include <functional>
+#include <map>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace vsm::vita {
@@ -26,6 +29,10 @@ private:
   void refresh_local_backups();
   void move_selected_save(int delta);
   void move_selected_backup(int delta);
+  void move_selected_category(int delta);
+  void rebuild_visible_saves();
+  std::size_t category_count(SaveCategory category) const;
+  const SaveRecord *selected_save_record() const;
   void cancel_restore_confirmation();
   void cancel_delete_confirmation();
   void handle_restore_button();
@@ -44,7 +51,8 @@ private:
   HttpResponse drive_request(const std::function<HttpResponse(const std::string &)> &send);
   std::string find_or_create_drive_folder(const std::string &folder_name,
                                           const std::string &parent_id);
-  void refresh_remote_backups();
+  bool sync_drive_index();
+  void refresh_remote_backups_view();
   std::vector<std::string> remote_backup_names() const;
   std::size_t backup_count() const;
   bool selected_backup_is_remote() const;
@@ -56,8 +64,17 @@ private:
   GoogleTokenCache google_token_cache_;
   DeviceCodeResponse device_code_;
   std::vector<SaveRecord> saves_;
+  // Indices into saves_ for the active category tab; selected_save_ indexes this list.
+  std::vector<std::size_t> visible_saves_;
+  SaveCategory category_{SaveCategory::VitaGame};
   std::vector<std::string> local_backups_;
+  // remote_backups_ is the per-save view derived from drive_index_, which holds every backup in
+  // Drive keyed by save folder name. The index is filled by one paginated sync instead of a
+  // network round-trip per selected game.
   std::vector<RemoteBackup> remote_backups_;
+  std::map<std::string, std::vector<RemoteBackup>> drive_index_;
+  std::unordered_map<std::string, std::string> drive_folder_ids_;
+  std::string drive_root_folder_id_;
   std::size_t selected_save_{};
   std::size_t selected_backup_{};
   bool restore_confirmation_pending_{};

@@ -7,6 +7,7 @@
 #include "core/GoogleDrive.hpp"
 #include "core/GridWindow.hpp"
 #include "core/PathUtil.hpp"
+#include "core/SaveCategory.hpp"
 #include "core/SaveScanner.hpp"
 #include "core/Selection.hpp"
 #include "core/SfoParser.hpp"
@@ -517,6 +518,81 @@ void test_google_drive_builds_list_children_query() {
             "29");
 }
 
+void test_google_drive_builds_paged_index_queries() {
+  EXPECT_EQ(vsm::build_drive_list_all_folders_query(""),
+            "q=mimeType%3D%27application%2Fvnd.google-apps.folder%27%20and%20trashed%3Dfalse"
+            "&fields=nextPageToken%2Cfiles%28id%2Cname%2Cparents%29&pageSize=1000");
+  EXPECT_EQ(vsm::build_drive_list_all_files_query("token-1"),
+            "q=mimeType%21%3D%27application%2Fvnd.google-apps.folder%27%20and%20trashed%3Dfalse"
+            "&fields=nextPageToken%2Cfiles%28id%2Cname%2Cparents%29&pageSize=1000"
+            "&pageToken=token-1");
+}
+
+void test_google_drive_parses_parents_and_page_token() {
+  const vsm::DriveFileList files = vsm::parse_drive_file_list(
+      "{\"nextPageToken\":\"tok-2\",\"files\":["
+      "{\"id\":\"zip-1\",\"name\":\"2026-07-03 23-19.zip\",\"parents\":[\"folder-a\"]},"
+      "{\"id\":\"orphan\",\"name\":\"loose.zip\"},"
+      "{\"id\":\"zip-2\",\"name\":\"2026-07-01 10-00.zip\",\"parents\":[\"folder-b\"]}]}");
+
+  EXPECT_TRUE(files.ok);
+  EXPECT_EQ(files.next_page_token, "tok-2");
+  EXPECT_EQ(files.files.size(), static_cast<std::size_t>(3));
+  EXPECT_EQ(files.files[0].parent_id, "folder-a");
+  EXPECT_EQ(files.files[1].parent_id, "");
+  EXPECT_EQ(files.files[2].id, "zip-2");
+  EXPECT_EQ(files.files[2].parent_id, "folder-b");
+}
+
+void test_save_category_classification() {
+  vsm::SaveRecord retail;
+  retail.platform = vsm::SavePlatform::Vita;
+  retail.id = "PCSB00411";
+  EXPECT_TRUE(vsm::classify_save(retail) == vsm::SaveCategory::VitaGame);
+
+  vsm::SaveRecord homebrew;
+  homebrew.platform = vsm::SavePlatform::Vita;
+  homebrew.id = "VITADBDLD";
+  EXPECT_TRUE(vsm::classify_save(homebrew) == vsm::SaveCategory::Homebrew);
+
+  vsm::SaveRecord short_id;
+  short_id.platform = vsm::SavePlatform::Vita;
+  short_id.id = "PCSB1";
+  EXPECT_TRUE(vsm::classify_save(short_id) == vsm::SaveCategory::Homebrew);
+
+  vsm::SaveRecord title_id_wins;
+  title_id_wins.platform = vsm::SavePlatform::Vita;
+  title_id_wins.id = "SHAREDSAV";
+  title_id_wins.title_id = "PCSE00099";
+  EXPECT_TRUE(vsm::classify_save(title_id_wins) == vsm::SaveCategory::VitaGame);
+
+  vsm::SaveRecord card;
+  card.platform = vsm::SavePlatform::GameCard;
+  card.id = "WHATEVER1";
+  EXPECT_TRUE(vsm::classify_save(card) == vsm::SaveCategory::VitaGame);
+
+  vsm::SaveRecord psp;
+  psp.platform = vsm::SavePlatform::Psp;
+  psp.id = "UCES00002000";
+  EXPECT_TRUE(vsm::classify_save(psp) == vsm::SaveCategory::Psp);
+}
+
+void test_saves_sort_by_display_name_case_insensitive() {
+  std::vector<vsm::SaveRecord> saves(3);
+  saves[0].id = "PCSB00002";
+  saves[0].display_name = "the Walking Dead";
+  saves[1].id = "PCSB00001";
+  saves[1].display_name = "Axiom Verge";
+  saves[2].id = "NONAME001";
+  saves[2].display_name = "";
+
+  vsm::sort_saves_by_display_name(&saves);
+
+  EXPECT_EQ(saves[0].display_name, "Axiom Verge");
+  EXPECT_EQ(saves[1].id, "NONAME001");
+  EXPECT_EQ(saves[2].display_name, "the Walking Dead");
+}
+
 } // namespace
 
 int main() {
@@ -549,6 +625,10 @@ int main() {
   test_google_drive_parses_first_file_id();
   test_google_drive_builds_upload_metadata_json();
   test_google_drive_builds_list_children_query();
+  test_google_drive_builds_paged_index_queries();
+  test_google_drive_parses_parents_and_page_token();
+  test_save_category_classification();
+  test_saves_sort_by_display_name_case_insensitive();
 
   std::cout << "vsm_core_tests passed\n";
   return 0;

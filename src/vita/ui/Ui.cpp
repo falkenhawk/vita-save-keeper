@@ -80,12 +80,12 @@ std::string truncate_label(const std::string &text, std::size_t max_length) {
   return text.substr(0, max_length - 3) + "...";
 }
 
-const SaveRecord *selected_record(const std::vector<SaveRecord> &saves,
-                                  std::size_t selected_save) {
-  if (saves.empty()) {
+const SaveRecord *selected_visible_record(const UiState &state) {
+  if (!state.visible_saves || state.visible_saves->empty()) {
     return nullptr;
   }
-  return &saves[selected_save % saves.size()];
+  const std::vector<std::size_t> &visible = *state.visible_saves;
+  return &(*state.saves)[visible[state.selected_save % visible.size()]];
 }
 
 std::string title_id_label(const SaveRecord &save) {
@@ -279,6 +279,16 @@ void Ui::shutdown() {
   vita2d_fini();
 }
 
+int Ui::measure_text(unsigned int size, const char *text) const {
+  if (font_) {
+    return vita2d_font_text_width(font_, size, text);
+  }
+  if (fallback_font_) {
+    return vita2d_pgf_text_width(fallback_font_, 1.0f, text);
+  }
+  return 0;
+}
+
 vita2d_texture *Ui::load_icon_texture(const std::string &path) {
   if (path.empty()) {
     return nullptr;
@@ -326,10 +336,30 @@ void Ui::draw_header(const UiState &state) {
 
 void Ui::draw_title_grid(const UiState &state) {
   const std::vector<SaveRecord> &saves = *state.saves;
+  const std::vector<std::size_t> &visible = *state.visible_saves;
   vita2d_draw_rectangle(0, 52, 432, 456, kColorPanel);
   vita2d_draw_line(432, 52, 432, 508, RGBA8(255, 255, 255, 20));
 
-  draw_text(font_, fallback_font_, 18, 84, kColorText, kTextSizeNormal, "Saves");
+  // Category tabs: L/R cycles Vita / Homebrew / PSP. Tabs with zero saves stay dimmed and are
+  // skipped by the input handler.
+  int tab_x = 40;
+  for (int i = 0; i < kSaveCategoryCount; ++i) {
+    const SaveCategory category = static_cast<SaveCategory>(i);
+    const std::string label = std::string(save_category_label(category)) + " " +
+                              std::to_string(state.category_counts[static_cast<std::size_t>(i)]);
+    const bool active = category == state.active_category;
+    const bool empty = state.category_counts[static_cast<std::size_t>(i)] == 0;
+    const unsigned int color = active ? kColorText : empty ? kColorIdleDot : kColorMuted;
+    draw_text(font_, fallback_font_, tab_x, 84, color, kTextSizeSmall, label.c_str());
+    const int width = measure_text(kTextSizeSmall, label.c_str());
+    if (active) {
+      vita2d_draw_rectangle(tab_x, 90, width, 3, kColorAccent);
+    }
+    tab_x += width + 20;
+  }
+  // Small L/R chips around the tab row show which buttons switch groups.
+  draw_text(font_, fallback_font_, 16, 84, kColorIdleDot, kTextSizeTiny, "L");
+  draw_text(font_, fallback_font_, tab_x, 84, kColorIdleDot, kTextSizeTiny, "R");
 
   constexpr int kColumns = 4;
   constexpr int kRows = 3;
@@ -338,14 +368,15 @@ void Ui::draw_title_grid(const UiState &state) {
   constexpr int kGapY = 12;
   constexpr int kStartX = 16;
   constexpr int kStartY = 104;
-  const std::size_t selected = saves.empty() ? 0 : state.selected_save % saves.size();
-  title_top_row_ = grid_window_top_row(title_top_row_, selected, saves.size(), kColumns, kRows);
+  const std::size_t selected = visible.empty() ? 0 : state.selected_save % visible.size();
+  title_top_row_ = grid_window_top_row(title_top_row_, selected, visible.size(), kColumns, kRows);
   const std::size_t first_index = title_top_row_ * kColumns;
 
-  if (!saves.empty()) {
+  if (!visible.empty()) {
     const std::string count =
-        std::to_string(selected + 1) + "/" + std::to_string(saves.size());
-    draw_text(font_, fallback_font_, 350, 84, kColorMuted, kTextSizeSmall, count.c_str());
+        std::to_string(selected + 1) + "/" + std::to_string(visible.size());
+    draw_text(font_, fallback_font_, 432 - 16 - measure_text(kTextSizeSmall, count.c_str()), 84,
+              kColorMuted, kTextSizeSmall, count.c_str());
   }
 
   for (int row = 0; row < kRows; ++row) {
@@ -353,13 +384,13 @@ void Ui::draw_title_grid(const UiState &state) {
       const std::size_t index = first_index + static_cast<std::size_t>(row * kColumns + col);
       const int x = kStartX + col * (kTileSize + kGapX);
       const int y = kStartY + row * (kTileSize + kGapY);
-      if (index >= saves.size()) {
+      if (index >= visible.size()) {
         vita2d_draw_rectangle(x, y, kTileSize, kTileSize, RGBA8(255, 255, 255, 8));
         continue;
       }
 
       const bool is_selected = index == selected;
-      const SaveRecord &save = saves[index];
+      const SaveRecord &save = saves[visible[index]];
       vita2d_draw_rectangle(x - 3, y - 3, kTileSize + 6, kTileSize + 6,
                             is_selected ? kColorAccent : RGBA8(255, 255, 255, 14));
       vita2d_draw_rectangle(x, y, kTileSize, kTileSize,
@@ -378,18 +409,23 @@ void Ui::draw_title_grid(const UiState &state) {
     }
   }
 
-  const SaveRecord *save = selected_record(saves, state.selected_save);
-  if (save) {
-    const std::string title = truncate_label(save->display_name, 34);
-    const std::string id = truncate_label(title_id_label(*save), 42);
-    const std::string platform = std::string(platform_label(save->platform)) + " save";
+  if (!visible.empty()) {
+    const SaveRecord &save = saves[visible[selected]];
+    const std::string title = truncate_label(save.display_name, 34);
+    const std::string id = truncate_label(title_id_label(save), 42);
+    const std::string platform = std::string(platform_label(save.platform)) + " save";
     draw_text(font_, fallback_font_, 18, 444, kColorText, kTextSizeNormal, title.c_str());
     draw_text(font_, fallback_font_, 18, 470, kColorMuted, kTextSizeSmall, id.c_str());
     draw_text(font_, fallback_font_, 18, 492, kColorMuted, kTextSizeTiny, platform.c_str());
-  } else {
+  } else if (saves.empty()) {
     draw_text(font_, fallback_font_, 18, 430, kColorText, kTextSizeNormal, "No saves found");
     draw_text(font_, fallback_font_, 18, 456, kColorMuted, kTextSizeSmall,
               "Checked Vita, game card, and PSP roots");
+  } else {
+    draw_text(font_, fallback_font_, 18, 430, kColorText, kTextSizeNormal,
+              "No saves in this group");
+    draw_text(font_, fallback_font_, 18, 456, kColorMuted, kTextSizeSmall,
+              "L / R switches groups");
   }
 }
 
@@ -403,7 +439,7 @@ void Ui::draw_backup_panel(const UiState &state) {
   }
 
   draw_text(font_, fallback_font_, 456, 84, kColorText, kTextSizeNormal, "Backups");
-  const SaveRecord *save = selected_record(*state.saves, state.selected_save);
+  const SaveRecord *save = selected_visible_record(state);
 
   const char *google_action = state.google_connected
                                   ? "Triangle refreshes [GD] remote backups"
@@ -411,7 +447,7 @@ void Ui::draw_backup_panel(const UiState &state) {
   draw_text(font_, fallback_font_, 456, 112, kColorMuted, kTextSizeSmall, google_action);
 
   if (state.remote_backups.size() + state.local_backups->size() > 0) {
-    draw_text(font_, fallback_font_, 812, 84, kColorMuted, kTextSizeTiny, "L / R selects");
+    draw_text(font_, fallback_font_, 796, 84, kColorMuted, kTextSizeTiny, "R Stick selects");
   }
 
   if (!save) {
@@ -533,20 +569,30 @@ void Ui::draw_footer(const UiState &state) {
   const ButtonSymbol confirm = state.enter_is_cross ? ButtonSymbol::Cross : ButtonSymbol::Circle;
   const ButtonSymbol cancel = state.enter_is_cross ? ButtonSymbol::Circle : ButtonSymbol::Cross;
 
+  // The footer follows the current mode so a cancel hint only appears when there is actually
+  // something to cancel.
   if (state.google_auth_pending) {
     draw_hint(font_, fallback_font_, 28, ButtonSymbol::Triangle, "Check now");
-    draw_hint(font_, fallback_font_, 200, cancel, "Cancel sign-in");
+    draw_hint(font_, fallback_font_, 210, cancel, "Cancel sign-in");
+    return;
+  }
+  if (state.restore_confirmation_pending) {
+    draw_hint(font_, fallback_font_, 28, ButtonSymbol::Square, "Confirm restore");
+    draw_hint(font_, fallback_font_, 240, cancel, "Cancel");
+    return;
+  }
+  if (state.delete_confirmation_pending) {
+    draw_hint(font_, fallback_font_, 28, ButtonSymbol::Start, "Confirm delete");
+    draw_hint(font_, fallback_font_, 240, cancel, "Cancel");
     return;
   }
 
-  draw_text(font_, fallback_font_, 18, 522, kColorMuted, kTextSizeTiny, "D-Pad  L/R");
-  draw_hint(font_, fallback_font_, 140, confirm, "Backup");
-  draw_hint(font_, fallback_font_, 258, ButtonSymbol::Square, "Restore");
-  draw_hint(font_, fallback_font_, 384, ButtonSymbol::Select, "Upload");
-  draw_hint(font_, fallback_font_, 520, ButtonSymbol::Start, "Delete");
-  draw_hint(font_, fallback_font_, 672, ButtonSymbol::Triangle,
+  draw_hint(font_, fallback_font_, 28, confirm, "Backup");
+  draw_hint(font_, fallback_font_, 156, ButtonSymbol::Square, "Restore");
+  draw_hint(font_, fallback_font_, 292, ButtonSymbol::Select, "Upload");
+  draw_hint(font_, fallback_font_, 436, ButtonSymbol::Start, "Delete");
+  draw_hint(font_, fallback_font_, 592, ButtonSymbol::Triangle,
             state.google_connected ? "Refresh" : "Google");
-  draw_hint(font_, fallback_font_, 806, cancel, "Cancel");
 }
 
 void Ui::draw_busy(const std::string &label, long long done, long long total) {

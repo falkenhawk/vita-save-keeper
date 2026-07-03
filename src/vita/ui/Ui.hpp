@@ -1,7 +1,9 @@
 #pragma once
 
+#include "core/SaveCategory.hpp"
 #include "core/SaveRecord.hpp"
 
+#include <array>
 #include <cstddef>
 #include <map>
 #include <string>
@@ -19,6 +21,10 @@ enum class StatusKind { Info, Success, Error };
 // and stops the draw call signature from growing a parameter per feature.
 struct UiState {
   const std::vector<SaveRecord> *saves{};
+  // Indices into saves for the active category tab; selected_save indexes this list.
+  const std::vector<std::size_t> *visible_saves{};
+  SaveCategory active_category{SaveCategory::VitaGame};
+  std::array<std::size_t, kSaveCategoryCount> category_counts{};
   std::size_t selected_save{};
   std::vector<std::string> remote_backups;
   const std::vector<std::string> *local_backups{};
@@ -53,6 +59,7 @@ private:
   void draw_google_auth_panel(const UiState &state);
   void draw_status_line(const UiState &state);
   void draw_footer(const UiState &state);
+  int measure_text(unsigned int size, const char *text) const;
   vita2d_texture *load_icon_texture(const std::string &path);
 
   vita2d_font *font_{};

@@ -104,7 +104,8 @@ verification stays enabled.
 ## Vita controls
 
 - D-Pad: move through the save grid
-- L/R: move through backups for the selected save
+- L/R: switch between the Vita / Homebrew / PSP save groups
+- Right stick: move through backups for the selected save
 - Enter button (Cross on western consoles, Circle on Japanese ones, following the system
   setting): create a new timestamped local backup
 - Square: restore selected local or `[GD]` backup, with a second press to confirm

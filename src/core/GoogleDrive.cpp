@@ -102,8 +102,37 @@ std::string build_drive_list_children_query(const std::string &parent_id) {
   return "q=" + form_url_encode(query) + "&fields=files%28id%2Cname%29";
 }
 
+namespace {
+
+std::string build_paged_listing_query(const std::string &drive_query,
+                                      const std::string &page_token) {
+  std::string result = "q=" + form_url_encode(drive_query) +
+                       "&fields=" + form_url_encode("nextPageToken,files(id,name,parents)") +
+                       "&pageSize=1000";
+  if (!page_token.empty()) {
+    result += "&pageToken=" + form_url_encode(page_token);
+  }
+  return result;
+}
+
+} // namespace
+
+std::string build_drive_list_all_folders_query(const std::string &page_token) {
+  return build_paged_listing_query(
+      "mimeType='application/vnd.google-apps.folder' and trashed=false", page_token);
+}
+
+std::string build_drive_list_all_files_query(const std::string &page_token) {
+  // Everything that is not a folder: backups are matched by their .zip name afterwards, which is
+  // more reliable than trusting the mime type Drive assigned at upload time.
+  return build_paged_listing_query(
+      "mimeType!='application/vnd.google-apps.folder' and trashed=false", page_token);
+}
+
 DriveFileList parse_drive_file_list(const std::string &json) {
   DriveFileList result;
+  find_json_string_from(json, 0, "nextPageToken", &result.next_page_token, nullptr);
+
   std::size_t cursor = 0;
   while (true) {
     std::string id;
@@ -118,9 +147,25 @@ DriveFileList parse_drive_file_list(const std::string &json) {
       result.error = "file entry missing name";
       return result;
     }
-
-    result.files.push_back({id, name});
     cursor = name_end;
+
+    // Drive lists "parents" after "name" inside each file object. Only accept a parents key that
+    // appears before the next file's "id", otherwise this entry has none and the key belongs to a
+    // later file.
+    std::string parent_id;
+    const std::size_t next_id = json.find("\"id\"", name_end);
+    const std::size_t parents_pos = json.find("\"parents\"", name_end);
+    if (parents_pos != std::string::npos &&
+        (next_id == std::string::npos || parents_pos < next_id)) {
+      std::size_t parent_end = 0;
+      // The parents value is an array of quoted ids; reusing the string scanner on the region
+      // right after the key picks up the first array element.
+      if (find_json_string_from(json, parents_pos, "parents", &parent_id, &parent_end)) {
+        cursor = parent_end;
+      }
+    }
+
+    result.files.push_back({id, name, parent_id});
   }
 
   result.ok = true;

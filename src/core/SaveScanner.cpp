@@ -3,6 +3,7 @@
 #include "core/SfoParser.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <dirent.h>
 #include <string>
 #include <sys/stat.h>
@@ -132,6 +133,29 @@ void apply_sfo_metadata(SaveRecord *save) {
 }
 
 } // namespace
+
+void sort_saves_by_display_name(std::vector<SaveRecord> *saves) {
+  if (!saves) {
+    return;
+  }
+  // Case-insensitive so "the Walking Dead" and "The Walking Dead" style titles interleave the way
+  // a shelf would; ids break ties to keep the order stable between scans.
+  const auto lower = [](const std::string &text) {
+    std::string result = text;
+    for (char &ch : result) {
+      ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return result;
+  };
+  std::sort(saves->begin(), saves->end(), [&](const SaveRecord &a, const SaveRecord &b) {
+    const std::string left = lower(a.display_name.empty() ? a.id : a.display_name);
+    const std::string right = lower(b.display_name.empty() ? b.id : b.display_name);
+    if (left != right) {
+      return left < right;
+    }
+    return a.id < b.id;
+  });
+}
 
 std::vector<SaveRecord> scan_save_roots(const std::vector<SaveRoot> &roots) {
   std::vector<SaveRecord> saves;
