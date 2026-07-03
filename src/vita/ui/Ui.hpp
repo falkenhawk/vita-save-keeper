@@ -17,6 +17,10 @@ namespace vsm::vita {
 
 enum class StatusKind { Info, Success, Error };
 
+// Grid width of the save panel; D-pad up/down moves by one full row, so the input handler in App
+// must use the same value the renderer lays tiles out with.
+constexpr int kSaveGridColumns = 5;
+
 // One snapshot of everything the frame needs. Passing a struct keeps the App/Ui boundary explicit
 // and stops the draw call signature from growing a parameter per feature.
 struct UiState {
@@ -57,6 +61,7 @@ private:
   void draw_header(const UiState &state);
   void draw_title_grid(const UiState &state);
   void draw_backup_panel(const UiState &state);
+  void draw_rstick_hint(int cx, int cy);
   void draw_google_auth_panel(const UiState &state);
   void draw_status_line(const UiState &state);
   void draw_footer(const UiState &state);

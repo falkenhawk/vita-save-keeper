@@ -1035,10 +1035,10 @@ int App::run() {
       move_selected_save(1);
     }
     if ((pressed & SCE_CTRL_UP) != 0) {
-      move_selected_save(-4);
+      move_selected_save(-kSaveGridColumns);
     }
     if ((pressed & SCE_CTRL_DOWN) != 0) {
-      move_selected_save(4);
+      move_selected_save(kSaveGridColumns);
     }
     if ((pressed & SCE_CTRL_LTRIGGER) != 0) {
       move_selected_category(-1);

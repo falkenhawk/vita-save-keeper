@@ -31,8 +31,8 @@ constexpr unsigned int kColorIdleDot = RGBA8(100, 116, 139, 255);
 constexpr const char *kBundledFontPath = "app0:sce_sys/resources/Roboto-Regular.ttf";
 constexpr const char *kFallbackFontPath = "app0:sce_sys/resources/font.pgf";
 
-constexpr unsigned int kTextSizeTiny = 14;
-constexpr unsigned int kTextSizeSmall = 16;
+constexpr unsigned int kTextSizeTiny = 15;
+constexpr unsigned int kTextSizeSmall = 17;
 constexpr unsigned int kTextSizeNormal = 18;
 constexpr unsigned int kTextSizeTitle = 22;
 constexpr unsigned int kTextSizeCode = 38;
@@ -350,8 +350,8 @@ void Ui::draw_header(const UiState &state) {
 void Ui::draw_title_grid(const UiState &state) {
   const std::vector<SaveRecord> &saves = *state.saves;
   const std::vector<std::size_t> &visible = *state.visible_saves;
-  vita2d_draw_rectangle(0, 52, 432, 456, kColorPanel);
-  vita2d_draw_line(432, 52, 432, 508, RGBA8(255, 255, 255, 20));
+  vita2d_draw_rectangle(0, 52, 504, 456, kColorPanel);
+  vita2d_draw_line(504, 52, 504, 508, RGBA8(255, 255, 255, 20));
 
   // Category tabs: L/R cycles Vita / Homebrew / PSP. Tabs with zero saves stay dimmed and are
   // skipped by the input handler.
@@ -374,9 +374,9 @@ void Ui::draw_title_grid(const UiState &state) {
   draw_text(font_, fallback_font_, 16, 84, kColorIdleDot, kTextSizeTiny, "L");
   draw_text(font_, fallback_font_, tab_x, 84, kColorIdleDot, kTextSizeTiny, "R");
 
-  constexpr int kColumns = 4;
-  constexpr int kRows = 3;
-  constexpr int kTileSize = 96;
+  constexpr int kColumns = kSaveGridColumns;
+  constexpr int kRows = 4;
+  constexpr int kTileSize = 88;
   constexpr int kGapX = 8;
   constexpr int kGapY = 12;
   constexpr int kStartX = 16;
@@ -388,7 +388,7 @@ void Ui::draw_title_grid(const UiState &state) {
   if (!visible.empty()) {
     const std::string count =
         std::to_string(selected + 1) + "/" + std::to_string(visible.size());
-    draw_text(font_, fallback_font_, 432 - 16 - measure_text(kTextSizeSmall, count.c_str()), 84,
+    draw_text(font_, fallback_font_, 504 - 16 - measure_text(kTextSizeSmall, count.c_str()), 84,
               kColorMuted, kTextSizeSmall, count.c_str());
   }
 
@@ -422,28 +422,24 @@ void Ui::draw_title_grid(const UiState &state) {
     }
   }
 
-  if (!visible.empty()) {
-    const SaveRecord &save = saves[visible[selected]];
-    const std::string title = truncate_label(save.display_name, 34);
-    const std::string id = truncate_label(title_id_label(save), 42);
-    const std::string platform = std::string(platform_label(save.platform)) + " save";
-    draw_text(font_, fallback_font_, 18, 444, kColorText, kTextSizeNormal, title.c_str());
-    draw_text(font_, fallback_font_, 18, 470, kColorMuted, kTextSizeSmall, id.c_str());
-    draw_text(font_, fallback_font_, 18, 492, kColorMuted, kTextSizeTiny, platform.c_str());
-  } else if (saves.empty()) {
-    draw_text(font_, fallback_font_, 18, 430, kColorText, kTextSizeNormal, "No saves found");
-    draw_text(font_, fallback_font_, 18, 456, kColorMuted, kTextSizeSmall,
-              "Checked Vita, game card, and PSP roots");
-  } else {
-    draw_text(font_, fallback_font_, 18, 430, kColorText, kTextSizeNormal,
-              "No saves in this group");
-    draw_text(font_, fallback_font_, 18, 456, kColorMuted, kTextSizeSmall,
-              "L / R switches groups");
+  if (visible.empty()) {
+    // Selected-save details live at the top of the right pane; the grid area only needs the
+    // empty states.
+    if (saves.empty()) {
+      draw_text(font_, fallback_font_, 120, 280, kColorText, kTextSizeNormal, "No saves found");
+      draw_text(font_, fallback_font_, 120, 306, kColorMuted, kTextSizeSmall,
+                "Checked Vita, game card, and PSP roots");
+    } else {
+      draw_text(font_, fallback_font_, 120, 280, kColorText, kTextSizeNormal,
+                "No saves in this group");
+      draw_text(font_, fallback_font_, 120, 306, kColorMuted, kTextSizeSmall,
+                "L / R switches groups");
+    }
   }
 }
 
 void Ui::draw_backup_panel(const UiState &state) {
-  vita2d_draw_rectangle(432, 52, 528, 456, RGBA8(15, 23, 42, 255));
+  vita2d_draw_rectangle(504, 52, 456, 456, RGBA8(15, 23, 42, 255));
 
   if (state.google_auth_pending && !state.google_user_code.empty()) {
     draw_google_auth_panel(state);
@@ -451,95 +447,98 @@ void Ui::draw_backup_panel(const UiState &state) {
     return;
   }
 
-  draw_text(font_, fallback_font_, 456, 84, kColorText, kTextSizeNormal, "Backups");
   const SaveRecord *save = selected_visible_record(state);
-
-  const char *google_action = state.google_connected
-                                  ? "Triangle refreshes [GD] remote backups"
-                                  : "Triangle connects Google Drive";
-  draw_text(font_, fallback_font_, 456, 112, kColorMuted, kTextSizeSmall, google_action);
-
-  if (state.remote_backups.size() + state.local_backups->size() > 0) {
-    draw_text(font_, fallback_font_, 796, 84, kColorMuted, kTextSizeTiny, "R Stick selects");
-  }
-
   if (!save) {
-    draw_text(font_, fallback_font_, 456, 150, kColorMuted, kTextSizeSmall,
+    draw_text(font_, fallback_font_, 528, 96, kColorMuted, kTextSizeSmall,
               "Install or create saves, then reopen Save Keeper.");
     draw_status_line(state);
     return;
   }
 
-  const std::string selected_label = truncate_label(save->display_name, 36);
-  draw_text(font_, fallback_font_, 456, 138, kColorMuted, kTextSizeSmall,
-            selected_label.c_str());
+  // Selected-save details live here, in one place, above its backup menu.
+  const std::string title = truncate_label(save->display_name, 30);
+  const std::string details = truncate_label(
+      title_id_label(*save) + "  |  " + platform_label(save->platform) + " save", 44);
+  draw_text(font_, fallback_font_, 528, 88, kColorText, kTextSizeNormal, title.c_str());
+  draw_text(font_, fallback_font_, 528, 112, kColorMuted, kTextSizeSmall, details.c_str());
 
-  constexpr std::size_t kVisibleBackups = 5;
+  constexpr std::size_t kVisibleEntries = 7;
   const std::vector<BackupEntry> all_entries =
       build_backup_menu(state.remote_backups, *state.local_backups);
-  const std::size_t selectable_count =
-      state.remote_backups.size() + state.local_backups->size();
   // Menu indices match the App: 0 is the always-selectable "New Backup" entry.
   const std::size_t selected_entry = state.selected_backup;
   const std::size_t backup_window =
-      all_entries.size() <= kVisibleBackups + 1
+      all_entries.size() <= kVisibleEntries
           ? 0
-          : std::min(selected_entry, all_entries.size() - (kVisibleBackups + 1));
+          : std::min(selected_entry, all_entries.size() - kVisibleEntries);
 
   std::vector<BackupEntry> entries;
   for (std::size_t i = backup_window;
-       i < all_entries.size() && entries.size() < kVisibleBackups + 1; ++i) {
+       i < all_entries.size() && entries.size() < kVisibleEntries; ++i) {
     entries.push_back(all_entries[i]);
   }
 
-  int y = 164;
+  int y = 136;
   const std::size_t visible_count = entries.size();
   for (std::size_t i = 0; i < visible_count; ++i) {
     const bool selected = (i + backup_window) == selected_entry;
     const unsigned int bg = selected ? kColorAccentSoft : RGBA8(255, 255, 255, 18);
-    vita2d_draw_rectangle(456, y, 460, 36, bg);
+    vita2d_draw_rectangle(528, y, 408, 36, bg);
     if (selected) {
-      vita2d_draw_rectangle(456, y, 4, 36, kColorAccent);
+      vita2d_draw_rectangle(528, y, 4, 36, kColorAccent);
     }
 
-    const std::string label = truncate_label(entries[i].display_name(), 46);
-    draw_text(font_, fallback_font_, 470, y + 24, selected ? kColorText : kColorMuted,
+    const std::string label = truncate_label(entries[i].display_name(), 42);
+    draw_text(font_, fallback_font_, 542, y + 24, selected ? kColorText : kColorMuted,
               kTextSizeSmall, label.c_str());
     y += 42;
   }
 
-  if (selectable_count == 0) {
-    draw_text(font_, fallback_font_, 470, 230, kColorMuted, kTextSizeSmall, "No backups yet");
-  } else if (all_entries.size() > entries.size()) {
-    draw_text(font_, fallback_font_, 470, 414, kColorMuted, kTextSizeSmall,
-              "More backups below");
+  if (all_entries.size() > backup_window + entries.size()) {
+    // A small chevron says "more below" without spending a text row on it.
+    vita2d_draw_line(714, 436, 720, 442, kColorMuted);
+    vita2d_draw_line(720, 442, 726, 436, kColorMuted);
+  }
+
+  if (state.remote_backups.size() + state.local_backups->size() > 0) {
+    draw_rstick_hint(930, 470);
   }
 
   draw_status_line(state);
 }
 
+void Ui::draw_rstick_hint(int cx, int cy) {
+  // Right-stick pictogram: a stick cap marked R with up/down chevrons.
+  vita2d_draw_fill_circle(cx, cy, 9, RGBA8(255, 255, 255, 26));
+  draw_text(font_, fallback_font_, cx - 4, cy + 5, kColorIdleDot, kTextSizeTiny, "R");
+  vita2d_draw_line(cx - 4, cy - 14, cx, cy - 18, kColorIdleDot);
+  vita2d_draw_line(cx, cy - 18, cx + 4, cy - 14, kColorIdleDot);
+  vita2d_draw_line(cx - 4, cy + 14, cx, cy + 18, kColorIdleDot);
+  vita2d_draw_line(cx, cy + 18, cx + 4, cy + 14, kColorIdleDot);
+}
+
 void Ui::draw_google_auth_panel(const UiState &state) {
-  draw_text(font_, fallback_font_, 456, 90, kColorText, kTextSizeTitle, "Connect Google Drive");
+  draw_text(font_, fallback_font_, 528, 90, kColorText, kTextSizeTitle, "Connect Google Drive");
 
-  draw_text(font_, fallback_font_, 456, 138, kColorText, kTextSizeNormal,
-            "1  Scan the QR code with your phone");
-  draw_text(font_, fallback_font_, 456, 168, kColorText, kTextSizeNormal,
-            "2  Sign in and approve Save Keeper");
-  draw_text(font_, fallback_font_, 456, 198, kColorText, kTextSizeNormal,
-            "3  This screen finishes by itself");
+  // Short step lines: the QR block occupies the pane's right edge from x=804.
+  draw_text(font_, fallback_font_, 528, 138, kColorText, kTextSizeNormal,
+            "1  Scan the QR code");
+  draw_text(font_, fallback_font_, 528, 168, kColorText, kTextSizeNormal,
+            "2  Approve Save Keeper");
+  draw_text(font_, fallback_font_, 528, 198, kColorText, kTextSizeNormal,
+            "3  Finishes by itself");
 
-  // Keep this line short: the QR block starts at x=776, and a longer sentence would run into it.
-  const std::string url = "Or visit " + display_url(state.google_verification_url) + " and enter:";
-  draw_text(font_, fallback_font_, 456, 246, kColorMuted, kTextSizeSmall,
+  const std::string url = "Or enter the code at " + display_url(state.google_verification_url);
+  draw_text(font_, fallback_font_, 528, 246, kColorMuted, kTextSizeTiny,
             truncate_label(url, 40).c_str());
-  draw_text(font_, fallback_font_, 456, 300, kColorAccent, kTextSizeCode,
+  draw_text(font_, fallback_font_, 528, 300, kColorAccent, kTextSizeCode,
             state.google_user_code.c_str());
 
   // The QR code carries the verification URL with the user code pre-filled, so scanning skips the
   // typing step entirely.
   const std::string qr_url = build_device_verification_qr_url(state.google_verification_url,
                                                               state.google_user_code);
-  draw_qr_code(qr_url, 776, 108, 4);
+  draw_qr_code(qr_url, 804, 104, 4);
 
   // A lightweight pulse so the wait feels alive: one dot per half second, cycling.
   const int dot_count = 1 + static_cast<int>((frame_counter_ / 30U) % 3U);
@@ -547,18 +546,18 @@ void Ui::draw_google_auth_panel(const UiState &state) {
   for (int i = 0; i < dot_count; ++i) {
     waiting.push_back('.');
   }
-  draw_text(font_, fallback_font_, 456, 360, kColorMuted, kTextSizeNormal, waiting.c_str());
+  draw_text(font_, fallback_font_, 528, 360, kColorMuted, kTextSizeNormal, waiting.c_str());
 
   const std::string validity =
       "Code valid for " + format_minutes_seconds(state.auth_seconds_left);
-  draw_text(font_, fallback_font_, 456, 388, kColorMuted, kTextSizeTiny, validity.c_str());
+  draw_text(font_, fallback_font_, 528, 388, kColorMuted, kTextSizeTiny, validity.c_str());
 }
 
 void Ui::draw_status_line(const UiState &state) {
   if (state.status_message.empty()) {
     return;
   }
-  const std::string status = truncate_label(state.status_message, 58);
+  const std::string status = truncate_label(state.status_message, 48);
   unsigned int color = kColorMuted;
   if (state.restore_confirmation_pending || state.delete_confirmation_pending) {
     color = kColorAccent;
@@ -575,7 +574,7 @@ void Ui::draw_status_line(const UiState &state) {
       break;
     }
   }
-  draw_text(font_, fallback_font_, 456, 462, color, kTextSizeSmall, status.c_str());
+  draw_text(font_, fallback_font_, 528, 462, color, kTextSizeSmall, status.c_str());
 }
 
 void Ui::draw_footer(const UiState &state) {
