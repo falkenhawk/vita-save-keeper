@@ -41,5 +41,7 @@ std::string build_refresh_token_request_body(const std::string &client_id,
                                              const std::string &refresh_token);
 DeviceCodeResponse parse_device_code_response(const std::string &json);
 TokenResponse parse_token_response(const std::string &json);
+std::string build_device_verification_qr_url(const std::string &verification_url,
+                                             const std::string &user_code);
 
 } // namespace vsm

@@ -26,6 +26,12 @@ namespace vsm::vita {
 namespace {
 
 constexpr int kFrameDelayUs = 16 * 1000;
+// The loop runs at roughly 60 frames per second (16 ms delay plus vblank), so poll timers are
+// counted in frames instead of wall-clock threads to keep the app single-threaded.
+constexpr int kFramesPerSecond = 60;
+// One dropped request should not abort a sign-in, but a dead connection should stop the flow
+// instead of polling forever.
+constexpr int kAuthMaxPollFailures = 5;
 constexpr const char *kDataRoot = "ux0:data/save-keeper";
 constexpr const char *kBackupRoot = "ux0:data/save-keeper/backups";
 constexpr const char *kGoogleClientPath = "ux0:data/save-keeper/google-client.json";
@@ -188,6 +194,11 @@ std::string token_error_text(const TokenResponse &response) {
 
 } // namespace
 
+void App::set_status(StatusKind kind, std::string message) {
+  status_kind_ = kind;
+  status_message_ = std::move(message);
+}
+
 void App::refresh_local_backups() {
   if (saves_.empty()) {
     local_backups_.clear();
@@ -223,23 +234,23 @@ void App::move_selected_backup(int delta) {
 void App::cancel_restore_confirmation() {
   if (restore_confirmation_pending_) {
     restore_confirmation_pending_ = false;
-    status_message_ = "Restore cancelled.";
+    set_status(StatusKind::Info, "Restore cancelled.");
   }
 }
 
 void App::handle_restore_button() {
   if (saves_.empty()) {
-    status_message_ = "No save selected.";
+    set_status(StatusKind::Info, "No save selected.");
     return;
   }
   if (backup_count() == 0) {
-    status_message_ = "No backup selected.";
+    set_status(StatusKind::Info, "No backup selected.");
     return;
   }
   const std::string backup_name = selected_backup_name();
   if (!restore_confirmation_pending_) {
     restore_confirmation_pending_ = true;
-    status_message_ = "Press restore again to restore " + backup_name + ".";
+    set_status(StatusKind::Info, "Press restore again to restore " + backup_name + ".");
     return;
   }
 
@@ -253,18 +264,18 @@ void App::handle_restore_button() {
     }
     const RemoteBackup &remote = remote_backups_[selected_backup_ % remote_backups_.size()];
     if (!ensure_parent_directory(archive_path)) {
-      status_message_ = "Could not create local backup folder.";
+      set_status(StatusKind::Error, "Could not create local backup folder.");
       restore_confirmation_pending_ = false;
       return;
     }
-    HttpClient http;
     const std::string download_url = std::string(kDriveFilesEndpoint) + "/" +
                                      form_url_encode(remote.file_id) + "?alt=media";
-    const HttpResponse download =
-        http.download_file(download_url, archive_path, google_token_cache_.access_token);
+    const HttpResponse download = drive_request([&](const std::string &token) {
+      return HttpClient().download_file(download_url, archive_path, token);
+    });
     if (!download.ok) {
       restore_confirmation_pending_ = false;
-      status_message_ = "Drive download failed.";
+      set_status(StatusKind::Error, "Drive download failed.");
       return;
     }
     refresh_local_backups();
@@ -275,9 +286,13 @@ void App::handle_restore_button() {
       save.path,
   });
   restore_confirmation_pending_ = false;
-  status_message_ = result.ok ? (remote_restore ? "Downloaded and restored [GD] " + backup_name
-                                                : "Restored " + backup_name)
-                              : "Restore failed: " + result.error;
+  if (result.ok) {
+    set_status(StatusKind::Success, remote_restore
+                                        ? "Downloaded and restored [GD] " + backup_name
+                                        : "Restored " + backup_name);
+  } else {
+    set_status(StatusKind::Error, "Restore failed: " + result.error);
+  }
 }
 
 void App::load_google_token_cache() {
@@ -303,53 +318,116 @@ bool App::load_google_credentials() {
 
   std::string json;
   if (!read_text_file(kGoogleClientPath, &json)) {
-    status_message_ = "Google auth is not configured in this VPK.";
+    set_status(StatusKind::Error, "No Google client set up - see docs/google-drive-setup.md");
     return false;
   }
 
   google_credentials_ = parse_google_client_credentials(json);
   if (!google_credentials_.ok) {
-    status_message_ = "Google client JSON needs client_id and client_secret.";
+    set_status(StatusKind::Error, "Google client JSON needs client_id and client_secret.");
   }
   return google_credentials_.ok;
 }
 
 void App::handle_google_button() {
+  if (google_auth_pending_) {
+    // Skip the remaining wait and check with Google right away.
+    auth_poll_delay_frames_ = 0;
+    return;
+  }
+  if (google_connected_) {
+    refresh_remote_backups();
+    return;
+  }
+  begin_google_auth();
+}
+
+void App::begin_google_auth() {
   if (!load_google_credentials()) {
     return;
   }
 
   HttpClient http;
-  if (!google_auth_pending_) {
-    if (google_connected_) {
-      refresh_remote_backups();
-      return;
-    }
-
-    const HttpResponse response =
-        http.post_form(kGoogleDeviceCodeEndpoint,
-                       build_device_code_request_body(google_credentials_.client_id));
-    if (!response.ok) {
-      status_message_ = response.error.empty() ? "Google device request failed."
-                                               : "Google request failed: " + response.error;
-      return;
-    }
-
-    device_code_ = parse_device_code_response(response.body);
-    if (!device_code_.ok) {
-      status_message_ = "Google device response invalid.";
-      return;
-    }
-
-    google_auth_pending_ = true;
-    status_message_ = "Scan QR, approve Google, then press Triangle again.";
+  const HttpResponse response =
+      http.post_form(kGoogleDeviceCodeEndpoint,
+                     build_device_code_request_body(google_credentials_.client_id));
+  if (!response.ok) {
+    set_status(StatusKind::Error,
+               response.error.empty()
+                   ? "Google device request failed (HTTP " + std::to_string(response.status) + ")."
+                   : "Google request failed: " + response.error);
     return;
   }
 
+  device_code_ = parse_device_code_response(response.body);
+  if (!device_code_.ok) {
+    set_status(StatusKind::Error, "Google device response invalid.");
+    return;
+  }
+
+  google_auth_pending_ = true;
+  auth_poll_interval_seconds_ = device_code_.interval > 0 ? device_code_.interval : 5;
+  auth_poll_delay_frames_ = auth_poll_interval_seconds_ * kFramesPerSecond;
+  auth_poll_failures_ = 0;
+  // Google device codes are valid for around 30 minutes; keep a fallback in case the field is
+  // missing so the flow still times out instead of polling forever.
+  device_code_expires_at_ =
+      current_epoch_seconds() + (device_code_.expires_in > 0 ? device_code_.expires_in : 1800);
+  set_status(StatusKind::Info, "Scan the QR code with your phone and approve access.");
+}
+
+void App::cancel_google_auth() {
+  if (!google_auth_pending_) {
+    return;
+  }
+  google_auth_pending_ = false;
+  device_code_ = {};
+  set_status(StatusKind::Info, "Google sign-in cancelled.");
+}
+
+void App::update_google_auth() {
+  if (!google_auth_pending_) {
+    return;
+  }
+
+  if (current_epoch_seconds() >= device_code_expires_at_) {
+    google_auth_pending_ = false;
+    device_code_ = {};
+    set_status(StatusKind::Error, "Sign-in code expired. Press Triangle for a new code.");
+    return;
+  }
+
+  if (auth_poll_delay_frames_ > 0) {
+    --auth_poll_delay_frames_;
+    return;
+  }
+  poll_google_token();
+}
+
+void App::poll_google_token() {
+  auth_poll_delay_frames_ = auth_poll_interval_seconds_ * kFramesPerSecond;
+
+  HttpClient http;
   const HttpResponse response = http.post_form(
       kGoogleTokenEndpoint,
-      build_device_token_request_body(google_credentials_.client_id, google_credentials_.client_secret,
+      build_device_token_request_body(google_credentials_.client_id,
+                                      google_credentials_.client_secret,
                                       device_code_.device_code));
+  if (!response.ok && response.body.empty()) {
+    // Transport-level failure (Wi-Fi drop, DNS timeout). Google was never reached, so the device
+    // code is still valid; keep the sign-in alive unless the connection looks dead.
+    ++auth_poll_failures_;
+    if (auth_poll_failures_ >= kAuthMaxPollFailures) {
+      google_auth_pending_ = false;
+      device_code_ = {};
+      set_status(StatusKind::Error, "Network trouble stopped the sign-in: " + response.error);
+    } else {
+      set_status(StatusKind::Info, "Network hiccup while checking with Google; retrying.");
+    }
+    return;
+  }
+  auth_poll_failures_ = 0;
+
   const TokenResponse token = parse_token_response(response.body);
   if (token.ok) {
     GoogleTokenCache cache;
@@ -360,25 +438,40 @@ void App::handle_google_button() {
     cache.token_type = token.token_type;
     cache.expires_at_epoch_seconds = current_epoch_seconds() + token.expires_in;
     google_token_cache_ = cache;
-    if (!save_google_token_cache()) {
-      status_message_ = "Google connected, but token save failed.";
-      return;
-    }
-
     google_connected_ = true;
     google_auth_pending_ = false;
     device_code_ = {};
-    status_message_ = "Google Drive connected.";
+    if (!save_google_token_cache()) {
+      set_status(StatusKind::Error, "Google connected, but token save failed.");
+      return;
+    }
+
+    refresh_remote_backups();
+    set_status(StatusKind::Success, "Google Drive connected.");
     return;
   }
 
   if (token.error == "authorization_pending") {
-    status_message_ = "Waiting for browser approval.";
+    set_status(StatusKind::Info, "Waiting for approval on your phone.");
   } else if (token.error == "slow_down") {
-    status_message_ = "Google asked to slow down before polling.";
+    // RFC 8628: on slow_down the client must add five seconds to the poll interval.
+    auth_poll_interval_seconds_ += 5;
+    auth_poll_delay_frames_ = auth_poll_interval_seconds_ * kFramesPerSecond;
+    set_status(StatusKind::Info, "Waiting for approval on your phone.");
+  } else if (token.error == "expired_token" || token.error == "invalid_grant") {
+    // Google does not send the RFC 8628 expired_token error; a device code that expired or was
+    // already claimed comes back as invalid_grant instead.
+    google_auth_pending_ = false;
+    device_code_ = {};
+    set_status(StatusKind::Error, "Sign-in code expired. Press Triangle for a new code.");
+  } else if (token.error == "access_denied") {
+    google_auth_pending_ = false;
+    device_code_ = {};
+    set_status(StatusKind::Error, "Google access was denied on the other device.");
   } else {
     google_auth_pending_ = false;
-    status_message_ = "Google auth failed: " + token_error_text(token);
+    device_code_ = {};
+    set_status(StatusKind::Error, "Google auth failed: " + token_error_text(token));
   }
 }
 
@@ -398,8 +491,17 @@ bool App::refresh_google_access_token() {
                                        google_token_cache_.refresh_token));
   const TokenResponse token = parse_token_response(response.body);
   if (!token.ok) {
-    status_message_ = "Google refresh failed: " + token_error_text(token);
     google_connected_ = false;
+    if (token.error == "invalid_grant") {
+      // The refresh token was revoked or expired server-side (for example a consent screen still
+      // in "Testing" status expires refresh tokens after seven days). Clear the stored token so
+      // the next launch does not claim a connection that no longer works.
+      google_token_cache_ = {};
+      save_google_token_cache();
+      set_status(StatusKind::Error, "Google session expired. Press Triangle to reconnect.");
+    } else {
+      set_status(StatusKind::Error, "Google refresh failed: " + token_error_text(token));
+    }
     return false;
   }
 
@@ -413,7 +515,7 @@ bool App::refresh_google_access_token() {
 
 bool App::ensure_google_access_token() {
   if (!google_token_cache_.ok) {
-    status_message_ = "Connect Google Drive first.";
+    set_status(StatusKind::Info, "Connect Google Drive first.");
     return false;
   }
   if (!google_token_cache_.access_token.empty() &&
@@ -423,12 +525,23 @@ bool App::ensure_google_access_token() {
   return refresh_google_access_token();
 }
 
+HttpResponse App::drive_request(const std::function<HttpResponse(const std::string &)> &send) {
+  HttpResponse response = send(google_token_cache_.access_token);
+  if (response.status == 401 && refresh_google_access_token()) {
+    // Google can revoke an access token before its local expiry timestamp; one refresh-and-retry
+    // covers that without turning every Drive call into a loop.
+    response = send(google_token_cache_.access_token);
+  }
+  return response;
+}
+
 std::string App::find_or_create_drive_folder(const std::string &folder_name,
                                              const std::string &parent_id) {
-  HttpClient http;
   const std::string list_url = std::string(kDriveFilesEndpoint) + "?" +
                                build_drive_find_folder_query(folder_name, parent_id);
-  const HttpResponse list_response = http.get_json(list_url, google_token_cache_.access_token);
+  const HttpResponse list_response = drive_request([&](const std::string &token) {
+    return HttpClient().get_json(list_url, token);
+  });
   if (list_response.ok) {
     const DriveFileList files = parse_drive_file_list(list_response.body);
     if (files.ok && !files.files.empty()) {
@@ -437,17 +550,18 @@ std::string App::find_or_create_drive_folder(const std::string &folder_name,
   }
 
   const std::string create_url = std::string(kDriveFilesEndpoint) + "?fields=id%2Cname";
-  const HttpResponse create_response = http.post_json(
-      create_url, build_drive_folder_metadata_json(folder_name, parent_id),
-      google_token_cache_.access_token);
+  const HttpResponse create_response = drive_request([&](const std::string &token) {
+    return HttpClient().post_json(
+        create_url, build_drive_folder_metadata_json(folder_name, parent_id), token);
+  });
   if (!create_response.ok) {
-    status_message_ = "Drive folder create failed.";
+    set_status(StatusKind::Error, "Drive folder create failed.");
     return {};
   }
 
   const DriveFileList created = parse_drive_file_list(create_response.body);
   if (!created.ok || created.files.empty()) {
-    status_message_ = "Drive folder response invalid.";
+    set_status(StatusKind::Error, "Drive folder response invalid.");
     return {};
   }
   return created.files[0].id;
@@ -459,7 +573,7 @@ void App::refresh_remote_backups() {
     selected_backup_ = 0;
   }
   if (saves_.empty()) {
-    status_message_ = "No save selected.";
+    set_status(StatusKind::Info, "No save selected.");
     return;
   }
   if (!ensure_google_access_token()) {
@@ -481,18 +595,19 @@ void App::refresh_remote_backups() {
     return;
   }
 
-  HttpClient http;
   const std::string list_url = std::string(kDriveFilesEndpoint) + "?" +
                                build_drive_list_children_query(save_folder_id);
-  const HttpResponse list_response = http.get_json(list_url, google_token_cache_.access_token);
+  const HttpResponse list_response = drive_request([&](const std::string &token) {
+    return HttpClient().get_json(list_url, token);
+  });
   if (!list_response.ok) {
-    status_message_ = "Drive list failed.";
+    set_status(StatusKind::Error, "Drive list failed.");
     return;
   }
 
   const DriveFileList files = parse_drive_file_list(list_response.body);
   if (!files.ok) {
-    status_message_ = "Drive list response invalid.";
+    set_status(StatusKind::Error, "Drive list response invalid.");
     return;
   }
   for (const DriveFile &file : files.files) {
@@ -503,8 +618,11 @@ void App::refresh_remote_backups() {
   if (selected_backup_ >= backup_count()) {
     selected_backup_ = 0;
   }
-  status_message_ = remote_backups_.empty() ? "No Drive backups for this save."
-                                            : "Drive backups refreshed.";
+  if (remote_backups_.empty()) {
+    set_status(StatusKind::Info, "No Drive backups for this save.");
+  } else {
+    set_status(StatusKind::Success, "Drive backups refreshed.");
+  }
 }
 
 std::vector<std::string> App::remote_backup_names() const {
@@ -537,11 +655,11 @@ std::string App::selected_backup_name() const {
 
 void App::handle_upload_button() {
   if (saves_.empty()) {
-    status_message_ = "No save selected.";
+    set_status(StatusKind::Info, "No save selected.");
     return;
   }
   if (local_backups_.empty() || selected_backup_is_remote()) {
-    status_message_ = "No local backup selected.";
+    set_status(StatusKind::Info, "No local backup selected.");
     return;
   }
   if (!ensure_google_access_token()) {
@@ -565,15 +683,16 @@ void App::handle_upload_button() {
     return;
   }
 
-  HttpClient http;
-  const HttpResponse upload_response = http.post_multipart_file(
-      kDriveUploadEndpoint, build_drive_upload_metadata_json(backup_name, save_folder_id),
-      archive_path, google_token_cache_.access_token);
-  status_message_ = upload_response.ok ? "Uploaded [GD] " + backup_name
-                                       : "Drive upload failed.";
+  const HttpResponse upload_response = drive_request([&](const std::string &token) {
+    return HttpClient().post_multipart_file(
+        kDriveUploadEndpoint, build_drive_upload_metadata_json(backup_name, save_folder_id),
+        archive_path, token);
+  });
   if (upload_response.ok) {
     refresh_remote_backups();
-    status_message_ = "Uploaded [GD] " + backup_name;
+    set_status(StatusKind::Success, "Uploaded [GD] " + backup_name);
+  } else {
+    set_status(StatusKind::Error, "Drive upload failed.");
   }
 }
 
@@ -587,10 +706,17 @@ int App::run() {
   saves_ = scan_save_roots(default_save_roots());
   const AppDbMetadataResult metadata_result = apply_app_db_metadata(&saves_);
   if (!metadata_result.ok && !metadata_result.error.empty()) {
-    status_message_ = "Using save-folder metadata: " + metadata_result.error;
+    set_status(StatusKind::Info, "Using save-folder metadata: " + metadata_result.error);
   }
   refresh_local_backups();
   load_google_token_cache();
+
+  // Bring the network stack up once for the whole run. Doing this per request was fragile: a
+  // second initialization of an already-running stack fails and every request after that failed.
+  std::string network_error;
+  if (!HttpClient::network_startup(&network_error)) {
+    set_status(StatusKind::Error, network_error);
+  }
 
   sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
 
@@ -626,7 +752,7 @@ int App::run() {
     if ((pressed & SCE_CTRL_CIRCLE) != 0) {
       restore_confirmation_pending_ = false;
       if (saves_.empty()) {
-        status_message_ = "No save selected.";
+        set_status(StatusKind::Info, "No save selected.");
       } else {
         const SaveRecord &save = saves_[selected_save_ % saves_.size()];
         const BackupResult result = create_backup_archive({
@@ -635,10 +761,11 @@ int App::run() {
             save.id,
             current_backup_timestamp(),
         });
-        status_message_ = result.ok ? "Created " + result.archive_path
-                                    : "Backup failed: " + result.error;
         if (result.ok) {
           refresh_local_backups();
+          set_status(StatusKind::Success, "Created " + result.archive_path);
+        } else {
+          set_status(StatusKind::Error, "Backup failed: " + result.error);
         }
       }
     }
@@ -647,6 +774,7 @@ int App::run() {
     }
     if ((pressed & SCE_CTRL_CROSS) != 0) {
       cancel_restore_confirmation();
+      cancel_google_auth();
     }
     if ((pressed & SCE_CTRL_TRIANGLE) != 0) {
       handle_google_button();
@@ -655,16 +783,36 @@ int App::run() {
       handle_upload_button();
     }
 
-    ui_.draw(saves_, selected_save_, remote_backup_names(), local_backups_, selected_backup_,
-             restore_confirmation_pending_, google_connected_, google_auth_pending_,
-             device_code_.verification_url, device_code_.user_code, status_message_);
+    UiState ui_state;
+    ui_state.saves = &saves_;
+    ui_state.selected_save = selected_save_;
+    ui_state.remote_backups = remote_backup_names();
+    ui_state.local_backups = &local_backups_;
+    ui_state.selected_backup = selected_backup_;
+    ui_state.restore_confirmation_pending = restore_confirmation_pending_;
+    ui_state.google_connected = google_connected_;
+    ui_state.google_auth_pending = google_auth_pending_;
+    ui_state.google_verification_url = device_code_.verification_url;
+    ui_state.google_user_code = device_code_.user_code;
+    ui_state.auth_seconds_left =
+        google_auth_pending_
+            ? static_cast<int>(device_code_expires_at_ - current_epoch_seconds())
+            : 0;
+    ui_state.status_message = status_message_;
+    ui_state.status_kind = status_kind_;
+    ui_.draw(ui_state);
     previous_buttons = buttons;
+
+    // Poll after drawing so the frame on screen already shows the waiting state while the
+    // blocking token request runs.
+    update_google_auth();
 
     // This keeps the placeholder loop from busy-spinning. Vita2d swaps on vblank when configured,
     // but the small delay also keeps CPU use reasonable if vblank wait is disabled by a future build.
     sceKernelDelayThread(kFrameDelayUs);
   }
 
+  HttpClient::network_shutdown();
   ui_.shutdown();
   sceKernelExitProcess(0);
   return 0;

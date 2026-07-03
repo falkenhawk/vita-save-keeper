@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(save_keeper VERSION 0.1.0 LANGUAGES CXX)
+project(save_keeper VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -67,10 +67,12 @@ else()
     src/vita/net/HttpClient.cpp
     src/vita/ui/Ui.cpp
     third_party/qrcodegen/qrcodegen.cpp
+    third_party/vitasqlite/vita_sqlite_rw.c
   )
   target_include_directories(save-keeper PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/qrcodegen
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/vitasqlite
   )
   target_link_libraries(save-keeper PRIVATE
     vsm_core
@@ -90,7 +92,6 @@ else()
     SceCommonDialog_stub
     SceDisplay_stub
     SceGxm_stub
-    SceHttp_stub
     SceKernelThreadMgr_stub
     SceLibKernel_stub
     SceNetCtl_stub
@@ -98,7 +99,6 @@ else()
     ScePgf_stub
     ScePvf_stub
     SceSqlite_stub
-    SceSsl_stub
     SceSysmodule_stub
   )
 
@@ -112,5 +112,6 @@ else()
     FILE sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
     FILE sce_sys/resources/Roboto-Regular.ttf sce_sys/resources/Roboto-Regular.ttf
     FILE sce_sys/resources/font.pgf sce_sys/resources/font.pgf
+    FILE sce_sys/resources/cacert.pem sce_sys/resources/cacert.pem
   )
 endif()

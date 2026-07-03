@@ -1,11 +1,13 @@
 #include "vita/ui/Ui.hpp"
 
 #include "core/BackupList.hpp"
+#include "core/GoogleAuth.hpp"
 #include "core/GridWindow.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <cstdio>
 #include <qrcodegen.hpp>
 #include <string>
 #include <vector>
@@ -22,6 +24,10 @@ constexpr unsigned int kColorAccent = RGBA8(56, 189, 248, 255);
 constexpr unsigned int kColorAccentSoft = RGBA8(56, 189, 248, 40);
 constexpr unsigned int kColorText = RGBA8(232, 238, 246, 255);
 constexpr unsigned int kColorMuted = RGBA8(166, 178, 198, 255);
+constexpr unsigned int kColorSuccess = RGBA8(74, 222, 128, 255);
+constexpr unsigned int kColorError = RGBA8(248, 113, 113, 255);
+constexpr unsigned int kColorPendingDot = RGBA8(251, 191, 36, 255);
+constexpr unsigned int kColorIdleDot = RGBA8(100, 116, 139, 255);
 constexpr const char *kBundledFontPath = "app0:sce_sys/resources/Roboto-Regular.ttf";
 constexpr const char *kFallbackFontPath = "app0:sce_sys/resources/font.pgf";
 
@@ -29,6 +35,7 @@ constexpr unsigned int kTextSizeTiny = 14;
 constexpr unsigned int kTextSizeSmall = 16;
 constexpr unsigned int kTextSizeNormal = 18;
 constexpr unsigned int kTextSizeTitle = 22;
+constexpr unsigned int kTextSizeCode = 38;
 
 enum class ButtonSymbol {
   Circle,
@@ -104,6 +111,20 @@ std::string placeholder_text(const SaveRecord &save) {
   return result.empty() ? "SK" : result;
 }
 
+// Strips the scheme and www. so the on-screen link stays short enough to type from the couch.
+std::string display_url(const std::string &url) {
+  std::string result = url;
+  const std::string scheme = "https://";
+  if (result.compare(0, scheme.size(), scheme) == 0) {
+    result.erase(0, scheme.size());
+  }
+  const std::string www = "www.";
+  if (result.compare(0, www.size(), www) == 0) {
+    result.erase(0, www.size());
+  }
+  return result;
+}
+
 void draw_qr_code(const std::string &value, int x, int y, int module_size) {
   if (value.empty()) {
     return;
@@ -111,6 +132,8 @@ void draw_qr_code(const std::string &value, int x, int y, int module_size) {
 
   const qrcodegen::QrCode qr =
       qrcodegen::QrCode::encodeText(value.c_str(), qrcodegen::QrCode::Ecc::LOW);
+  // Scanners rely on the light quiet zone around the code; without it phone cameras regularly
+  // refuse to lock onto codes rendered on dark backgrounds.
   constexpr int kQuietZone = 2;
   const int size = qr.getSize();
   vita2d_draw_rectangle(x, y, (size + kQuietZone * 2) * module_size,
@@ -201,6 +224,15 @@ void draw_hint(vita2d_font *font, vita2d_pgf *fallback_font, int x, ButtonSymbol
   draw_text(font, fallback_font, label_x, y + 4, kColorMuted, kTextSizeSmall, label);
 }
 
+std::string format_minutes_seconds(int total_seconds) {
+  if (total_seconds < 0) {
+    total_seconds = 0;
+  }
+  char buffer[16];
+  std::snprintf(buffer, sizeof(buffer), "%d:%02d", total_seconds / 60, total_seconds % 60);
+  return buffer;
+}
+
 } // namespace
 
 bool Ui::initialize() {
@@ -238,7 +270,7 @@ void Ui::shutdown() {
   vita2d_fini();
 }
 
-vita2d_texture *Ui::load_icon_texture(const std::string &path) const {
+vita2d_texture *Ui::load_icon_texture(const std::string &path) {
   if (path.empty()) {
     return nullptr;
   }
@@ -253,38 +285,38 @@ vita2d_texture *Ui::load_icon_texture(const std::string &path) const {
   return texture;
 }
 
-void Ui::draw(const std::vector<SaveRecord> &saves, std::size_t selected_save,
-              const std::vector<std::string> &remote_backups,
-              const std::vector<std::string> &local_backups, std::size_t selected_backup,
-              bool restore_confirmation_pending, bool google_connected, bool google_auth_pending,
-              const std::string &google_verification_url, const std::string &google_user_code,
-              const std::string &status_message) {
+void Ui::draw(const UiState &state) {
+  ++frame_counter_;
   vita2d_start_drawing();
   vita2d_clear_screen();
 
-  draw_header(google_connected, google_auth_pending);
-  draw_title_grid(saves, selected_save);
-  draw_backup_panel(saves, selected_save, remote_backups, local_backups, selected_backup,
-                    restore_confirmation_pending, google_connected, google_auth_pending,
-                    google_verification_url, google_user_code, status_message);
-  draw_footer();
+  draw_header(state);
+  draw_title_grid(state);
+  draw_backup_panel(state);
+  draw_footer(state);
 
   vita2d_end_drawing();
   vita2d_swap_buffers();
 }
 
-void Ui::draw_header(bool google_connected, bool google_auth_pending) const {
+void Ui::draw_header(const UiState &state) {
   vita2d_draw_rectangle(0, 0, 960, 52, kColorHeader);
   vita2d_draw_line(0, 52, 960, 52, RGBA8(255, 255, 255, 20));
 
   draw_text(font_, fallback_font_, 18, 34, kColorText, kTextSizeTitle, "Save Keeper");
-  const char *drive_status = google_connected       ? "Google Drive connected"
-                             : google_auth_pending ? "Google auth pending"
-                                                   : "Google Drive not connected";
-  draw_text(font_, fallback_font_, 630, 32, kColorMuted, kTextSizeSmall, drive_status);
+
+  const char *drive_status = state.google_connected      ? "Google Drive connected"
+                             : state.google_auth_pending ? "Connecting to Google..."
+                                                         : "Google Drive not connected";
+  const unsigned int dot_color = state.google_connected      ? kColorSuccess
+                                 : state.google_auth_pending ? kColorPendingDot
+                                                             : kColorIdleDot;
+  vita2d_draw_fill_circle(638, 26, 5, dot_color);
+  draw_text(font_, fallback_font_, 654, 32, kColorMuted, kTextSizeSmall, drive_status);
 }
 
-void Ui::draw_title_grid(const std::vector<SaveRecord> &saves, std::size_t selected_save) const {
+void Ui::draw_title_grid(const UiState &state) {
+  const std::vector<SaveRecord> &saves = *state.saves;
   vita2d_draw_rectangle(0, 52, 432, 456, kColorPanel);
   vita2d_draw_line(432, 52, 432, 508, RGBA8(255, 255, 255, 20));
 
@@ -297,7 +329,7 @@ void Ui::draw_title_grid(const std::vector<SaveRecord> &saves, std::size_t selec
   constexpr int kGapY = 12;
   constexpr int kStartX = 16;
   constexpr int kStartY = 104;
-  const std::size_t selected = saves.empty() ? 0 : selected_save % saves.size();
+  const std::size_t selected = saves.empty() ? 0 : state.selected_save % saves.size();
   title_top_row_ = grid_window_top_row(title_top_row_, selected, saves.size(), kColumns, kRows);
   const std::size_t first_index = title_top_row_ * kColumns;
 
@@ -337,7 +369,7 @@ void Ui::draw_title_grid(const std::vector<SaveRecord> &saves, std::size_t selec
     }
   }
 
-  const SaveRecord *save = selected_record(saves, selected_save);
+  const SaveRecord *save = selected_record(saves, state.selected_save);
   if (save) {
     const std::string title = truncate_label(save->display_name, 34);
     const std::string id = truncate_label(title_id_label(*save), 42);
@@ -352,35 +384,27 @@ void Ui::draw_title_grid(const std::vector<SaveRecord> &saves, std::size_t selec
   }
 }
 
-void Ui::draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t selected_save,
-                           const std::vector<std::string> &remote_backups,
-                           const std::vector<std::string> &local_backups,
-                           std::size_t selected_backup, bool restore_confirmation_pending,
-                           bool google_connected, bool google_auth_pending,
-                           const std::string &google_verification_url,
-                           const std::string &google_user_code,
-                           const std::string &status_message) const {
+void Ui::draw_backup_panel(const UiState &state) {
   vita2d_draw_rectangle(432, 52, 528, 456, RGBA8(15, 23, 42, 255));
-  draw_text(font_, fallback_font_, 456, 84, kColorText, kTextSizeNormal, "Backups");
-  const SaveRecord *save = selected_record(saves, selected_save);
 
-  const char *google_action = "Triangle connects or refreshes Google Drive";
-  if (!google_user_code.empty()) {
-    google_action = "Scan QR, approve Google, then press Triangle";
-  } else if (google_auth_pending) {
-    google_action = "Waiting for Google approval";
-  } else if (google_connected) {
-    google_action = "Triangle refreshes [GD] remote backups";
+  if (state.google_auth_pending && !state.google_user_code.empty()) {
+    draw_google_auth_panel(state);
+    draw_status_line(state);
+    return;
   }
+
+  draw_text(font_, fallback_font_, 456, 84, kColorText, kTextSizeNormal, "Backups");
+  const SaveRecord *save = selected_record(*state.saves, state.selected_save);
+
+  const char *google_action = state.google_connected
+                                  ? "Triangle refreshes [GD] remote backups"
+                                  : "Triangle connects Google Drive";
   draw_text(font_, fallback_font_, 456, 112, kColorMuted, kTextSizeSmall, google_action);
 
   if (!save) {
     draw_text(font_, fallback_font_, 456, 150, kColorMuted, kTextSizeSmall,
               "Install or create saves, then reopen Save Keeper.");
-    if (!status_message.empty()) {
-      const std::string status = truncate_label(status_message, 58);
-      draw_text(font_, fallback_font_, 456, 462, kColorMuted, kTextSizeSmall, status.c_str());
-    }
+    draw_status_line(state);
     return;
   }
 
@@ -388,25 +412,12 @@ void Ui::draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t sel
   draw_text(font_, fallback_font_, 456, 138, kColorMuted, kTextSizeSmall,
             selected_label.c_str());
 
-  if (!google_user_code.empty()) {
-    const std::string url = truncate_label(google_verification_url, 38);
-    const std::string code = "Code: " + google_user_code;
-    draw_text(font_, fallback_font_, 470, 184, kColorText, kTextSizeNormal,
-              "1 Scan the QR code");
-    draw_text(font_, fallback_font_, 470, 214, kColorText, kTextSizeNormal,
-              "2 Approve Google Drive access");
-    draw_text(font_, fallback_font_, 470, 244, kColorText, kTextSizeNormal,
-              "3 Press Triangle again here");
-    draw_text(font_, fallback_font_, 470, 306, kColorMuted, kTextSizeSmall, url.c_str());
-    draw_text(font_, fallback_font_, 470, 338, kColorAccent, kTextSizeNormal, code.c_str());
-    draw_qr_code(google_verification_url, 780, 166, 3);
-    return;
-  }
-
   constexpr std::size_t kVisibleBackups = 5;
-  const std::vector<BackupEntry> all_entries = build_backup_menu(remote_backups, local_backups);
-  const std::size_t selectable_count = remote_backups.size() + local_backups.size();
-  const std::size_t selected_entry = selectable_count == 0 ? 0 : 1 + selected_backup;
+  const std::vector<BackupEntry> all_entries =
+      build_backup_menu(state.remote_backups, *state.local_backups);
+  const std::size_t selectable_count =
+      state.remote_backups.size() + state.local_backups->size();
+  const std::size_t selected_entry = selectable_count == 0 ? 0 : 1 + state.selected_backup;
   const std::size_t backup_window =
       all_entries.size() <= kVisibleBackups + 1
           ? 0
@@ -436,26 +447,90 @@ void Ui::draw_backup_panel(const std::vector<SaveRecord> &saves, std::size_t sel
 
   if (selectable_count == 0) {
     draw_text(font_, fallback_font_, 470, 230, kColorMuted, kTextSizeSmall, "No backups yet");
-  } else if (all_entries.size() > entries.size() && google_user_code.empty()) {
+  } else if (all_entries.size() > entries.size()) {
     draw_text(font_, fallback_font_, 470, 414, kColorMuted, kTextSizeSmall,
               "More backups below");
   }
 
-  const std::string status =
-      status_message.empty() ? "Circle creates a timestamped ZIP snapshot."
-                             : truncate_label(status_message, 58);
-  draw_text(font_, fallback_font_, 456, 462,
-            restore_confirmation_pending ? kColorAccent : kColorMuted, kTextSizeSmall,
-            status.c_str());
+  draw_status_line(state);
 }
 
-void Ui::draw_footer() const {
+void Ui::draw_google_auth_panel(const UiState &state) {
+  draw_text(font_, fallback_font_, 456, 90, kColorText, kTextSizeTitle, "Connect Google Drive");
+
+  draw_text(font_, fallback_font_, 456, 138, kColorText, kTextSizeNormal,
+            "1  Scan the QR code with your phone");
+  draw_text(font_, fallback_font_, 456, 168, kColorText, kTextSizeNormal,
+            "2  Sign in and approve Save Keeper");
+  draw_text(font_, fallback_font_, 456, 198, kColorText, kTextSizeNormal,
+            "3  This screen finishes by itself");
+
+  // Keep this line short: the QR block starts at x=776, and a longer sentence would run into it.
+  const std::string url = "Or visit " + display_url(state.google_verification_url) + " and enter:";
+  draw_text(font_, fallback_font_, 456, 246, kColorMuted, kTextSizeSmall,
+            truncate_label(url, 40).c_str());
+  draw_text(font_, fallback_font_, 456, 300, kColorAccent, kTextSizeCode,
+            state.google_user_code.c_str());
+
+  // The QR code carries the verification URL with the user code pre-filled, so scanning skips the
+  // typing step entirely.
+  const std::string qr_url = build_device_verification_qr_url(state.google_verification_url,
+                                                              state.google_user_code);
+  draw_qr_code(qr_url, 776, 108, 4);
+
+  // A lightweight pulse so the wait feels alive: one dot per half second, cycling.
+  const int dot_count = 1 + static_cast<int>((frame_counter_ / 30U) % 3U);
+  std::string waiting = "Waiting for approval";
+  for (int i = 0; i < dot_count; ++i) {
+    waiting.push_back('.');
+  }
+  draw_text(font_, fallback_font_, 456, 360, kColorMuted, kTextSizeNormal, waiting.c_str());
+
+  const std::string validity =
+      "Code valid for " + format_minutes_seconds(state.auth_seconds_left);
+  draw_text(font_, fallback_font_, 456, 388, kColorMuted, kTextSizeTiny, validity.c_str());
+}
+
+void Ui::draw_status_line(const UiState &state) {
+  const std::string status =
+      state.status_message.empty() ? "Circle creates a timestamped ZIP snapshot."
+                                   : truncate_label(state.status_message, 58);
+  unsigned int color = kColorMuted;
+  if (state.restore_confirmation_pending) {
+    color = kColorAccent;
+  } else if (!state.status_message.empty()) {
+    switch (state.status_kind) {
+    case StatusKind::Success:
+      color = kColorSuccess;
+      break;
+    case StatusKind::Error:
+      color = kColorError;
+      break;
+    case StatusKind::Info:
+      color = kColorMuted;
+      break;
+    }
+  }
+  draw_text(font_, fallback_font_, 456, 462, color, kTextSizeSmall, status.c_str());
+}
+
+void Ui::draw_footer(const UiState &state) {
   vita2d_draw_rectangle(0, 508, 960, 36, RGBA8(3, 7, 18, 230));
-  draw_hint(font_, fallback_font_, 28, ButtonSymbol::Circle, "Backup");
-  draw_hint(font_, fallback_font_, 172, ButtonSymbol::Square, "Restore");
-  draw_hint(font_, fallback_font_, 326, ButtonSymbol::Select, "Upload");
-  draw_hint(font_, fallback_font_, 490, ButtonSymbol::Triangle, "Google");
-  draw_hint(font_, fallback_font_, 642, ButtonSymbol::Cross, "Cancel");
+
+  if (state.google_auth_pending) {
+    draw_hint(font_, fallback_font_, 28, ButtonSymbol::Triangle, "Check now");
+    draw_hint(font_, fallback_font_, 200, ButtonSymbol::Cross, "Cancel sign-in");
+    return;
+  }
+
+  draw_text(font_, fallback_font_, 18, 522, kColorMuted, kTextSizeTiny,
+            "D-Pad saves   L/R backups");
+  draw_hint(font_, fallback_font_, 250, ButtonSymbol::Circle, "Backup");
+  draw_hint(font_, fallback_font_, 370, ButtonSymbol::Square, "Restore");
+  draw_hint(font_, fallback_font_, 500, ButtonSymbol::Select, "Upload");
+  draw_hint(font_, fallback_font_, 650, ButtonSymbol::Triangle,
+            state.google_connected ? "Refresh" : "Google");
+  draw_hint(font_, fallback_font_, 790, ButtonSymbol::Cross, "Cancel");
 }
 
 } // namespace vsm::vita

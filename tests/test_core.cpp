@@ -473,6 +473,16 @@ void test_google_config_serializes_and_parses_token_cache() {
   EXPECT_EQ(cache.expires_at_epoch_seconds, static_cast<long long>(123456));
 }
 
+void test_google_auth_builds_verification_qr_url_with_prefilled_code() {
+  EXPECT_EQ(vsm::build_device_verification_qr_url("https://www.google.com/device", "ABCD-EFGH"),
+            "https://www.google.com/device?user_code=ABCD-EFGH");
+  EXPECT_EQ(vsm::build_device_verification_qr_url("https://example.com/device?x=1", "A B"),
+            "https://example.com/device?x=1&user_code=A%20B");
+  EXPECT_EQ(vsm::build_device_verification_qr_url("", "ABCD-EFGH"), "");
+  EXPECT_EQ(vsm::build_device_verification_qr_url("https://www.google.com/device", ""),
+            "https://www.google.com/device");
+}
+
 void test_google_drive_builds_folder_metadata_json() {
   EXPECT_EQ(vsm::build_drive_folder_metadata_json("PSV Saves", "root"),
             "{\"name\":\"PSV Saves\",\"mimeType\":\"application/vnd.google-apps.folder\","
@@ -533,6 +543,7 @@ int main() {
   test_google_config_parses_downloaded_client_json();
   test_embedded_google_client_credentials_default_empty();
   test_google_config_serializes_and_parses_token_cache();
+  test_google_auth_builds_verification_qr_url_with_prefilled_code();
   test_google_drive_builds_folder_metadata_json();
   test_google_drive_builds_find_folder_query();
   test_google_drive_parses_first_file_id();

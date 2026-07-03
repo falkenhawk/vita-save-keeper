@@ -3,13 +3,21 @@
 #include <curl/curl.h>
 #include <psp2/net/net.h>
 #include <psp2/net/netctl.h>
-#include <psp2/net/http.h>
 #include <psp2/sysmodule.h>
-#include <cstdlib>
 #include <cstdio>
+#include <cstdlib>
 
 namespace vsm::vita {
 namespace {
+
+// VitaSDK's libcurl+OpenSSL has no default CA store on Vita, so TLS verification fails for every
+// HTTPS request unless a CA bundle is provided explicitly. The Mozilla bundle is packaged in the
+// VPK; keeping verification on protects the long-lived OAuth refresh token.
+constexpr const char *kCaBundlePath = "app0:sce_sys/resources/cacert.pem";
+constexpr int kNetMemorySize = 1024 * 1024;
+
+bool g_network_ready = false;
+void *g_net_memory = nullptr;
 
 std::size_t append_response_body(char *ptr, std::size_t size, std::size_t nmemb, void *userdata) {
   const std::size_t byte_count = size * nmemb;
@@ -18,7 +26,7 @@ std::size_t append_response_body(char *ptr, std::size_t size, std::size_t nmemb,
   return byte_count;
 }
 
-HttpResponse curl_error(const char *message) {
+HttpResponse transport_error(const char *message) {
   HttpResponse response;
   response.error = message ? message : "curl error";
   return response;
@@ -31,16 +39,23 @@ curl_slist *append_bearer_header(curl_slist *headers, const std::string &bearer_
   return curl_slist_append(headers, ("Authorization: Bearer " + bearer_token).c_str());
 }
 
-HttpResponse perform_with_body(CURL *curl, curl_slist *headers) {
-  HttpResponse response;
-  char error_buffer[CURL_ERROR_SIZE] {};
+void configure_common(CURL *curl, curl_slist *headers, char *error_buffer, long timeout_seconds) {
   curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, append_response_body);
-  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response.body);
   curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, error_buffer);
   curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
   curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
-  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
+  curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_seconds);
+  curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+  curl_easy_setopt(curl, CURLOPT_CAINFO, kCaBundlePath);
+  curl_easy_setopt(curl, CURLOPT_USERAGENT, "save-keeper/0.1 (PS Vita)");
+}
+
+HttpResponse perform_with_body(CURL *curl, curl_slist *headers) {
+  HttpResponse response;
+  char error_buffer[CURL_ERROR_SIZE] {};
+  configure_common(curl, headers, error_buffer, 120L);
+  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, append_response_body);
+  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response.body);
 
   const CURLcode code = curl_easy_perform(curl);
   if (code == CURLE_OK) {
@@ -79,70 +94,77 @@ bool read_binary_file(const std::string &path, std::string *contents) {
 
 } // namespace
 
-HttpClient::HttpClient() {
-  constexpr int kNetMemorySize = 4 * 1024 * 1024;
-  net_module_loaded_ = sceSysmoduleLoadModule(SCE_SYSMODULE_NET) >= 0;
-
-  net_memory_ = std::malloc(kNetMemorySize);
-  if (!net_memory_) {
-    return;
+bool HttpClient::network_startup(std::string *error_message) {
+  if (g_network_ready) {
+    return true;
   }
 
-  SceNetInitParam net_init_param {};
-  net_init_param.memory = net_memory_;
-  net_init_param.size = kNetMemorySize;
-  net_init_param.flags = 0;
-  if (sceNetInit(&net_init_param) < 0) {
-    return;
+  if (sceSysmoduleIsLoaded(SCE_SYSMODULE_NET) != SCE_SYSMODULE_LOADED &&
+      sceSysmoduleLoadModule(SCE_SYSMODULE_NET) < 0) {
+    if (error_message) {
+      *error_message = "Could not load the network module.";
+    }
+    return false;
   }
-  net_initialized_ = true;
 
-  if (sceNetCtlInit() < 0) {
-    return;
+  // sceNetShowNetstat returns 0 only when the net library is already initialized (for example by
+  // the system or a previous run that did not terminate it). Initializing twice fails, so only
+  // call sceNetInit when the stack is actually down.
+  if (sceNetShowNetstat() != 0) {
+    g_net_memory = std::malloc(kNetMemorySize);
+    if (!g_net_memory) {
+      if (error_message) {
+        *error_message = "Out of memory for networking.";
+      }
+      return false;
+    }
+    SceNetInitParam net_init_param {};
+    net_init_param.memory = g_net_memory;
+    net_init_param.size = kNetMemorySize;
+    net_init_param.flags = 0;
+    if (sceNetInit(&net_init_param) < 0) {
+      if (error_message) {
+        *error_message = "Network stack initialization failed.";
+      }
+      std::free(g_net_memory);
+      g_net_memory = nullptr;
+      return false;
+    }
   }
-  netctl_initialized_ = true;
 
-  http_module_loaded_ = sceSysmoduleLoadModule(SCE_SYSMODULE_HTTP) >= 0;
-  if (sceHttpInit(kNetMemorySize) < 0) {
-    return;
+  // sceNetCtlInit fails when already initialized; that state is fine for making requests, so the
+  // result is intentionally ignored.
+  sceNetCtlInit();
+
+  if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) {
+    if (error_message) {
+      *error_message = "curl initialization failed.";
+    }
+    return false;
   }
-  http_initialized_ = true;
 
-  // VitaSDK's libcurl sample initializes the Vita NET and HTTP modules before curl. Keep that
-  // ordering here so DNS, TLS, and HTTP share Sony's initialized networking stack on hardware.
-  initialized_ = curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK;
+  g_network_ready = true;
+  return true;
 }
 
-HttpClient::~HttpClient() {
-  if (initialized_) {
-    curl_global_cleanup();
+void HttpClient::network_shutdown() {
+  if (!g_network_ready) {
+    return;
   }
-  if (http_initialized_) {
-    sceHttpTerm();
-  }
-  if (http_module_loaded_) {
-    sceSysmoduleUnloadModule(SCE_SYSMODULE_HTTP);
-  }
-  if (netctl_initialized_) {
-    sceNetCtlTerm();
-  }
-  if (net_initialized_) {
-    sceNetTerm();
-  }
-  if (net_module_loaded_) {
-    sceSysmoduleUnloadModule(SCE_SYSMODULE_NET);
-  }
-  std::free(net_memory_);
+  curl_global_cleanup();
+  // The Sony net stack is intentionally left running: sceNetTerm on a stack the system also uses
+  // can break other consumers, and process exit reclaims everything anyway.
+  g_network_ready = false;
 }
 
 HttpResponse HttpClient::post_form(const std::string &url, const std::string &body) const {
-  if (!initialized_) {
-    return curl_error("curl init failed");
+  if (!g_network_ready) {
+    return transport_error("network not initialized");
   }
 
   CURL *curl = curl_easy_init();
   if (!curl) {
-    return curl_error("curl easy init failed");
+    return transport_error("curl easy init failed");
   }
 
   curl_slist *headers = nullptr;
@@ -154,9 +176,6 @@ HttpResponse HttpClient::post_form(const std::string &url, const std::string &bo
   curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
   curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
 
-  // Do not disable TLS verification here. OAuth refresh tokens are long-lived enough that accepting
-  // any certificate would be a real account risk; if Vita certs are insufficient, the app should
-  // ship or configure a CA bundle instead of silently weakening HTTPS.
   const HttpResponse response = perform_with_body(curl, headers);
   curl_slist_free_all(headers);
   curl_easy_cleanup(curl);
@@ -164,13 +183,13 @@ HttpResponse HttpClient::post_form(const std::string &url, const std::string &bo
 }
 
 HttpResponse HttpClient::get_json(const std::string &url, const std::string &bearer_token) const {
-  if (!initialized_) {
-    return curl_error("curl init failed");
+  if (!g_network_ready) {
+    return transport_error("network not initialized");
   }
 
   CURL *curl = curl_easy_init();
   if (!curl) {
-    return curl_error("curl easy init failed");
+    return transport_error("curl easy init failed");
   }
 
   curl_slist *headers = nullptr;
@@ -186,13 +205,13 @@ HttpResponse HttpClient::get_json(const std::string &url, const std::string &bea
 
 HttpResponse HttpClient::post_json(const std::string &url, const std::string &json,
                                    const std::string &bearer_token) const {
-  if (!initialized_) {
-    return curl_error("curl init failed");
+  if (!g_network_ready) {
+    return transport_error("network not initialized");
   }
 
   CURL *curl = curl_easy_init();
   if (!curl) {
-    return curl_error("curl easy init failed");
+    return transport_error("curl easy init failed");
   }
 
   curl_slist *headers = nullptr;
@@ -214,13 +233,13 @@ HttpResponse HttpClient::post_multipart_file(const std::string &url,
                                              const std::string &metadata_json,
                                              const std::string &file_path,
                                              const std::string &bearer_token) const {
-  if (!initialized_) {
-    return curl_error("curl init failed");
+  if (!g_network_ready) {
+    return transport_error("network not initialized");
   }
 
   CURL *curl = curl_easy_init();
   if (!curl) {
-    return curl_error("curl easy init failed");
+    return transport_error("curl easy init failed");
   }
 
   curl_slist *headers = nullptr;
@@ -231,7 +250,7 @@ HttpResponse HttpClient::post_multipart_file(const std::string &url,
   if (!read_binary_file(file_path, &file_contents)) {
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
-    return curl_error("could not read upload file");
+    return transport_error("could not read upload file");
   }
 
   // Drive's multipart upload endpoint expects multipart/related, while libcurl's MIME helper emits
@@ -259,19 +278,19 @@ HttpResponse HttpClient::post_multipart_file(const std::string &url,
 
 HttpResponse HttpClient::download_file(const std::string &url, const std::string &file_path,
                                        const std::string &bearer_token) const {
-  if (!initialized_) {
-    return curl_error("curl init failed");
+  if (!g_network_ready) {
+    return transport_error("network not initialized");
   }
 
   FILE *output = std::fopen(file_path.c_str(), "wb");
   if (!output) {
-    return curl_error("could not open download file");
+    return transport_error("could not open download file");
   }
 
   CURL *curl = curl_easy_init();
   if (!curl) {
     std::fclose(output);
-    return curl_error("curl easy init failed");
+    return transport_error("curl easy init failed");
   }
 
   HttpResponse response;
@@ -279,14 +298,10 @@ HttpResponse HttpClient::download_file(const std::string &url, const std::string
   curl_slist *headers = nullptr;
   headers = append_bearer_header(headers, bearer_token);
 
+  configure_common(curl, headers, error_buffer, 300L);
   curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_file_body);
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, output);
-  curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, error_buffer);
-  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
-  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
 
   const CURLcode code = curl_easy_perform(curl);
   if (code == CURLE_OK) {

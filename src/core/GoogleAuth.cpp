@@ -154,6 +154,18 @@ DeviceCodeResponse parse_device_code_response(const std::string &json) {
   return response;
 }
 
+std::string build_device_verification_qr_url(const std::string &verification_url,
+                                             const std::string &user_code) {
+  if (verification_url.empty() || user_code.empty()) {
+    return verification_url;
+  }
+  // google.com/device pre-fills the code from the user_code query parameter, so scanning the QR
+  // code skips typing it on the phone. If Google ever ignores the parameter the page still loads
+  // and the code shown on the Vita can be typed manually.
+  const char separator = verification_url.find('?') == std::string::npos ? '?' : '&';
+  return verification_url + separator + "user_code=" + form_url_encode(user_code);
+}
+
 TokenResponse parse_token_response(const std::string &json) {
   TokenResponse response;
   find_json_string(json, "error", &response.error);

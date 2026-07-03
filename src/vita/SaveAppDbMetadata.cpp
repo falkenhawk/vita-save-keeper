@@ -1,13 +1,12 @@
 #include "vita/SaveAppDbMetadata.hpp"
 
 #include <algorithm>
-#include <cerrno>
 #include <cstdio>
 #include <psp2/sysmodule.h>
 #include <string>
-#include <sys/stat.h>
 #include <unordered_map>
 #include <utility>
+#include <vita_sqlite_rw.h>
 
 extern "C" {
 struct sqlite3;
@@ -23,11 +22,11 @@ namespace vsm::vita {
 namespace {
 
 constexpr int kSqliteOk = 0;
-constexpr int kSqliteOpenReadwrite = 0x00000002;
 constexpr int kSqliteOpenReadonly = 0x00000001;
-constexpr const char *kAppDbPath = "ur0:/shell/db/app.db";
-constexpr const char *kDataRoot = "ux0:data/save-keeper";
-constexpr const char *kAppDbCopyPath = "ux0:data/save-keeper/app.db";
+// Sony's system application registry, maintained by SceShell. Save Keeper only reads it to map
+// save directory names to installed game titles and icons; the app's own files live under
+// ux0:data/save-keeper instead.
+constexpr const char *kSystemAppDbPath = "ur0:shell/db/app.db";
 
 struct AppDbTitle {
   std::string title_id;
@@ -85,42 +84,6 @@ index_by_title_id(const std::vector<AppDbTitle> &titles) {
   return indexed;
 }
 
-bool ensure_directory(const char *path) {
-  return mkdir(path, 0777) == 0 || errno == EEXIST;
-}
-
-bool copy_file(const char *source_path, const char *target_path) {
-  FILE *source = std::fopen(source_path, "rb");
-  if (!source) {
-    return false;
-  }
-
-  ensure_directory(kDataRoot);
-  FILE *target = std::fopen(target_path, "wb");
-  if (!target) {
-    std::fclose(source);
-    return false;
-  }
-
-  char buffer[16 * 1024];
-  bool ok = true;
-  while (true) {
-    const std::size_t read = std::fread(buffer, 1, sizeof(buffer), source);
-    if (read > 0 && std::fwrite(buffer, 1, read, target) != read) {
-      ok = false;
-      break;
-    }
-    if (read < sizeof(buffer)) {
-      ok = std::ferror(source) == 0;
-      break;
-    }
-  }
-
-  ok = std::fclose(target) == 0 && ok;
-  std::fclose(source);
-  return ok;
-}
-
 void apply_title_metadata(const AppDbTitle &title, SaveRecord *save) {
   save->title_id = title.title_id;
   if (!title.title.empty()) {
@@ -149,26 +112,14 @@ AppDbMetadataResult apply_app_db_metadata(std::vector<SaveRecord> *saves) {
   }
 
   sceSysmoduleLoadModule(SCE_SYSMODULE_SQLITE);
+  // Sony's SceSqlite ships without a configured allocator and with a crippled default VFS, so a
+  // plain sqlite3_open_v2 fails even read-only. The vendored VitaSmith override (also used by
+  // VitaShell and Apollo Save Tool) fixes both; it must run before the first open call.
+  sqlite3_rw_init();
 
   sqlite3 *database = nullptr;
-  int open_result = sqlite3_open_v2(kAppDbPath, &database, kSqliteOpenReadonly, nullptr);
-  if (open_result != kSqliteOk && database) {
-    sqlite3_close(database);
-    database = nullptr;
-  }
-  if (open_result != kSqliteOk || !database) {
-    // Some Vita homebrew uses sqlite3_rw_init before opening app.db directly. That private helper
-    // is not available in this build, so if SQLite refuses the shell DB path, copy the DB with
-    // plain file I/O and query the local snapshot instead.
-    if (!copy_file(kAppDbPath, kAppDbCopyPath)) {
-      result.error = format_sqlite_open_error(open_result, database);
-      if (database) {
-        sqlite3_close(database);
-      }
-      return result;
-    }
-    open_result = sqlite3_open_v2(kAppDbCopyPath, &database, kSqliteOpenReadonly, nullptr);
-  }
+  const int open_result =
+      sqlite3_open_v2(kSystemAppDbPath, &database, kSqliteOpenReadonly, nullptr);
   if (open_result != kSqliteOk || !database) {
     result.error = format_sqlite_open_error(open_result, database);
     if (database) {

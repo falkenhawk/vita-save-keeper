@@ -1,7 +1,6 @@
 #pragma once
 
 #include <string>
-#include <vector>
 
 namespace vsm::vita {
 
@@ -14,11 +13,11 @@ struct HttpResponse {
 
 class HttpClient {
 public:
-  HttpClient();
-  ~HttpClient();
-
-  HttpClient(const HttpClient &) = delete;
-  HttpClient &operator=(const HttpClient &) = delete;
+  // Initializes the Sony network stack and libcurl once for the whole app run. Re-initializing
+  // per request (the previous design) breaks when the stack is already up: sceNetInit fails and
+  // every request afterwards reported "curl init failed". Safe to call repeatedly.
+  static bool network_startup(std::string *error_message);
+  static void network_shutdown();
 
   HttpResponse post_form(const std::string &url, const std::string &body) const;
   HttpResponse get_json(const std::string &url, const std::string &bearer_token) const;
@@ -29,15 +28,6 @@ public:
                                    const std::string &bearer_token) const;
   HttpResponse download_file(const std::string &url, const std::string &file_path,
                              const std::string &bearer_token) const;
-
-private:
-  bool initialized_{};
-  bool net_module_loaded_{};
-  bool net_initialized_{};
-  bool netctl_initialized_{};
-  bool http_module_loaded_{};
-  bool http_initialized_{};
-  void *net_memory_{};
 };
 
 } // namespace vsm::vita
