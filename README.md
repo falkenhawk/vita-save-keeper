@@ -16,7 +16,7 @@ This repository currently contains the first buildable foundation:
 - local timestamped ZIP backup creation
 - local backup listing for the selected save
 - local backup restore with a second-press confirmation
-- Google OAuth device-code request and token polling controls
+- Google OAuth device flow with QR sign-in and automatic token polling
 - Google Drive upload for the selected local ZIP backup
 - Google Drive listing and download-then-restore for `[GD]` ZIP backups
 - a native `vita2d` grid UI with game icons, QR auth display, and packaged LiveArea assets
@@ -80,15 +80,23 @@ Local backups are written under `ux0:data/save-keeper/backups`.
 
 ## Google auth
 
-Development builds expect OAuth client credentials at
-`ux0:data/save-keeper/google-client.json`. The JSON must contain `client_id` and `client_secret`
-fields from a Google OAuth client of type TVs and Limited Input devices. Press the triangle button
-once to request a device code and QR link, finish consent on a phone or PC, then press triangle again
-to poll and save the token cache to `ux0:data/save-keeper/google-token.json`.
+See [docs/google-drive-setup.md](docs/google-drive-setup.md) for the one-time Google Cloud setup
+(OAuth client of type "TVs and Limited Input devices", published to production so refresh tokens
+do not expire after 7 days). Credentials are either embedded at build time via the
+`SAVE_KEEPER_GOOGLE_CLIENT_ID`/`SAVE_KEEPER_GOOGLE_CLIENT_SECRET` CMake options or read from
+`ux0:data/save-keeper/google-client.json`.
 
-After auth, press triangle to refresh remote backups for the selected save. Press Select to upload
-the selected local backup. Press square on a local backup to restore it, or on a `[GD]` backup to
+Connecting takes a single Triangle press: the Vita shows a QR code (with the sign-in code
+pre-filled for the phone) and polls Google automatically until access is approved. The token cache
+is saved to `ux0:data/save-keeper/google-token.json`, is refreshed automatically, and survives app
+exits and reboots.
+
+After auth, press Triangle to refresh remote backups for the selected save. Press Select to upload
+the selected local backup. Press Square on a local backup to restore it, or on a `[GD]` backup to
 download it locally and then restore it.
+
+HTTPS uses the Mozilla CA bundle packaged in the VPK (`sce_sys/resources/cacert.pem`); TLS
+verification stays enabled.
 
 ## Vita controls
 
@@ -97,14 +105,16 @@ download it locally and then restore it.
 - Circle: create a new timestamped local backup
 - Square: restore selected local or `[GD]` backup, with a second press to confirm
 - Select: upload selected local backup to Google Drive
-- Triangle: start Google auth, poll Google auth, or refresh remote backups
-- Cross: cancel restore confirmation
+- Triangle: connect Google Drive (one press, then approve on a phone) or refresh remote backups
+- Cross: cancel restore confirmation or the Google sign-in
 
 The app does not expose a START exit shortcut; use the Vita home button to leave the app.
 
 ## Third-party code
 
 - `third_party/qrcodegen`: Project Nayuki QR Code generator, MIT License.
+- `third_party/vitasqlite`: VitaSmith's SQLite R/W VFS override for Sony's SceSqlite module,
+  GPLv3 (the same file VitaShell and Apollo Save Tool use to read `ur0:shell/db/app.db`).
 
 ## Comment style
 
