@@ -529,19 +529,39 @@ void test_google_drive_builds_paged_index_queries() {
 }
 
 void test_google_drive_parses_parents_and_page_token() {
+  // Shape taken from a live Drive v3 response: pretty-printed, and "parents" comes BEFORE
+  // "id"/"name" inside each object. The parser must not depend on field order.
   const vsm::DriveFileList files = vsm::parse_drive_file_list(
-      "{\"nextPageToken\":\"tok-2\",\"files\":["
-      "{\"id\":\"zip-1\",\"name\":\"2026-07-03 23-19.zip\",\"parents\":[\"folder-a\"]},"
-      "{\"id\":\"orphan\",\"name\":\"loose.zip\"},"
-      "{\"id\":\"zip-2\",\"name\":\"2026-07-01 10-00.zip\",\"parents\":[\"folder-b\"]}]}");
+      "{\n \"nextPageToken\": \"tok-2\",\n \"files\": [\n"
+      "  {\n   \"parents\": [\n    \"folder-a\"\n   ],\n"
+      "   \"id\": \"zip-1\",\n   \"name\": \"2026-07-03 23-19.zip\"\n  },\n"
+      "  {\n   \"id\": \"orphan\",\n   \"name\": \"loose.zip\"\n  },\n"
+      "  {\n   \"id\": \"zip-2\",\n   \"name\": \"2026-07-01 10-00.zip\",\n"
+      "   \"parents\": [\n    \"folder-b\"\n   ]\n  }\n ]\n}\n");
 
   EXPECT_TRUE(files.ok);
   EXPECT_EQ(files.next_page_token, "tok-2");
   EXPECT_EQ(files.files.size(), static_cast<std::size_t>(3));
+  EXPECT_EQ(files.files[0].id, "zip-1");
+  EXPECT_EQ(files.files[0].name, "2026-07-03 23-19.zip");
   EXPECT_EQ(files.files[0].parent_id, "folder-a");
   EXPECT_EQ(files.files[1].parent_id, "");
   EXPECT_EQ(files.files[2].id, "zip-2");
   EXPECT_EQ(files.files[2].parent_id, "folder-b");
+}
+
+void test_google_drive_parses_single_object_upload_response() {
+  const vsm::DriveFileList uploaded = vsm::parse_drive_file_list(
+      "{\n \"id\": \"file-9\",\n \"name\": \"2026-07-04 01-21-32.zip\"\n}\n");
+
+  EXPECT_TRUE(uploaded.ok);
+  EXPECT_EQ(uploaded.files.size(), static_cast<std::size_t>(1));
+  EXPECT_EQ(uploaded.files[0].id, "file-9");
+  EXPECT_EQ(uploaded.files[0].name, "2026-07-04 01-21-32.zip");
+
+  const vsm::DriveFileList empty = vsm::parse_drive_file_list("{\n \"files\": []\n}\n");
+  EXPECT_TRUE(empty.ok);
+  EXPECT_EQ(empty.files.size(), static_cast<std::size_t>(0));
 }
 
 void test_save_category_classification() {
@@ -627,6 +647,7 @@ int main() {
   test_google_drive_builds_list_children_query();
   test_google_drive_builds_paged_index_queries();
   test_google_drive_parses_parents_and_page_token();
+  test_google_drive_parses_single_object_upload_response();
   test_save_category_classification();
   test_saves_sort_by_display_name_case_insensitive();
 

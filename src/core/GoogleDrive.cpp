@@ -129,43 +129,93 @@ std::string build_drive_list_all_files_query(const std::string &page_token) {
       "mimeType!='application/vnd.google-apps.folder' and trashed=false", page_token);
 }
 
+namespace {
+
+// Finds the closing brace of the object opened at open_pos, respecting string literals and
+// nested containers. Returns npos when the object never closes.
+std::size_t find_matching_brace(const std::string &json, std::size_t open_pos) {
+  int depth = 0;
+  bool in_string = false;
+  for (std::size_t i = open_pos; i < json.size(); ++i) {
+    const char ch = json[i];
+    if (in_string) {
+      if (ch == '\\') {
+        ++i;
+      } else if (ch == '"') {
+        in_string = false;
+      }
+      continue;
+    }
+    if (ch == '"') {
+      in_string = true;
+    } else if (ch == '{' || ch == '[') {
+      ++depth;
+    } else if (ch == '}' || ch == ']') {
+      --depth;
+      if (depth == 0) {
+        return i;
+      }
+    }
+  }
+  return std::string::npos;
+}
+
+// Drive returns object fields in no order the client may rely on; the live API currently emits
+// "parents" before "id". Parsing each object as a bounded substring makes the field order
+// irrelevant.
+bool parse_drive_file_object(const std::string &object_json, DriveFile *file) {
+  if (!find_json_string_from(object_json, 0, "id", &file->id, nullptr)) {
+    return false;
+  }
+  find_json_string_from(object_json, 0, "name", &file->name, nullptr);
+  // The parents value is an array of quoted ids; the string scanner right after the key picks up
+  // the first array element.
+  find_json_string_from(object_json, 0, "parents", &file->parent_id, nullptr);
+  return true;
+}
+
+} // namespace
+
 DriveFileList parse_drive_file_list(const std::string &json) {
   DriveFileList result;
   find_json_string_from(json, 0, "nextPageToken", &result.next_page_token, nullptr);
 
-  std::size_t cursor = 0;
-  while (true) {
-    std::string id;
-    std::size_t id_end = 0;
-    if (!find_json_string_from(json, cursor, "id", &id, &id_end)) {
+  const std::size_t files_key = json.find("\"files\"");
+  if (files_key == std::string::npos) {
+    // Single-object responses (files.create, upload) carry the fields at the top level.
+    DriveFile file;
+    if (parse_drive_file_object(json, &file)) {
+      result.files.push_back(std::move(file));
+    }
+    result.ok = true;
+    return result;
+  }
+
+  const std::size_t array_start = json.find('[', files_key);
+  if (array_start == std::string::npos) {
+    result.error = "files array missing";
+    return result;
+  }
+
+  std::size_t cursor = array_start + 1;
+  while (cursor < json.size()) {
+    const std::size_t object_start = json.find_first_of("{]", cursor);
+    if (object_start == std::string::npos || json[object_start] == ']') {
       break;
     }
-
-    std::string name;
-    std::size_t name_end = 0;
-    if (!find_json_string_from(json, id_end, "name", &name, &name_end)) {
-      result.error = "file entry missing name";
+    const std::size_t object_end = find_matching_brace(json, object_start);
+    if (object_end == std::string::npos) {
+      result.error = "file entry not closed";
       return result;
     }
-    cursor = name_end;
-
-    // Drive lists "parents" after "name" inside each file object. Only accept a parents key that
-    // appears before the next file's "id", otherwise this entry has none and the key belongs to a
-    // later file.
-    std::string parent_id;
-    const std::size_t next_id = json.find("\"id\"", name_end);
-    const std::size_t parents_pos = json.find("\"parents\"", name_end);
-    if (parents_pos != std::string::npos &&
-        (next_id == std::string::npos || parents_pos < next_id)) {
-      std::size_t parent_end = 0;
-      // The parents value is an array of quoted ids; reusing the string scanner on the region
-      // right after the key picks up the first array element.
-      if (find_json_string_from(json, parents_pos, "parents", &parent_id, &parent_end)) {
-        cursor = parent_end;
-      }
+    DriveFile file;
+    if (!parse_drive_file_object(
+            json.substr(object_start, object_end - object_start + 1), &file)) {
+      result.error = "file entry missing id";
+      return result;
     }
-
-    result.files.push_back({id, name, parent_id});
+    result.files.push_back(std::move(file));
+    cursor = object_end + 1;
   }
 
   result.ok = true;

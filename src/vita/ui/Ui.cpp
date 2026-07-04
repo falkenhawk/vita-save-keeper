@@ -487,8 +487,11 @@ void Ui::draw_backup_panel(const UiState &state) {
 
   // Selected-save details live here, in one place, above its backup menu.
   const std::string title = truncate_label(save->display_name, 30);
-  const std::string details = truncate_label(
-      title_id_label(*save) + "  |  " + platform_label(save->platform) + " save", 44);
+  const char *platform_text = classify_save(*save) == SaveCategory::Homebrew
+                                  ? "Homebrew"
+                                  : platform_label(save->platform);
+  const std::string details =
+      truncate_label(title_id_label(*save) + "  |  " + platform_text + " save", 44);
   // Baseline 84 matches the tab row in the left pane so the top lines read as one row.
   draw_text(fonts_, 528, 84, kColorText, kTextSizeNormal, title.c_str());
   draw_text(fonts_, 528, 110, kColorMuted, kTextSizeSmall, details.c_str());
@@ -525,14 +528,15 @@ void Ui::draw_backup_panel(const UiState &state) {
     y += 42;
   }
 
+  // Chevrons say "more above/below" without spending a text row on them; both sit 8px from the
+  // list edges (list spans y 136..424 when full).
   if (backup_window > 0) {
-    // Chevrons say "more above/below" without spending a text row on them.
-    vita2d_draw_line(714, 132, 720, 126, kColorMuted);
-    vita2d_draw_line(720, 126, 726, 132, kColorMuted);
+    vita2d_draw_line(714, 128, 720, 122, kColorMuted);
+    vita2d_draw_line(720, 122, 726, 128, kColorMuted);
   }
   if (all_entries.size() > backup_window + entries.size()) {
-    vita2d_draw_line(714, 436, 720, 442, kColorMuted);
-    vita2d_draw_line(720, 442, 726, 436, kColorMuted);
+    vita2d_draw_line(714, 432, 720, 438, kColorMuted);
+    vita2d_draw_line(720, 438, 726, 432, kColorMuted);
   }
 
   if (state.remote_backups.size() + state.local_backups->size() > 0) {

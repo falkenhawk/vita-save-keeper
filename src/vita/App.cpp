@@ -349,7 +349,7 @@ void App::handle_delete_button() {
   if (!delete_confirmation_pending_) {
     restore_confirmation_pending_ = false;
     delete_confirmation_pending_ = true;
-    set_status(StatusKind::Info, "Press Start again to delete " + backup_name + ".");
+    set_status(StatusKind::Info, "Delete " + backup_name + "?");
     return;
   }
   delete_confirmation_pending_ = false;
@@ -429,7 +429,7 @@ void App::handle_restore() {
   if (!restore_confirmation_pending_) {
     delete_confirmation_pending_ = false;
     restore_confirmation_pending_ = true;
-    set_status(StatusKind::Info, "Press again to restore " + backup_name + ".");
+    set_status(StatusKind::Info, "Restore " + backup_name + "?");
     return;
   }
 
