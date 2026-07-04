@@ -328,7 +328,18 @@ void App::create_new_backup() {
   });
   if (result.ok) {
     refresh_local_backups();
-    set_status(StatusKind::Success, "Created " + result.archive_path);
+    // Focus the fresh snapshot so an immediate Select-to-upload needs no scrolling. Local
+    // backups sort newest first, but matching by name keeps this correct regardless.
+    const std::size_t slash = result.archive_path.find_last_of('/');
+    const std::string file_name =
+        slash == std::string::npos ? result.archive_path : result.archive_path.substr(slash + 1);
+    for (std::size_t i = 0; i < local_backups_.size(); ++i) {
+      if (local_backups_[i] == file_name) {
+        selected_backup_ = 1 + remote_backups_.size() + i;
+        break;
+      }
+    }
+    set_status(StatusKind::Success, "Created " + file_name);
   } else {
     set_status(StatusKind::Error, "Backup failed: " + result.error);
   }
