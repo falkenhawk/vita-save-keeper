@@ -29,7 +29,6 @@ constexpr unsigned int kColorError = RGBA8(248, 113, 113, 255);
 constexpr unsigned int kColorPendingDot = RGBA8(251, 191, 36, 255);
 constexpr unsigned int kColorIdleDot = RGBA8(100, 116, 139, 255);
 constexpr const char *kBundledFontPath = "app0:sce_sys/resources/Roboto-Regular.ttf";
-constexpr const char *kFallbackFontPath = "app0:sce_sys/resources/font.pgf";
 
 constexpr unsigned int kTextSizeTiny = 15;
 constexpr unsigned int kTextSizeSmall = 17;
@@ -297,10 +296,9 @@ bool Ui::initialize() {
     any_font = any_font || fonts_.by_size[size] != nullptr;
   }
   if (!any_font) {
-    fonts_.fallback = vita2d_load_custom_pgf(kFallbackFontPath);
-    if (!fonts_.fallback) {
-      fonts_.fallback = vita2d_load_default_pgf();
-    }
+    // The system PGF font needs no bundled file; bundling a 3 MB fallback font for a case that
+    // only happens when the packaged TTF is unreadable was not worth half the VPK size.
+    fonts_.fallback = vita2d_load_default_pgf();
   }
   return any_font || fonts_.fallback != nullptr;
 }

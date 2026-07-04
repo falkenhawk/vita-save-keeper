@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.16)
 
 project(save_keeper VERSION 0.1.0 LANGUAGES C CXX)
 
+if(NOT CMAKE_BUILD_TYPE)
+  # An unset build type compiles without optimization: slower TLS/zip/QR work on the Vita CPU and
+  # a visibly larger eboot.bin.
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -113,7 +119,6 @@ else()
     FILE sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
     FILE sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
     FILE sce_sys/resources/Roboto-Regular.ttf sce_sys/resources/Roboto-Regular.ttf
-    FILE sce_sys/resources/font.pgf sce_sys/resources/font.pgf
     FILE sce_sys/resources/cacert.pem sce_sys/resources/cacert.pem
   )
 endif()
