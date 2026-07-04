@@ -12,6 +12,7 @@
 #include "core/SaveScanner.hpp"
 #include "core/Selection.hpp"
 #include "core/SfoParser.hpp"
+#include "core/TextUtil.hpp"
 
 #include <cstdint>
 #include <cstdlib>
@@ -642,6 +643,21 @@ void test_app_settings_roundtrip_and_unknown_keys() {
   EXPECT_TRUE(defaults.sort_mode == vsm::SaveSortMode::Name);
 }
 
+void test_utf8_truncation_and_system_font_detection() {
+  // ASCII: byte-based truncation behaves as before.
+  EXPECT_EQ(vsm::truncate_utf8_label("The Walking Dead", 30), "The Walking Dead");
+  EXPECT_EQ(vsm::truncate_utf8_label("abcdefghij", 8), "abcde...");
+
+  // Japanese: each kana/kanji is 3 bytes; the cut must land on a sequence boundary.
+  const std::string taiko = "\xE5\xA4\xAA\xE9\xBC\x93\xE3\x81\xAE\xE9\x81\x94\xE4\xBA\xBA";
+  const std::string truncated = vsm::truncate_utf8_label(taiko, 10);
+  EXPECT_EQ(truncated, std::string("\xE5\xA4\xAA\xE9\xBC\x93") + "...");
+
+  EXPECT_TRUE(vsm::needs_system_font(taiko));
+  EXPECT_TRUE(!vsm::needs_system_font("Robotics; Notes ELITE"));
+  EXPECT_TRUE(!vsm::needs_system_font("Cafe \xC3\xA9" "clair"));
+}
+
 void test_saves_sort_by_display_name_case_insensitive() {
   std::vector<vsm::SaveRecord> saves(3);
   saves[0].id = "PCSB00002";
@@ -696,6 +712,7 @@ int main() {
   test_save_category_classification();
   test_saves_sort_by_display_name_case_insensitive();
   test_save_sort_modes_order_saves();
+  test_utf8_truncation_and_system_font_detection();
   test_app_settings_roundtrip_and_unknown_keys();
 
   std::cout << "vsm_core_tests passed\n";

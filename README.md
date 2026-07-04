@@ -1,43 +1,96 @@
 # Save Keeper
 
-Native PS Vita save backup and restore app with planned Google Drive snapshot support.
+Back up your PS Vita and PSP save games and sync them to your own Google Drive.
+Made for people with more than one Vita (or a PS TV) who want their saves to follow them.
 
-## Current status
+![Main screen](docs/screenshots/main.png)
 
-This repository currently contains the first buildable foundation:
+## What it does
 
-- host-tested core logic for JKSV-style timestamped backup names
-- local/remote backup menu entries, with only remote entries shown as `[GD] ...`
-- path component normalization for future local and Google Drive folder names
-- startup discovery for Vita saves, game-card saves, and PSP/Adrenaline saves
-- Vita title/icon metadata from `ur0:/shell/db/app.db`, following SaveCloud Vita's app database
-  mapping approach
-- `PARAM.SFO` title and `ICON0.PNG` fallback metadata for PSP-style saves
-- local timestamped ZIP backup creation
-- local backup listing for the selected save
-- local backup restore with a second-press confirmation
-- Google OAuth device flow with QR sign-in and automatic token polling
-- Google Drive upload for the selected local ZIP backup
-- Google Drive listing and download-then-restore for `[GD]` ZIP backups
-- a native `vita2d` grid UI with game icons, QR auth display, and packaged LiveArea assets
+- creates timestamped ZIP snapshots of Vita, game card, and PSP/Adrenaline saves
+- uploads snapshots to a `PSV Saves` folder in your own Google Drive
+- downloads and restores snapshots on any of your devices, so saves move between a Vita
+  and a PS TV automatically
+- shows your games in a grid with real titles and icons, grouped into Vita / Homebrew / PSP tabs
+- sorts by name, by last saved, or by last synced (whatever was uploaded most recently,
+  from any device, bubbles to the top)
+- signs in to Google by scanning a QR code with your phone - no typing on the Vita, and the
+  sign-in lasts for years
+- keeps multiple snapshots per game, so you can go back to an older save at any time
 
-- local and Google Drive backup deletion with a second-press confirmation
-- progress overlay during uploads, downloads, and other blocking work
+| Google sign-in | Upload with progress |
+| --- | --- |
+| ![Sign in](docs/screenshots/google-signin.png) | ![Upload](docs/screenshots/upload-progress.png) |
 
-Rename flows are not implemented yet.
+## What you need
 
-## Target behavior
+- a PS Vita or PS TV with HENkaku / h-encore homebrew enabled
+- "Enable unsafe homebrew" turned on in HENkaku settings (the app reads save folders and the
+  system app database)
+- VitaShell (or another way to install a VPK)
+- a Google account and about ten minutes for the one-time Google setup
 
-- The app is a standalone Vita VPK for normal use.
-- Google auth should use the OAuth device flow: the Vita displays a code and QR link, then a phone
-  or PC browser completes the Google consent step.
-- Backups are timestamped ZIP snapshots named like `2026-05-21 16-14.zip`.
-- Multiple backup timestamps can exist for the same title.
-- Local saves stay untagged in the UI.
-- Google Drive entries are shown with a `[GD]` prefix, following the JKSV convention.
-- The planned Drive layout is `PSV Saves/<title-or-save-id>/<timestamp>.zip`.
+## Install
 
-## Build and test
+1. copy `save-keeper.vpk` to your Vita (for example over FTP to `ux0:/data/`)
+2. in VitaShell, press X on the file and confirm the install, including the extended
+   permissions prompt
+3. do the one-time Google setup below, then launch Save Keeper from the LiveArea
+
+## Google Drive setup (one time)
+
+Save Keeper talks to your own Google Drive, so it needs credentials that belong to you.
+Follow [docs/google-drive-setup.md](docs/google-drive-setup.md) - it walks through creating a
+free Google Cloud project ("PSV Save Keeper"), enabling the Drive API, and creating a
+"TVs and Limited Input devices" OAuth client. No credit card, no verification review.
+
+The short version of what you end up with: a small `google-client.json` file at
+`ux0:data/save-keeper/google-client.json` on each device. After that, connecting is a single
+Triangle press: scan the QR code with your phone, approve, done. The sign-in survives app
+exits, reboots, and reinstalls.
+
+The app can only see files it created itself. It cannot read anything else in your Drive.
+
+## Controls
+
+| Button | Action |
+| --- | --- |
+| D-Pad | move through the game grid |
+| L / R | switch between the Vita / Homebrew / PSP tabs |
+| Right stick | move through the backup list |
+| Cross | create a backup (on "New Backup") or restore the selected one (press twice) |
+| Select | upload the selected local backup to Google Drive |
+| Start | delete the selected backup, locally or from Drive (press twice) |
+| Square | change sorting: by name, last saved, or last synced |
+| Triangle | connect Google Drive, or re-sync the remote backup list |
+| Circle | cancel a pending confirmation or the Google sign-in |
+
+On Japanese-region consoles Cross and Circle swap automatically, following the system setting.
+Backups from Google Drive show a `[GD]` prefix in the list. Use the PS button to leave the app.
+
+## Syncing between devices
+
+Every device uses the same `google-client.json` and signs in once to the same Google account.
+All backups land in the same `PSV Saves/<game id>/` folders in your Drive, so a snapshot
+uploaded from one Vita shows up as a `[GD]` entry on the others after a re-sync. Restoring a
+`[GD]` entry downloads it first, then unpacks it over the save folder.
+
+Deleting the last Drive backup of a game also removes its (empty) folder from Drive.
+
+## Where things are stored
+
+| Path | Contents |
+| --- | --- |
+| `ux0:data/save-keeper/backups/` | local snapshots, one folder per game |
+| `ux0:data/save-keeper/google-client.json` | your OAuth client credentials |
+| `ux0:data/save-keeper/google-token.json` | your sign-in; treat it like a password |
+| `ux0:data/save-keeper/settings.txt` | app settings (sort mode) |
+| `PSV Saves/` in your Google Drive | uploaded snapshots, one folder per game |
+
+To disconnect a device, delete `google-token.json` and revoke the grant at
+https://myaccount.google.com/permissions.
+
+## Building from source
 
 Host tests:
 
@@ -47,7 +100,7 @@ cmake --build build/host
 ctest --test-dir build/host --output-on-failure
 ```
 
-Vita VPK build:
+Vita VPK (needs [VitaSDK](https://vitasdk.org/)):
 
 ```sh
 export VITASDK=/path/to/vitasdk
@@ -55,78 +108,26 @@ cmake -S . -B build/vita -DCMAKE_TOOLCHAIN_FILE="$VITASDK/share/vita.toolchain.c
 cmake --build build/vita
 ```
 
-The VPK is written to `build/vita/save-keeper.vpk`.
+The VPK is written to `build/vita/save-keeper.vpk`. You can bake your Google credentials into
+the build with `-DSAVE_KEEPER_GOOGLE_CLIENT_ID=...` and `-DSAVE_KEEPER_GOOGLE_CLIENT_SECRET=...`
+instead of using `google-client.json`.
 
-## Project layout
+Project layout: `src/core` is portable logic covered by the host tests, `src/vita` is the app
+loop and `vita2d` UI, `sce_sys` holds the package assets. LiveArea PNGs must stay 8-bit indexed
+or VitaShell fails promotion with error `0x8010113D`.
 
-- `src/core`: portable logic covered by host tests
-- `src/vita`: Vita app loop and native UI
-- `tests`: lightweight host test executable
-- `sce_sys`: Vita package metadata
+## Acknowledgements
 
-LiveArea PNGs under `sce_sys` must remain 8-bit indexed PNGs. VitaShell can fail promotion with
-`0x8010113D` when package images are regular RGBA PNGs.
+- backup model and `[GD]` convention inspired by [JKSV](https://github.com/J-D-K/JKSV)
+- `third_party/qrcodegen`: [QR Code generator](https://github.com/nayuki/QR-Code-generator)
+  by Project Nayuki, MIT License
+- `third_party/vitasqlite`: [SQLite R/W override](https://github.com/VitaSmith/libsqlite) by
+  VitaSmith, GPLv3 - the same approach VitaShell and Apollo Save Tool use to read the system
+  app database
+- HTTPS uses the [Mozilla CA bundle](https://curl.se/docs/caextract.html) packaged in the VPK;
+  TLS verification stays enabled
 
-## Save roots
+## License
 
-The current foundation scans these roots at startup:
-
-- `ux0:user/00/savedata`
-- `grw0:savedata`
-- `ux0:pspemu/PSP/SAVEDATA`
-
-Vita titles are matched against `ur0:/shell/db/app.db` so saves with internal folder names can show
-the installed game's title and system icon. If the app database lookup fails, Save Keeper falls back
-to metadata inside the save folder where available.
-
-Local backups are written under `ux0:data/save-keeper/backups`.
-
-## Google auth
-
-See [docs/google-drive-setup.md](docs/google-drive-setup.md) for the one-time Google Cloud setup
-(OAuth client of type "TVs and Limited Input devices", published to production so refresh tokens
-do not expire after 7 days). Credentials are either embedded at build time via the
-`SAVE_KEEPER_GOOGLE_CLIENT_ID`/`SAVE_KEEPER_GOOGLE_CLIENT_SECRET` CMake options or read from
-`ux0:data/save-keeper/google-client.json`.
-
-Connecting takes a single Triangle press: the Vita shows a QR code (with the sign-in code
-pre-filled for the phone) and polls Google automatically until access is approved. The token cache
-is saved to `ux0:data/save-keeper/google-token.json`, is refreshed automatically, and survives app
-exits and reboots.
-
-After auth, press Triangle to refresh remote backups for the selected save. Press Select to upload
-the selected local backup. Press Square on a local backup to restore it, or on a `[GD]` backup to
-download it locally and then restore it.
-
-HTTPS uses the Mozilla CA bundle packaged in the VPK (`sce_sys/resources/cacert.pem`); TLS
-verification stays enabled.
-
-## Vita controls
-
-- D-Pad: move through the save grid
-- L/R: switch between the Vita / Homebrew / PSP save groups (focus per group is remembered)
-- Right stick: move through the backup menu ("New Backup" entry plus the backups)
-- Enter button (Cross on western consoles, Circle on Japanese ones, following the system
-  setting): context action - create a snapshot on "New Backup", restore on a backup entry
-  (second press confirms)
-- Select: upload selected local backup to Google Drive
-- Start: delete selected local or `[GD]` backup, with a second press to confirm
-- Square: cycle the save list sorting - by name, last saved, or last synced to Drive
-  (remembered across restarts in `ux0:data/save-keeper/settings.txt`)
-- Triangle: connect Google Drive (one press, then approve on a phone) or re-sync remote backups
-- the other face button (Circle on western consoles): cancel a pending restore or delete
-  confirmation, or the Google sign-in
-
-The app does not expose a START exit shortcut; use the Vita home button to leave the app.
-
-## Third-party code
-
-- `third_party/qrcodegen`: Project Nayuki QR Code generator, MIT License.
-- `third_party/vitasqlite`: VitaSmith's SQLite R/W VFS override for Sony's SceSqlite module,
-  GPLv3 (the same file VitaShell and Apollo Save Tool use to read `ur0:shell/db/app.db`).
-
-## Comment style
-
-Straightforward code should stay straightforward. Logic that encodes a product decision, external
-API behavior, Vita-specific constraint, or non-obvious safety tradeoff should include a direct
-comment explaining the reason.
+GPLv3, see [LICENSE](LICENSE). The vendored SQLite override is GPLv3, which makes copyleft the
+natural license for the whole project - the same license VitaShell and Apollo Save Tool use.

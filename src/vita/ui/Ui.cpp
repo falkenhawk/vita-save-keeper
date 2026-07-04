@@ -3,6 +3,7 @@
 #include "core/BackupList.hpp"
 #include "core/GoogleAuth.hpp"
 #include "core/GridWindow.hpp"
+#include "core/TextUtil.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -48,24 +49,28 @@ enum class ButtonSymbol {
 void draw_text(const FontSet &fonts, int x, int y, unsigned int color, unsigned int size,
                const char *text) {
   vita2d_font *font = size < FontSet::kMaxSize ? fonts.by_size[size] : nullptr;
-  if (font) {
+  // The bundled Latin font has no kana/CJK glyphs, so Japanese titles route to the system PGF
+  // font, unscaled (fractional PGF scaling looked bad on hardware).
+  const bool use_fallback = !font || (fonts.fallback && needs_system_font(text));
+  if (!use_fallback) {
     vita2d_font_draw_text(font, x, y, color, size, text);
   } else if (fonts.fallback) {
-    // The PGF fallback intentionally stays unscaled. Fractional PGF scaling is what looked bad on
-    // hardware; it is better to keep fallback text consistent than to reintroduce that artifact.
     vita2d_pgf_draw_text(fonts.fallback, x, y, color, 1.0f, text);
+  } else if (font) {
+    vita2d_font_draw_text(font, x, y, color, size, text);
   }
 }
 
 int text_width(const FontSet &fonts, unsigned int size, const char *text) {
   vita2d_font *font = size < FontSet::kMaxSize ? fonts.by_size[size] : nullptr;
-  if (font) {
+  const bool use_fallback = !font || (fonts.fallback && needs_system_font(text));
+  if (!use_fallback) {
     return vita2d_font_text_width(font, size, text);
   }
   if (fonts.fallback) {
     return vita2d_pgf_text_width(fonts.fallback, 1.0f, text);
   }
-  return 0;
+  return font ? vita2d_font_text_width(font, size, text) : 0;
 }
 
 const char *platform_label(SavePlatform platform) {
@@ -82,13 +87,7 @@ const char *platform_label(SavePlatform platform) {
 }
 
 std::string truncate_label(const std::string &text, std::size_t max_length) {
-  if (text.size() <= max_length) {
-    return text;
-  }
-  if (max_length <= 3) {
-    return text.substr(0, max_length);
-  }
-  return text.substr(0, max_length - 3) + "...";
+  return truncate_utf8_label(text, max_length);
 }
 
 const SaveRecord *selected_visible_record(const UiState &state) {
@@ -295,11 +294,10 @@ bool Ui::initialize() {
     fonts_.by_size[size] = vita2d_load_font_file(kBundledFontPath);
     any_font = any_font || fonts_.by_size[size] != nullptr;
   }
-  if (!any_font) {
-    // The system PGF font needs no bundled file; bundling a 3 MB fallback font for a case that
-    // only happens when the packaged TTF is unreadable was not worth half the VPK size.
-    fonts_.fallback = vita2d_load_default_pgf();
-  }
+  // The system PGF font needs no bundled file and covers kana/CJK, which the bundled Latin TTF
+  // does not; it always loads as the fallback for Japanese titles (and for everything if the
+  // TTF itself failed to load).
+  fonts_.fallback = vita2d_load_default_pgf();
   return any_font || fonts_.fallback != nullptr;
 }
 
