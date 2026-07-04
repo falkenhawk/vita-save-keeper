@@ -203,6 +203,11 @@ void App::set_status(StatusKind kind, std::string message) {
   status_message_ = std::move(message);
 }
 
+void App::clear_status() {
+  status_kind_ = StatusKind::Info;
+  status_message_.clear();
+}
+
 std::size_t App::category_count(SaveCategory category) const {
   std::size_t count = 0;
   for (const SaveRecord &save : saves_) {
@@ -252,10 +257,12 @@ void App::move_selected_save(int delta) {
   if (selected_save_ != previous) {
     cancel_restore_confirmation();
     cancel_delete_confirmation();
-    // A different save means a different backup list; focus its "New Backup" entry.
+    // A different save means a different backup list; focus its "New Backup" entry. Any status
+    // message described the previous save, so it goes too.
     selected_backup_ = 0;
     refresh_local_backups();
     refresh_remote_backups_view();
+    clear_status();
   }
 }
 
@@ -280,6 +287,7 @@ void App::move_selected_category(int delta) {
     rebuild_visible_saves();
     refresh_local_backups();
     refresh_remote_backups_view();
+    clear_status();
     return;
   }
 }
@@ -534,6 +542,9 @@ void App::handle_google_button() {
   if (google_connected_) {
     if (sync_drive_index()) {
       refresh_remote_backups_view();
+      // The overlay already showed the sync happening; whatever status was left over predates
+      // the fresh listing.
+      clear_status();
     }
     return;
   }
@@ -1018,6 +1029,14 @@ void App::handle_upload_button() {
     sync_drive_index();
   }
   refresh_remote_backups_view();
+  // The insert shifted every menu index below the new entry; focus the uploaded copy so the
+  // selection stays on the file this action was about.
+  for (std::size_t i = 0; i < remote_backups_.size(); ++i) {
+    if (remote_backups_[i].name == backup_name) {
+      selected_backup_ = 1 + i;
+      break;
+    }
+  }
   set_status(StatusKind::Success, "Uploaded [GD] " + backup_name);
 }
 

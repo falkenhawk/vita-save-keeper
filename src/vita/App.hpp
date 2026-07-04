@@ -62,6 +62,7 @@ private:
   std::string selected_backup_name() const;
   void handle_upload_button();
   void set_status(StatusKind kind, std::string message);
+  void clear_status();
 
   GoogleClientCredentials google_credentials_;
   GoogleTokenCache google_token_cache_;
