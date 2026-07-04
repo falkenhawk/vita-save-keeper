@@ -21,6 +21,14 @@ std::string BackupEntry::display_name() const {
     // labels into local paths or Drive object names.
     return "[GD] " + name;
   }
+  // Automatic pre-restore snapshots carry an " auto" marker in the file name (so chronological
+  // sorting still works) and are displayed with an [AUTO] prefix instead.
+  constexpr const char *kAutoSuffix = " auto.zip";
+  const std::size_t suffix_length = 9;
+  if (kind == BackupEntryKind::Local && name.size() > suffix_length &&
+      name.compare(name.size() - suffix_length, suffix_length, kAutoSuffix) == 0) {
+    return "[AUTO] " + name.substr(0, name.size() - suffix_length) + ".zip";
+  }
   return name;
 }
 

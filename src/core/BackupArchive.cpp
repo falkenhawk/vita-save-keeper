@@ -527,8 +527,11 @@ BackupResult create_backup_archive(const BackupRequest &request) {
   }
 
   const std::string backup_directory = join_path(request.backup_root, save_folder);
-  const std::string archive_path =
-      join_path(backup_directory, make_timestamped_backup_name(request.timestamp));
+  std::string archive_name = make_timestamped_backup_name(request.timestamp);
+  if (!request.name_suffix.empty()) {
+    archive_name.insert(archive_name.size() - 4, request.name_suffix);
+  }
+  const std::string archive_path = join_path(backup_directory, archive_name);
 
   if (!is_directory(request.source_path)) {
     return error_result(archive_path, "source path is not a directory");
@@ -600,6 +603,121 @@ BackupResult create_backup_archive(const BackupRequest &request) {
   result.ok = true;
   result.archive_path = archive_path;
   return result;
+}
+
+std::vector<ArchiveEntryInfo> compute_folder_entries(const std::string &folder_path, bool *ok) {
+  std::vector<ArchiveEntryInfo> result;
+  if (ok) {
+    *ok = false;
+  }
+  if (!is_directory(folder_path)) {
+    return result;
+  }
+
+  std::vector<ZipEntry> entries;
+  if (!collect_files(folder_path, "", &entries)) {
+    return result;
+  }
+  for (ZipEntry &entry : entries) {
+    if (!measure_file(&entry)) {
+      return result;
+    }
+    result.push_back({entry.zip_path, entry.crc32, entry.size});
+  }
+  if (ok) {
+    *ok = true;
+  }
+  return result;
+}
+
+bool entries_match_backup_archive(const std::vector<ArchiveEntryInfo> &folder_entries,
+                                  const std::string &archive_path) {
+  FILE *input = std::fopen(archive_path.c_str(), "rb");
+  if (!input) {
+    return false;
+  }
+
+  // Our writer emits no archive comment, so the end-of-central-directory record is exactly the
+  // final 22 bytes.
+  if (std::fseek(input, -22, SEEK_END) != 0) {
+    std::fclose(input);
+    return false;
+  }
+  unsigned char eocd[22];
+  if (!read_bytes(input, eocd, sizeof(eocd)) ||
+      !(eocd[0] == 0x50 && eocd[1] == 0x4b && eocd[2] == 0x05 && eocd[3] == 0x06)) {
+    std::fclose(input);
+    return false;
+  }
+  const std::uint16_t entry_count =
+      static_cast<std::uint16_t>(eocd[10] | (eocd[11] << 8));
+  const std::uint32_t central_offset =
+      static_cast<std::uint32_t>(eocd[16]) | (static_cast<std::uint32_t>(eocd[17]) << 8) |
+      (static_cast<std::uint32_t>(eocd[18]) << 16) |
+      (static_cast<std::uint32_t>(eocd[19]) << 24);
+
+  if (entry_count != folder_entries.size()) {
+    std::fclose(input);
+    return false;
+  }
+
+  std::vector<ArchiveEntryInfo> archive_entries;
+  if (std::fseek(input, static_cast<long>(central_offset), SEEK_SET) != 0) {
+    std::fclose(input);
+    return false;
+  }
+  for (std::uint16_t i = 0; i < entry_count; ++i) {
+    unsigned char header[46];
+    if (!read_bytes(input, header, sizeof(header)) ||
+        !(header[0] == 0x50 && header[1] == 0x4b && header[2] == 0x01 && header[3] == 0x02)) {
+      std::fclose(input);
+      return false;
+    }
+    const auto u32_at = [&header](int offset) {
+      return static_cast<std::uint32_t>(header[offset]) |
+             (static_cast<std::uint32_t>(header[offset + 1]) << 8) |
+             (static_cast<std::uint32_t>(header[offset + 2]) << 16) |
+             (static_cast<std::uint32_t>(header[offset + 3]) << 24);
+    };
+    const auto u16_at = [&header](int offset) {
+      return static_cast<std::uint16_t>(header[offset] | (header[offset + 1] << 8));
+    };
+    const std::uint32_t crc = u32_at(16);
+    const std::uint32_t uncompressed = u32_at(24);
+    const std::uint16_t name_length = u16_at(28);
+    const std::uint16_t extra_length = u16_at(30);
+    const std::uint16_t comment_length = u16_at(32);
+
+    std::string name(name_length, '\0');
+    if (name_length > 0 && !read_bytes(input, name.data(), name_length)) {
+      std::fclose(input);
+      return false;
+    }
+    if ((extra_length > 0 || comment_length > 0) &&
+        std::fseek(input, extra_length + comment_length, SEEK_CUR) != 0) {
+      std::fclose(input);
+      return false;
+    }
+    archive_entries.push_back({std::move(name), crc, uncompressed});
+  }
+  std::fclose(input);
+
+  // collect_files walks children in sorted order on both sides, but sort defensively so the
+  // comparison never depends on traversal details.
+  std::vector<ArchiveEntryInfo> folder_sorted = folder_entries;
+  const auto by_path = [](const ArchiveEntryInfo &a, const ArchiveEntryInfo &b) {
+    return a.path < b.path;
+  };
+  std::sort(folder_sorted.begin(), folder_sorted.end(), by_path);
+  std::sort(archive_entries.begin(), archive_entries.end(), by_path);
+  for (std::size_t i = 0; i < folder_sorted.size(); ++i) {
+    if (folder_sorted[i].path != archive_entries[i].path ||
+        folder_sorted[i].crc32 != archive_entries[i].crc32 ||
+        folder_sorted[i].size != archive_entries[i].size) {
+      return false;
+    }
+  }
+  return true;
 }
 
 RestoreResult restore_backup_archive(const RestoreRequest &request) {

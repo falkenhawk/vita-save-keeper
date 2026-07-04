@@ -9,14 +9,16 @@ Made for people with more than one Vita (or a PS TV) who want their saves to fol
 
 - creates timestamped ZIP snapshots of Vita, game card, and PSP/Adrenaline saves
 - uploads snapshots to a `PSV Saves` folder in your own Google Drive
-- downloads and restores snapshots on any of your devices, so saves move between a Vita
-  and a PS TV automatically
+- downloads and restores snapshots on any of your devices, so a save made on one Vita can
+  be picked up on another Vita or a PS TV
 - shows your games in a grid with real titles and icons, grouped into Vita / Homebrew / PSP tabs
 - sorts by name, by last saved, or by last synced (whatever was uploaded most recently,
   from any device, bubbles to the top)
-- signs in to Google by scanning a QR code with your phone - no typing on the Vita, and the
-  sign-in lasts for years
+- signs in to Google by scanning a QR code with your phone - no typing on the Vita, and you
+  stay signed in until you disconnect
 - keeps multiple snapshots per game, so you can go back to an older save at any time
+- before a restore overwrites anything, the current save is snapshotted automatically
+  (shown as `[AUTO]`), unless an identical backup already exists
 
 | Google sign-in | Upload with progress |
 | --- | --- |
@@ -28,7 +30,7 @@ Made for people with more than one Vita (or a PS TV) who want their saves to fol
 - "Enable unsafe homebrew" turned on in HENkaku settings (the app reads save folders and the
   system app database)
 - VitaShell (or another way to install a VPK)
-- a Google account and about ten minutes for the one-time Google setup
+- a Google account and about ten minutes for the [one-time Google setup](#google-drive-setup-one-time)
 
 ## Install
 
@@ -42,7 +44,7 @@ Made for people with more than one Vita (or a PS TV) who want their saves to fol
 Save Keeper talks to your own Google Drive, so it needs credentials that belong to you.
 Follow [docs/google-drive-setup.md](docs/google-drive-setup.md) - it walks through creating a
 free Google Cloud project ("PSV Save Keeper"), enabling the Drive API, and creating a
-"TVs and Limited Input devices" OAuth client. No credit card, no verification review.
+"TVs and Limited Input devices" OAuth client.
 
 The short version of what you end up with: a small `google-client.json` file at
 `ux0:data/save-keeper/google-client.json` on each device. After that, connecting is a single
@@ -76,6 +78,9 @@ uploaded from one Vita shows up as a `[GD]` entry on the others after a re-sync.
 `[GD]` entry downloads it first, then unpacks it over the save folder.
 
 Deleting the last Drive backup of a game also removes its (empty) folder from Drive.
+
+Restoring never destroys the save you had: if the current save is not already covered by one of
+the local backups (compared by content, not by dates), an `[AUTO]` snapshot is created first.
 
 ## Where things are stored
 

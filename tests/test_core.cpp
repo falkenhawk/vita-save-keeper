@@ -643,6 +643,58 @@ void test_app_settings_roundtrip_and_unknown_keys() {
   EXPECT_TRUE(defaults.sort_mode == vsm::SaveSortMode::Name);
 }
 
+void test_auto_backup_suffix_display_and_content_matching() {
+  const vsm::BackupEntry plain = vsm::BackupEntry::local("2026-07-05 10-00-00.zip");
+  EXPECT_EQ(plain.display_name(), "2026-07-05 10-00-00.zip");
+  const vsm::BackupEntry automatic = vsm::BackupEntry::local("2026-07-05 10-00-00 auto.zip");
+  EXPECT_EQ(automatic.display_name(), "[AUTO] 2026-07-05 10-00-00.zip");
+
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-auto-backup-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source" / "sce_sys");
+  {
+    std::ofstream(base / "source" / "data.bin", std::ios::binary) << "save-data";
+    std::ofstream(base / "source" / "sce_sys" / "icon0.png", std::ios::binary) << "icon-data";
+  }
+
+  vsm::BackupRequest request;
+  request.source_path = (base / "source").string();
+  request.backup_root = (base / "backups").string();
+  request.save_id = "PCSB00001";
+  request.timestamp = {2026, 7, 5, 10, 0, 0};
+  request.name_suffix = " auto";
+  const vsm::BackupResult result = vsm::create_backup_archive(request);
+  EXPECT_TRUE(result.ok);
+  EXPECT_TRUE(result.archive_path.find(" auto.zip") != std::string::npos);
+
+  bool ok = false;
+  const std::vector<vsm::ArchiveEntryInfo> entries =
+      vsm::compute_folder_entries((base / "source").string(), &ok);
+  EXPECT_TRUE(ok);
+  EXPECT_EQ(entries.size(), static_cast<std::size_t>(2));
+  EXPECT_TRUE(vsm::entries_match_backup_archive(entries, result.archive_path));
+
+  // Changing a file's content must break the match even though the file list is identical.
+  std::ofstream(base / "source" / "data.bin", std::ios::binary) << "different!";
+  bool changed_ok = false;
+  const std::vector<vsm::ArchiveEntryInfo> changed =
+      vsm::compute_folder_entries((base / "source").string(), &changed_ok);
+  EXPECT_TRUE(changed_ok);
+  EXPECT_TRUE(!vsm::entries_match_backup_archive(changed, result.archive_path));
+
+  // An extra file must break the match too.
+  std::ofstream(base / "source" / "data.bin", std::ios::binary) << "save-data";
+  std::ofstream(base / "source" / "extra.bin", std::ios::binary) << "x";
+  bool extra_ok = false;
+  const std::vector<vsm::ArchiveEntryInfo> extra =
+      vsm::compute_folder_entries((base / "source").string(), &extra_ok);
+  EXPECT_TRUE(extra_ok);
+  EXPECT_TRUE(!vsm::entries_match_backup_archive(extra, result.archive_path));
+
+  std::filesystem::remove_all(base);
+}
+
 void test_utf8_truncation_and_system_font_detection() {
   // ASCII: byte-based truncation behaves as before.
   EXPECT_EQ(vsm::truncate_utf8_label("The Walking Dead", 30), "The Walking Dead");
@@ -713,6 +765,7 @@ int main() {
   test_saves_sort_by_display_name_case_insensitive();
   test_save_sort_modes_order_saves();
   test_utf8_truncation_and_system_font_detection();
+  test_auto_backup_suffix_display_and_content_matching();
   test_app_settings_roundtrip_and_unknown_keys();
 
   std::cout << "vsm_core_tests passed\n";

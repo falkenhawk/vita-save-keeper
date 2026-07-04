@@ -529,6 +529,52 @@ void App::handle_restore() {
   const SaveRecord &save = *selected;
   std::string archive_path = local_backup_archive_path(kBackupRoot, save.id, backup_name);
   const bool remote_restore = selected_backup_is_remote();
+
+  // Safety net: snapshot the current save before overwriting it, unless some local backup
+  // already holds exactly this content (compared by per-file path, size, and CRC32, because
+  // file timestamps change on every restore and cannot be trusted).
+  ui_.draw_busy("Checking current save", 0, -1);
+  bool signature_ok = false;
+  const std::vector<ArchiveEntryInfo> current_entries =
+      compute_folder_entries(save.path, &signature_ok);
+  if (signature_ok && !current_entries.empty()) {
+    bool already_backed_up = false;
+    for (const std::string &existing : local_backups_) {
+      if (entries_match_backup_archive(
+              current_entries, local_backup_archive_path(kBackupRoot, save.id, existing))) {
+        already_backed_up = true;
+        break;
+      }
+    }
+    if (!already_backed_up) {
+      ui_.draw_busy("Backing up current save", 0, -1);
+      BackupRequest auto_request;
+      auto_request.source_path = save.path;
+      auto_request.backup_root = kBackupRoot;
+      auto_request.save_id = save.id;
+      auto_request.timestamp = current_backup_timestamp();
+      auto_request.name_suffix = " auto";
+      const BackupResult auto_result = create_backup_archive(auto_request);
+      if (!auto_result.ok) {
+        // Losing the current save is the one outcome this feature exists to prevent; a restore
+        // does not proceed over a failed safety snapshot.
+        restore_confirmation_pending_ = false;
+        set_status(StatusKind::Error, "Could not back up current save: " + auto_result.error);
+        return;
+      }
+      refresh_local_backups();
+      if (!remote_restore) {
+        // The new snapshot shifted the local indices; re-locate the entry being restored.
+        for (std::size_t i = 0; i < local_backups_.size(); ++i) {
+          if (local_backups_[i] == backup_name) {
+            selected_backup_ = 1 + remote_backups_.size() + i;
+            break;
+          }
+        }
+      }
+    }
+  }
+
   if (remote_restore) {
     if (!ensure_google_access_token()) {
       restore_confirmation_pending_ = false;
