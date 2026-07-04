@@ -345,6 +345,8 @@ vita2d_texture *Ui::load_icon_texture(const std::string &path) {
 
 void Ui::draw(const UiState &state) {
   ++frame_counter_;
+  last_state_ = state;
+  has_last_state_ = true;
   vita2d_start_drawing();
   vita2d_clear_screen();
 
@@ -653,6 +655,16 @@ void Ui::draw_busy(const std::string &label, long long done, long long total) {
   ++frame_counter_;
   vita2d_start_drawing();
   vita2d_clear_screen();
+
+  // Keep the interface visible behind the modal, dimmed; before the first frame (the startup
+  // sync) there is nothing to show yet, so the plain background stands in.
+  if (has_last_state_) {
+    draw_header(last_state_);
+    draw_title_grid(last_state_);
+    draw_backup_panel(last_state_);
+    draw_footer(last_state_);
+    vita2d_draw_rectangle(0, 0, 960, 544, RGBA8(3, 7, 18, 200));
+  }
 
   constexpr int kBoxX = 280;
   constexpr int kBoxY = 216;

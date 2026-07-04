@@ -78,6 +78,10 @@ private:
   vita2d_texture *load_icon_texture(const std::string &path);
 
   FontSet fonts_;
+  // Snapshot of the last frame's state so busy frames can repaint the UI, dimmed, behind the
+  // progress modal. The embedded pointers reference App members that outlive any operation.
+  UiState last_state_;
+  bool has_last_state_{};
   std::size_t title_top_row_{};
   std::size_t backup_top_row_{};
   unsigned int frame_counter_{};
