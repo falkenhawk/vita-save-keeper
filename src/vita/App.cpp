@@ -1,5 +1,6 @@
 #include "vita/App.hpp"
 
+#include "core/AppSettings.hpp"
 #include "core/BackupArchive.hpp"
 #include "core/BackupStore.hpp"
 #include "core/GoogleAuth.hpp"
@@ -39,6 +40,7 @@ constexpr const char *kDataRoot = "ux0:data/save-keeper";
 constexpr const char *kBackupRoot = "ux0:data/save-keeper/backups";
 constexpr const char *kGoogleClientPath = "ux0:data/save-keeper/google-client.json";
 constexpr const char *kGoogleTokenPath = "ux0:data/save-keeper/google-token.json";
+constexpr const char *kSettingsPath = "ux0:data/save-keeper/settings.txt";
 constexpr const char *kDriveFilesEndpoint = "https://www.googleapis.com/drive/v3/files";
 constexpr const char *kDriveUploadEndpoint =
     "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id%2Cname";
@@ -206,6 +208,74 @@ void App::set_status(StatusKind kind, std::string message) {
 void App::clear_status() {
   status_kind_ = StatusKind::Info;
   status_message_.clear();
+}
+
+void App::load_settings() {
+  std::string text;
+  if (read_text_file(kSettingsPath, &text)) {
+    sort_mode_ = parse_app_settings(text).sort_mode;
+  }
+}
+
+void App::save_settings() {
+  AppSettings settings;
+  settings.sort_mode = sort_mode_;
+  write_text_file(kSettingsPath, serialize_app_settings(settings));
+}
+
+std::map<std::string, std::string> App::newest_remote_by_folder() const {
+  std::map<std::string, std::string> newest;
+  for (const auto &entry : drive_index_) {
+    if (!entry.second.empty()) {
+      // Per-save lists are sorted newest first, so the first name is the latest sync point.
+      newest[entry.first] = entry.second[0].name;
+    }
+  }
+  return newest;
+}
+
+void App::apply_sort_and_rebuild() {
+  std::string focused_id;
+  if (const SaveRecord *current = selected_save_record()) {
+    focused_id = current->id;
+  }
+
+  apply_save_sort(&saves_, sort_mode_, newest_remote_by_folder());
+  // Remembered per-tab positions point into the old order; the current save is re-located by id
+  // instead so the focus survives the re-sort (the grid window follows it on the next frame).
+  category_selection_.fill(0);
+  rebuild_visible_saves();
+  selected_save_ = 0;
+  if (!focused_id.empty()) {
+    for (std::size_t i = 0; i < visible_saves_.size(); ++i) {
+      if (saves_[visible_saves_[i]].id == focused_id) {
+        selected_save_ = i;
+        break;
+      }
+    }
+  }
+  category_selection_[static_cast<std::size_t>(category_)] = selected_save_;
+  refresh_local_backups();
+  refresh_remote_backups_view();
+}
+
+void App::cycle_sort_mode() {
+  sort_mode_ =
+      static_cast<SaveSortMode>((static_cast<int>(sort_mode_) + 1) % kSaveSortModeCount);
+  apply_sort_and_rebuild();
+  save_settings();
+  switch (sort_mode_) {
+  case SaveSortMode::LastSaved:
+    set_status(StatusKind::Info, "Sorted by last saved.");
+    break;
+  case SaveSortMode::LastSynced:
+    set_status(StatusKind::Info, "Sorted by last synced.");
+    break;
+  case SaveSortMode::Name:
+  default:
+    set_status(StatusKind::Info, "Sorted by name.");
+    break;
+  }
 }
 
 std::size_t App::category_count(SaveCategory category) const {
@@ -542,6 +612,9 @@ void App::handle_google_button() {
   if (google_connected_) {
     if (sync_drive_index()) {
       refresh_remote_backups_view();
+      if (sort_mode_ == SaveSortMode::LastSynced) {
+        apply_sort_and_rebuild();
+      }
       // The overlay already showed the sync happening; whatever status was left over predates
       // the fresh listing.
       clear_status();
@@ -1052,7 +1125,8 @@ int App::run() {
   if (!metadata_result.ok && !metadata_result.error.empty()) {
     set_status(StatusKind::Info, "Using save-folder metadata: " + metadata_result.error);
   }
-  sort_saves_by_display_name(&saves_);
+  load_settings();
+  apply_save_sort(&saves_, sort_mode_, {});
   // Open on the first tab that actually has saves so the app never starts on an empty grid.
   for (int i = 0; i < kSaveCategoryCount; ++i) {
     if (category_count(static_cast<SaveCategory>(i)) > 0) {
@@ -1093,6 +1167,9 @@ int App::run() {
   if (google_connected_) {
     if (sync_drive_index()) {
       refresh_remote_backups_view();
+      if (sort_mode_ == SaveSortMode::LastSynced) {
+        apply_sort_and_rebuild();
+      }
     }
   }
 
@@ -1165,11 +1242,15 @@ int App::run() {
     if ((pressed & SCE_CTRL_START) != 0) {
       handle_delete_button();
     }
+    if ((pressed & SCE_CTRL_SQUARE) != 0) {
+      cycle_sort_mode();
+    }
 
     UiState ui_state;
     ui_state.saves = &saves_;
     ui_state.visible_saves = &visible_saves_;
     ui_state.active_category = category_;
+    ui_state.sort_mode = sort_mode_;
     for (int i = 0; i < kSaveCategoryCount; ++i) {
       ui_state.category_counts[i] = category_count(static_cast<SaveCategory>(i));
     }
@@ -1202,6 +1283,9 @@ int App::run() {
       pending_remote_refresh_ = false;
       if (sync_drive_index()) {
         refresh_remote_backups_view();
+        if (sort_mode_ == SaveSortMode::LastSynced) {
+          apply_sort_and_rebuild();
+        }
         set_status(StatusKind::Success, "Google Drive connected.");
       }
     }

@@ -1,3 +1,4 @@
+#include "core/AppSettings.hpp"
 #include "core/BackupArchive.hpp"
 #include "core/BackupList.hpp"
 #include "core/BackupName.hpp"
@@ -597,6 +598,50 @@ void test_save_category_classification() {
   EXPECT_TRUE(vsm::classify_save(psp) == vsm::SaveCategory::Psp);
 }
 
+void test_save_sort_modes_order_saves() {
+  std::vector<vsm::SaveRecord> saves(3);
+  saves[0].id = "PCSB00001";
+  saves[0].display_name = "Alpha";
+  saves[0].saved_at_epoch = 100;
+  saves[1].id = "PCSB00002";
+  saves[1].display_name = "Bravo";
+  saves[1].saved_at_epoch = 300;
+  saves[2].id = "PCSB00003";
+  saves[2].display_name = "Charlie";
+  saves[2].saved_at_epoch = 200;
+
+  vsm::apply_save_sort(&saves, vsm::SaveSortMode::LastSaved, {});
+  EXPECT_EQ(saves[0].display_name, "Bravo");
+  EXPECT_EQ(saves[1].display_name, "Charlie");
+  EXPECT_EQ(saves[2].display_name, "Alpha");
+
+  // Only Alpha and Charlie exist on Drive; Charlie's backup is newer, Bravo sinks to the end.
+  const std::map<std::string, std::string> newest = {
+      {"PCSB00001", "2026-07-01 10-00-00.zip"},
+      {"PCSB00003", "2026-07-04 09-30-00.zip"},
+  };
+  vsm::apply_save_sort(&saves, vsm::SaveSortMode::LastSynced, newest);
+  EXPECT_EQ(saves[0].display_name, "Charlie");
+  EXPECT_EQ(saves[1].display_name, "Alpha");
+  EXPECT_EQ(saves[2].display_name, "Bravo");
+
+  vsm::apply_save_sort(&saves, vsm::SaveSortMode::Name, {});
+  EXPECT_EQ(saves[0].display_name, "Alpha");
+}
+
+void test_app_settings_roundtrip_and_unknown_keys() {
+  vsm::AppSettings settings;
+  settings.sort_mode = vsm::SaveSortMode::LastSynced;
+  EXPECT_EQ(vsm::serialize_app_settings(settings), "sort=synced\n");
+
+  const vsm::AppSettings parsed =
+      vsm::parse_app_settings("future_key=whatever\r\nsort=saved\n");
+  EXPECT_TRUE(parsed.sort_mode == vsm::SaveSortMode::LastSaved);
+
+  const vsm::AppSettings defaults = vsm::parse_app_settings("");
+  EXPECT_TRUE(defaults.sort_mode == vsm::SaveSortMode::Name);
+}
+
 void test_saves_sort_by_display_name_case_insensitive() {
   std::vector<vsm::SaveRecord> saves(3);
   saves[0].id = "PCSB00002";
@@ -650,6 +695,8 @@ int main() {
   test_google_drive_parses_single_object_upload_response();
   test_save_category_classification();
   test_saves_sort_by_display_name_case_insensitive();
+  test_save_sort_modes_order_saves();
+  test_app_settings_roundtrip_and_unknown_keys();
 
   std::cout << "vsm_core_tests passed\n";
   return 0;

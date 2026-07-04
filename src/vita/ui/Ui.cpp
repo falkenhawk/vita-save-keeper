@@ -642,13 +642,16 @@ void Ui::draw_footer(const UiState &state) {
   }
 
   // One context action: create a snapshot on the "New Backup" entry, restore on a backup entry.
+  const std::string sort_label =
+      std::string("Sort: ") + save_sort_mode_label(state.sort_mode);
   const HintSpec hints[] = {
+      {ButtonSymbol::Square, sort_label.c_str()},
       {ButtonSymbol::Triangle, state.google_connected ? "Refresh" : "Google"},
       {ButtonSymbol::Start, "Delete"},
       {ButtonSymbol::Select, "Upload"},
       {confirm, state.selected_backup == 0 ? "Backup" : "Restore"},
   };
-  draw_hints_right_aligned(fonts_, hints, 4);
+  draw_hints_right_aligned(fonts_, hints, 5);
 }
 
 void Ui::draw_busy(const std::string &label, long long done, long long total) {

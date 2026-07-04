@@ -4,6 +4,7 @@
 #include "core/GoogleConfig.hpp"
 #include "core/SaveCategory.hpp"
 #include "core/SaveRecord.hpp"
+#include "core/SaveScanner.hpp"
 #include "vita/net/HttpClient.hpp"
 #include "vita/ui/Ui.hpp"
 
@@ -31,6 +32,11 @@ private:
   void move_selected_save(int delta);
   void move_selected_backup(int delta);
   void move_selected_category(int delta);
+  void cycle_sort_mode();
+  void apply_sort_and_rebuild();
+  std::map<std::string, std::string> newest_remote_by_folder() const;
+  void load_settings();
+  void save_settings();
   void rebuild_visible_saves();
   std::size_t category_count(SaveCategory category) const;
   const SaveRecord *selected_save_record() const;
@@ -71,6 +77,7 @@ private:
   // Indices into saves_ for the active category tab; selected_save_ indexes this list.
   std::vector<std::size_t> visible_saves_;
   SaveCategory category_{SaveCategory::VitaGame};
+  SaveSortMode sort_mode_{SaveSortMode::Name};
   // Which save was focused in each category tab, so L/R returns to where the user left off.
   std::array<std::size_t, kSaveCategoryCount> category_selection_{};
   std::vector<std::string> local_backups_;

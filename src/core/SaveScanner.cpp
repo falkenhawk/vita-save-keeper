@@ -1,5 +1,6 @@
 #include "core/SaveScanner.hpp"
 
+#include "core/PathUtil.hpp"
 #include "core/SfoParser.hpp"
 
 #include <algorithm>
@@ -40,6 +41,36 @@ bool is_regular_file(const std::string &path) {
     return false;
   }
   return S_ISREG(info.st_mode);
+}
+
+long long path_mtime(const std::string &path) {
+  struct stat info {};
+  if (stat(path.c_str(), &info) != 0) {
+    return 0;
+  }
+  return static_cast<long long>(info.st_mtime);
+}
+
+// Some games rewrite save files in place, which does not bump the folder's own timestamp, so the
+// newest direct child is checked as well. One level is enough for a "last played" ordering and
+// keeps the startup scan cheap.
+long long newest_shallow_mtime(const std::string &path) {
+  long long newest = path_mtime(path);
+  DIR *dir = opendir(path.c_str());
+  if (!dir) {
+    return newest;
+  }
+  while (dirent *entry = readdir(dir)) {
+    if (is_dot_entry(entry->d_name)) {
+      continue;
+    }
+    const long long child = path_mtime(join_path(path, entry->d_name));
+    if (child > newest) {
+      newest = child;
+    }
+  }
+  closedir(dir);
+  return newest;
 }
 
 std::string first_existing_file(const std::vector<std::string> &paths) {
@@ -157,6 +188,74 @@ void sort_saves_by_display_name(std::vector<SaveRecord> *saves) {
   });
 }
 
+void apply_save_sort(std::vector<SaveRecord> *saves, SaveSortMode mode,
+                     const std::map<std::string, std::string> &newest_remote_by_folder) {
+  if (!saves) {
+    return;
+  }
+  if (mode == SaveSortMode::Name) {
+    sort_saves_by_display_name(saves);
+    return;
+  }
+
+  // Both time-based modes sort newest first and fall back to the name order among equals, so
+  // ties (and saves with no timestamp at all) stay in a predictable order.
+  sort_saves_by_display_name(saves);
+  if (mode == SaveSortMode::LastSaved) {
+    std::stable_sort(saves->begin(), saves->end(), [](const SaveRecord &a, const SaveRecord &b) {
+      return a.saved_at_epoch > b.saved_at_epoch;
+    });
+    return;
+  }
+
+  const auto newest_remote = [&](const SaveRecord &save) -> std::string {
+    std::string key = normalize_path_component(save.id);
+    if (key.empty()) {
+      key = "unknown-save";
+    }
+    const auto found = newest_remote_by_folder.find(key);
+    return found == newest_remote_by_folder.end() ? std::string() : found->second;
+  };
+  std::stable_sort(saves->begin(), saves->end(),
+                   [&](const SaveRecord &a, const SaveRecord &b) {
+                     return newest_remote(a) > newest_remote(b);
+                   });
+}
+
+const char *save_sort_mode_label(SaveSortMode mode) {
+  switch (mode) {
+  case SaveSortMode::LastSaved:
+    return "Saved";
+  case SaveSortMode::LastSynced:
+    return "Synced";
+  case SaveSortMode::Name:
+  default:
+    return "Name";
+  }
+}
+
+std::string save_sort_mode_to_string(SaveSortMode mode) {
+  switch (mode) {
+  case SaveSortMode::LastSaved:
+    return "saved";
+  case SaveSortMode::LastSynced:
+    return "synced";
+  case SaveSortMode::Name:
+  default:
+    return "name";
+  }
+}
+
+SaveSortMode save_sort_mode_from_string(const std::string &value) {
+  if (value == "saved") {
+    return SaveSortMode::LastSaved;
+  }
+  if (value == "synced") {
+    return SaveSortMode::LastSynced;
+  }
+  return SaveSortMode::Name;
+}
+
 std::vector<SaveRecord> scan_save_roots(const std::vector<SaveRoot> &roots) {
   std::vector<SaveRecord> saves;
 
@@ -168,6 +267,7 @@ std::vector<SaveRecord> scan_save_roots(const std::vector<SaveRoot> &roots) {
       save.id = child;
       save.display_name = child;
       save.path = join_path(root.path, child);
+      save.saved_at_epoch = newest_shallow_mtime(save.path);
       apply_sfo_metadata(&save);
 
       // Only direct children are treated as saves. Descending into save payloads would turn internal

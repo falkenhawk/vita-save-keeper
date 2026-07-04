@@ -111,6 +111,8 @@ verification stays enabled.
   (second press confirms)
 - Select: upload selected local backup to Google Drive
 - Start: delete selected local or `[GD]` backup, with a second press to confirm
+- Square: cycle the save list sorting - by name, last saved, or last synced to Drive
+  (remembered across restarts in `ux0:data/save-keeper/settings.txt`)
 - Triangle: connect Google Drive (one press, then approve on a phone) or re-sync remote backups
 - the other face button (Circle on western consoles): cancel a pending restore or delete
   confirmation, or the Google sign-in

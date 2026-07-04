@@ -17,6 +17,8 @@ struct SaveRecord {
   std::string display_name;
   std::string path;
   std::string icon_path;
+  // Newest modification time inside the save folder (shallow); proxy for "last played".
+  long long saved_at_epoch{};
 };
 
 } // namespace vsm

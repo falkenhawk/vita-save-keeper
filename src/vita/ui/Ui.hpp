@@ -2,6 +2,7 @@
 
 #include "core/SaveCategory.hpp"
 #include "core/SaveRecord.hpp"
+#include "core/SaveScanner.hpp"
 
 #include <array>
 #include <cstddef>
@@ -28,6 +29,7 @@ struct UiState {
   // Indices into saves for the active category tab; selected_save indexes this list.
   const std::vector<std::size_t> *visible_saves{};
   SaveCategory active_category{SaveCategory::VitaGame};
+  SaveSortMode sort_mode{SaveSortMode::Name};
   std::array<std::size_t, kSaveCategoryCount> category_counts{};
   std::size_t selected_save{};
   std::vector<std::string> remote_backups;
