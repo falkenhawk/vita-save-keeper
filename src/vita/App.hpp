@@ -54,6 +54,7 @@ private:
   std::string find_or_create_drive_folder(const std::string &folder_name,
                                           const std::string &parent_id);
   bool sync_drive_index();
+  void remove_drive_folder_if_empty(const std::string &folder_name);
   void refresh_remote_backups_view();
   std::vector<std::string> remote_backup_names() const;
   std::size_t backup_count() const;

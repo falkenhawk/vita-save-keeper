@@ -383,6 +383,10 @@ void App::handle_delete_button() {
           break;
         }
       }
+      if (list.empty()) {
+        drive_index_.erase(indexed);
+        remove_drive_folder_if_empty(folder_name);
+      }
     }
     refresh_remote_backups_view();
     if (selected_backup_ > backup_count()) {
@@ -753,6 +757,39 @@ std::string App::find_or_create_drive_folder(const std::string &folder_name,
     return {};
   }
   return created.files[0].id;
+}
+
+void App::remove_drive_folder_if_empty(const std::string &folder_name) {
+  const auto folder = drive_folder_ids_.find(folder_name);
+  if (folder == drive_folder_ids_.end()) {
+    return;
+  }
+
+  // Deleting a Drive folder permanently removes everything inside it, including files this app
+  // cannot see under the drive.file scope. Only clean up after Drive confirms the folder is
+  // empty, and treat any failure as harmless: an empty folder costs nothing and the next sync
+  // simply ignores it.
+  const std::string children_url =
+      std::string(kDriveFilesEndpoint) + "?" + build_drive_list_children_query(folder->second);
+  const HttpResponse children = drive_request([&](const std::string &token) {
+    return HttpClient().get_json(children_url, token);
+  });
+  if (!children.ok) {
+    return;
+  }
+  const DriveFileList list = parse_drive_file_list(children.body);
+  if (!list.ok || !list.files.empty()) {
+    return;
+  }
+
+  const std::string folder_url =
+      std::string(kDriveFilesEndpoint) + "/" + form_url_encode(folder->second);
+  const HttpResponse removed = drive_request([&](const std::string &token) {
+    return HttpClient().delete_request(folder_url, token);
+  });
+  if (removed.ok) {
+    drive_folder_ids_.erase(folder);
+  }
 }
 
 bool App::sync_drive_index() {
