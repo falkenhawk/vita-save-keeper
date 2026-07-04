@@ -939,11 +939,28 @@ void App::handle_upload_button() {
     set_status(StatusKind::Info, "Select a local backup to upload.");
     return;
   }
+  const std::string backup_name = selected_backup_name();
+  std::string folder_name = normalize_path_component(selected->id);
+  if (folder_name.empty()) {
+    folder_name = "unknown-save";
+  }
+
+  // A snapshot never changes after creation, so a same-named file already in Drive is the same
+  // backup; skip the upload instead of stacking duplicates (Drive allows same-name siblings).
+  const auto existing = drive_index_.find(folder_name);
+  if (existing != drive_index_.end()) {
+    for (const RemoteBackup &remote : existing->second) {
+      if (remote.name == backup_name) {
+        set_status(StatusKind::Info, "This backup is already on Google Drive.");
+        return;
+      }
+    }
+  }
+
   if (!ensure_google_access_token()) {
     return;
   }
 
-  const std::string backup_name = selected_backup_name();
   const std::string archive_path =
       local_backup_archive_path(kBackupRoot, selected->id, backup_name);
 
@@ -955,10 +972,6 @@ void App::handle_upload_button() {
     if (drive_root_folder_id_.empty()) {
       return;
     }
-  }
-  std::string folder_name = normalize_path_component(selected->id);
-  if (folder_name.empty()) {
-    folder_name = "unknown-save";
   }
   std::string folder_id;
   const auto cached_folder = drive_folder_ids_.find(folder_name);
