@@ -91,7 +91,7 @@ void configure_common(CURL *curl, curl_slist *headers, char *error_buffer, long 
   curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_seconds);
   curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
   curl_easy_setopt(curl, CURLOPT_CAINFO, kCaBundlePath);
-  curl_easy_setopt(curl, CURLOPT_USERAGENT, "save-keeper/0.1 (PS Vita)");
+  curl_easy_setopt(curl, CURLOPT_USERAGENT, "save-keeper/1.0 (PS Vita)");
 
   if (g_progress_hook && !g_busy_label.empty()) {
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
