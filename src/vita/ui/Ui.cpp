@@ -326,6 +326,27 @@ int Ui::measure_text(unsigned int size, const char *text) const {
   return text_width(fonts_, size, text);
 }
 
+std::string Ui::fit_text(unsigned int size, const std::string &text, int max_width) const {
+  if (measure_text(size, text.c_str()) <= max_width) {
+    return text;
+  }
+  // Shrink whole UTF-8 codepoints until the ellipsized text fits the given pixel width; byte
+  // counts under-use the pane for Latin titles and over-use it for CJK ones.
+  std::string cut = text;
+  while (!cut.empty()) {
+    std::size_t last = cut.size() - 1;
+    while (last > 0 && (static_cast<unsigned char>(cut[last]) & 0xC0) == 0x80) {
+      --last;
+    }
+    cut.erase(last);
+    const std::string candidate = cut + "...";
+    if (measure_text(size, candidate.c_str()) <= max_width) {
+      return candidate;
+    }
+  }
+  return "...";
+}
+
 vita2d_texture *Ui::load_icon_texture(const std::string &path) {
   if (path.empty()) {
     return nullptr;
@@ -483,13 +504,14 @@ void Ui::draw_backup_panel(const UiState &state) {
     return;
   }
 
-  // Selected-save details live here, in one place, above its backup menu.
-  const std::string title = truncate_label(save->display_name, 30);
+  // Selected-save details live here, in one place, above its backup menu. Truncation is by
+  // measured pixel width so long titles use the full pane.
+  const std::string title = fit_text(kTextSizeNormal, save->display_name, 408);
   const char *platform_text = classify_save(*save) == SaveCategory::Homebrew
                                   ? "Homebrew"
                                   : platform_label(save->platform);
-  const std::string details =
-      truncate_label(title_id_label(*save) + "  |  " + platform_text + " save", 44);
+  const std::string details = fit_text(
+      kTextSizeSmall, title_id_label(*save) + "  |  " + platform_text + " save", 408);
   // Baseline 84 matches the tab row in the left pane so the top lines read as one row.
   draw_text(fonts_, 528, 84, kColorText, kTextSizeNormal, title.c_str());
   draw_text(fonts_, 528, 110, kColorMuted, kTextSizeSmall, details.c_str());
@@ -520,7 +542,7 @@ void Ui::draw_backup_panel(const UiState &state) {
       vita2d_draw_rectangle(528, y, 4, 36, kColorAccent);
     }
 
-    const std::string label = truncate_label(entries[i].display_name(), 42);
+    const std::string label = fit_text(kTextSizeSmall, entries[i].display_name(), 386);
     draw_text(fonts_, 542, y + 24, selected ? kColorText : kColorMuted,
               kTextSizeSmall, label.c_str());
     y += 42;
@@ -594,7 +616,7 @@ void Ui::draw_status_line(const UiState &state) {
   if (state.status_message.empty()) {
     return;
   }
-  const std::string status = truncate_label(state.status_message, 48);
+  const std::string status = fit_text(kTextSizeSmall, state.status_message, 380);
   unsigned int color = kColorMuted;
   if (state.restore_confirmation_pending || state.delete_confirmation_pending) {
     color = kColorAccent;

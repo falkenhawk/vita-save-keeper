@@ -77,6 +77,7 @@ private:
   void draw_status_line(const UiState &state);
   void draw_footer(const UiState &state);
   int measure_text(unsigned int size, const char *text) const;
+  std::string fit_text(unsigned int size, const std::string &text, int max_width) const;
   vita2d_texture *load_icon_texture(const std::string &path);
 
   FontSet fonts_;
