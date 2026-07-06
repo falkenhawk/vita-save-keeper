@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/BackupList.hpp"
 #include "core/GoogleAuth.hpp"
 #include "core/GoogleConfig.hpp"
 #include "core/SaveCategory.hpp"
@@ -66,9 +67,16 @@ private:
   void remove_drive_folder_if_empty(const std::string &folder_name);
   void refresh_remote_backups_view();
   std::vector<std::string> remote_backup_names() const;
+  void rebuild_backup_rows();
   std::size_t backup_count() const;
-  bool selected_backup_is_remote() const;
+  const BackupRow *selected_backup_row() const;
   std::string selected_backup_name() const;
+  void focus_backup_row_by_identity(const std::string &backup_name);
+  std::string remote_file_id_for(const std::string &remote_name) const;
+  void perform_scoped_delete(bool delete_local, bool delete_remote);
+  void begin_label_edit();
+  bool rename_remote_backup(const SaveRecord &save, const std::string &remote_name,
+                            const std::string &new_name);
   void handle_upload_button();
   bool upload_local_backup(const SaveRecord &save, const std::string &backup_name);
   bool remote_backup_exists(const std::string &save_id, const std::string &backup_name) const;
@@ -95,6 +103,9 @@ private:
   // Drive keyed by save folder name. The index is filled by one paginated sync instead of a
   // network round-trip per selected game.
   std::vector<RemoteBackup> remote_backups_;
+  // One row per snapshot, local and Drive copies merged by timestamp identity; index 0 is the
+  // "New Backup" sentinel and selected_backup_ indexes this list directly.
+  std::vector<BackupRow> backup_rows_;
   std::map<std::string, std::vector<RemoteBackup>> drive_index_;
   std::unordered_map<std::string, std::string> drive_folder_ids_;
   std::string drive_root_folder_id_;
@@ -104,6 +115,9 @@ private:
   std::size_t selected_backup_{};
   bool restore_confirmation_pending_{};
   bool delete_confirmation_pending_{};
+  // A snapshot living on card and Drive needs a scope choice instead of a plain second press:
+  // Start deletes both sides, Triangle only the Drive copy, Square only the card copy.
+  bool delete_scope_prompt_pending_{};
   // Second-press force for a manual backup whose content already exists in a local archive.
   bool duplicate_backup_confirmation_pending_{};
   bool sync_all_confirmation_pending_{};

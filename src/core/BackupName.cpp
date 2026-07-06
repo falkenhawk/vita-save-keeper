@@ -1,9 +1,37 @@
 #include "core/BackupName.hpp"
 
+#include <cctype>
 #include <iomanip>
 #include <sstream>
 
 namespace vsm {
+namespace {
+
+// Same set normalize_path_component treats as unsafe: labels become part of local file names and
+// Drive object names, so the two sanitizers must agree on what can appear in a path component.
+bool is_unsafe_label_character(char value) {
+  switch (value) {
+  case '\\':
+  case '/':
+  case ':':
+  case '*':
+  case '?':
+  case '"':
+  case '\'':
+  case '<':
+  case '>':
+  case '|':
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool is_digit_at(const std::string &text, std::size_t index) {
+  return std::isdigit(static_cast<unsigned char>(text[index])) != 0;
+}
+
+} // namespace
 
 std::string make_timestamped_backup_name(const BackupTimestamp &timestamp) {
   // Use JKSV-style snapshot names rather than a single mutable "latest" file. The timestamp is
@@ -27,6 +55,117 @@ std::string display_backup_name(const std::string &file_name) {
     return file_name.substr(0, file_name.size() - kZipExtensionLength);
   }
   return file_name;
+}
+
+bool has_backup_timestamp_prefix(const std::string &file_name) {
+  const std::string plain = display_backup_name(file_name);
+  if (plain.size() < kBackupTimestampPrefixLength) {
+    return false;
+  }
+  // "YYYY-MM-DD HH-MM-SS": digits everywhere except the fixed separators.
+  for (std::size_t i = 0; i < kBackupTimestampPrefixLength; ++i) {
+    const bool separator_position = i == 4 || i == 7 || i == 10 || i == 13 || i == 16;
+    if (separator_position) {
+      const char expected = i == 10 ? ' ' : '-';
+      if (plain[i] != expected) {
+        return false;
+      }
+    } else if (!is_digit_at(plain, i)) {
+      return false;
+    }
+  }
+  return plain.size() == kBackupTimestampPrefixLength ||
+         plain[kBackupTimestampPrefixLength] == ' ';
+}
+
+std::string backup_identity(const std::string &file_name) {
+  const std::string plain = display_backup_name(file_name);
+  if (has_backup_timestamp_prefix(file_name)) {
+    return plain.substr(0, kBackupTimestampPrefixLength);
+  }
+  return plain;
+}
+
+std::string backup_label(const std::string &file_name) {
+  if (!has_backup_timestamp_prefix(file_name)) {
+    return {};
+  }
+  const std::string plain = display_backup_name(file_name);
+  if (plain.size() <= kBackupTimestampPrefixLength + 1) {
+    return {};
+  }
+  return plain.substr(kBackupTimestampPrefixLength + 1);
+}
+
+std::string backup_name_with_label(const std::string &file_name, const std::string &label) {
+  std::string result = backup_identity(file_name);
+  if (!label.empty()) {
+    result += " ";
+    result += label;
+  }
+  result += ".zip";
+  return result;
+}
+
+std::string sanitize_backup_label(const std::string &raw_label) {
+  std::string collapsed;
+  collapsed.reserve(raw_label.size());
+  bool pending_space = false;
+  for (char value : raw_label) {
+    const unsigned char byte = static_cast<unsigned char>(value);
+    // Multi-byte UTF-8 sequences (byte >= 0x80) pass through untouched; the checks below only
+    // target ASCII controls, ASCII whitespace, and the unsafe path set.
+    if (byte < 0x80 && (byte < 0x20 || byte == 0x7f)) {
+      continue;
+    }
+    char sanitized = value;
+    if (byte < 0x80 && is_unsafe_label_character(value)) {
+      sanitized = '_';
+    }
+    if (sanitized == ' ') {
+      pending_space = !collapsed.empty();
+      continue;
+    }
+    if (pending_space) {
+      collapsed += ' ';
+      pending_space = false;
+    }
+    collapsed += sanitized;
+  }
+
+  // Cap by codepoint count so the limit matches the IME's character limit; a lead byte is the
+  // start of a codepoint, continuation bytes (0x80 pattern) belong to the same one. Truncating on
+  // a lead byte never splits a UTF-8 sequence.
+  std::size_t codepoints = 0;
+  std::size_t cut = collapsed.size();
+  for (std::size_t i = 0; i < collapsed.size(); ++i) {
+    if ((static_cast<unsigned char>(collapsed[i]) & 0xC0) == 0x80) {
+      continue;
+    }
+    if (codepoints == kMaxBackupLabelLength) {
+      cut = i;
+      break;
+    }
+    ++codepoints;
+  }
+  if (cut < collapsed.size()) {
+    collapsed.erase(cut);
+    // The cap can expose a space that used to sit mid-label.
+    while (!collapsed.empty() && collapsed.back() == ' ') {
+      collapsed.pop_back();
+    }
+  }
+  return collapsed;
+}
+
+bool backup_label_conflicts_with_auto(const std::string &label) {
+  constexpr const char *kAuto = "auto";
+  constexpr std::size_t kAutoLength = 4;
+  if (label == kAuto) {
+    return true;
+  }
+  return label.size() > kAutoLength &&
+         label.compare(label.size() - kAutoLength - 1, kAutoLength + 1, " auto") == 0;
 }
 
 } // namespace vsm

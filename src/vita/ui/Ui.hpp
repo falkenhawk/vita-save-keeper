@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/BackupList.hpp"
 #include "core/SaveCategory.hpp"
 #include "core/SaveRecord.hpp"
 #include "core/SaveScanner.hpp"
@@ -32,16 +33,18 @@ struct UiState {
   SaveSortMode sort_mode{SaveSortMode::Name};
   std::array<std::size_t, kSaveCategoryCount> category_counts{};
   std::size_t selected_save{};
-  std::vector<std::string> remote_backups;
-  const std::vector<std::string> *local_backups{};
+  // One row per snapshot (index 0 = "New Backup"), merged from the local and Drive lists by the
+  // App; presence on each side renders as pills instead of text prefixes.
+  const std::vector<BackupRow> *backup_rows{};
   std::size_t selected_backup{};
   bool restore_confirmation_pending{};
   bool delete_confirmation_pending{};
+  bool delete_scope_prompt_pending{};
   bool sync_all_confirmation_pending{};
   bool duplicate_backup_confirmation_pending{};
-  // 0 when idle; fraction of the Select-hold gesture completed, drawn as a gauge under the
-  // status line while the hold hint is showing.
-  float select_hold_fraction{};
+  // 0 when idle; fraction of the active hold gesture (Select = batch, Square = label) completed,
+  // drawn as a gauge under the status line while the hold hint is showing.
+  float hold_gauge_fraction{};
   bool google_connected{};
   bool drive_synced{};
   bool google_auth_pending{};
@@ -66,11 +69,19 @@ struct FontSet {
   vita2d_pgf *fallback = nullptr;
 };
 
+// Outcome of the modal IME dialog; Failed means the dialog could not open at all.
+enum class TextInputResult { Accepted, Cancelled, Failed };
+
 class Ui {
 public:
   bool initialize();
   void shutdown();
   void draw(const UiState &state);
+  // Blocking system-keyboard prompt rendered over a dimmed snapshot of the last frame, following
+  // the draw_busy precedent. Waits for pad release before returning so the closing press cannot
+  // leak into the main loop as a fresh button edge.
+  TextInputResult prompt_text_input(const char *title, const std::string &initial_text,
+                                    std::size_t max_length, std::string *out_text);
   // Full-screen modal frame for blocking work; safe to call from transfer callbacks because all
   // network requests run on the UI thread. total <= 0 draws an indeterminate sweep.
   void draw_busy(const std::string &label, long long done, long long total);

@@ -159,24 +159,85 @@ void test_timestamped_backup_name_uses_jksv_style_zip_name() {
   EXPECT_EQ(vsm::make_timestamped_backup_name(timestamp), "2026-05-21 16-14-09.zip");
 }
 
-void test_remote_entries_are_prefixed_and_local_entries_are_plain() {
-  const vsm::BackupEntry remote = vsm::BackupEntry::remote("2026-05-21 16-14.zip");
-  const vsm::BackupEntry local = vsm::BackupEntry::local("2026-05-19 09-05.zip");
+void test_backup_rows_merge_local_and_remote_by_timestamp_identity() {
+  // Local and remote copies of the same snapshot collapse into one row even when a label rename
+  // only reached one side; remote-only and local-only snapshots keep their own rows, all sorted
+  // newest first behind the "New Backup" sentinel.
+  const std::vector<vsm::BackupRow> rows = vsm::build_backup_rows(
+      {"2026-05-21 16-14-00.zip", "2026-05-20 22-31-00.zip", "2026-05-18 08-00-00.zip"},
+      {"2026-05-21 16-14-00 before-boss.zip", "2026-05-19 09-05-00.zip"});
 
-  EXPECT_EQ(remote.display_name(), "[GD] 2026-05-21 16-14");
-  EXPECT_EQ(local.display_name(), "2026-05-19 09-05");
+  EXPECT_EQ(rows.size(), static_cast<std::size_t>(5));
+  EXPECT_TRUE(rows[0].new_backup);
+  EXPECT_EQ(rows[0].display_name(), "New Backup");
+
+  // Renamed local pairs with its stale-named Drive copy by the 19-char prefix.
+  EXPECT_EQ(rows[1].local_name, "2026-05-21 16-14-00 before-boss.zip");
+  EXPECT_EQ(rows[1].remote_name, "2026-05-21 16-14-00.zip");
+  EXPECT_EQ(rows[1].display_name(), "2026-05-21 16-14-00 before-boss");
+
+  EXPECT_TRUE(!rows[2].has_local());
+  EXPECT_EQ(rows[2].remote_name, "2026-05-20 22-31-00.zip");
+
+  EXPECT_EQ(rows[3].local_name, "2026-05-19 09-05-00.zip");
+  EXPECT_TRUE(!rows[3].has_remote());
+
+  EXPECT_TRUE(!rows[4].has_local());
+  EXPECT_EQ(rows[4].remote_name, "2026-05-18 08-00-00.zip");
 }
 
-void test_backup_menu_order_matches_jksv_style() {
-  const std::vector<vsm::BackupEntry> menu = vsm::build_backup_menu(
-      {"2026-05-21 16-14.zip", "2026-05-20 22-31.zip"}, {"2026-05-19 09-05.zip"});
+void test_backup_rows_do_not_merge_foreign_names_sharing_a_prefix() {
+  // Names without a valid timestamp pattern keep their full name as identity, so two foreign
+  // zips sharing 19 leading characters stay separate rows.
+  const std::vector<vsm::BackupRow> rows = vsm::build_backup_rows(
+      {"my-imported-backup-v1.zip"}, {"my-imported-backup-v2.zip"});
 
-  EXPECT_EQ(menu.size(), static_cast<std::size_t>(4));
-  EXPECT_TRUE(menu[0].kind == vsm::BackupEntryKind::NewBackup);
-  EXPECT_EQ(menu[0].display_name(), "New Backup");
-  EXPECT_EQ(menu[1].display_name(), "[GD] 2026-05-21 16-14");
-  EXPECT_EQ(menu[2].display_name(), "[GD] 2026-05-20 22-31");
-  EXPECT_EQ(menu[3].display_name(), "2026-05-19 09-05");
+  EXPECT_EQ(rows.size(), static_cast<std::size_t>(3));
+  EXPECT_TRUE(!rows[1].has_remote() || !rows[1].has_local());
+  EXPECT_TRUE(!rows[2].has_remote() || !rows[2].has_local());
+}
+
+void test_backup_name_identity_label_and_rename_helpers() {
+  EXPECT_TRUE(vsm::has_backup_timestamp_prefix("2026-05-21 16-14-09.zip"));
+  EXPECT_TRUE(vsm::has_backup_timestamp_prefix("2026-05-21 16-14-09 before boss.zip"));
+  EXPECT_TRUE(!vsm::has_backup_timestamp_prefix("2026-05-21 16-14-09x.zip"));
+  EXPECT_TRUE(!vsm::has_backup_timestamp_prefix("my-imported-backup-v1.zip"));
+  EXPECT_TRUE(!vsm::has_backup_timestamp_prefix("2026-05-21_16-14-09.zip"));
+
+  EXPECT_EQ(vsm::backup_identity("2026-05-21 16-14-09 before boss.zip"), "2026-05-21 16-14-09");
+  EXPECT_EQ(vsm::backup_identity("my-imported-backup-v1.zip"), "my-imported-backup-v1");
+
+  EXPECT_EQ(vsm::backup_label("2026-05-21 16-14-09 before boss.zip"), "before boss");
+  EXPECT_EQ(vsm::backup_label("2026-05-21 16-14-09 auto.zip"), "auto");
+  EXPECT_EQ(vsm::backup_label("2026-05-21 16-14-09.zip"), "");
+
+  EXPECT_EQ(vsm::backup_name_with_label("2026-05-21 16-14-09.zip", "100% save"),
+            "2026-05-21 16-14-09 100% save.zip");
+  // Relabeling replaces the old label; an empty label renames back to the bare timestamp.
+  EXPECT_EQ(vsm::backup_name_with_label("2026-05-21 16-14-09 before boss.zip", "after boss"),
+            "2026-05-21 16-14-09 after boss.zip");
+  EXPECT_EQ(vsm::backup_name_with_label("2026-05-21 16-14-09 auto.zip", ""),
+            "2026-05-21 16-14-09.zip");
+}
+
+void test_backup_label_sanitizer_and_auto_conflict() {
+  EXPECT_EQ(vsm::sanitize_backup_label("  before   the/boss?  "), "before the_boss_");
+  EXPECT_EQ(vsm::sanitize_backup_label("tab\tand\nnewline"), "tabandnewline");
+  EXPECT_EQ(vsm::sanitize_backup_label("   "), "");
+  // The cap counts characters, not bytes, and never splits a UTF-8 sequence.
+  const std::string a32(vsm::kMaxBackupLabelLength, 'a');
+  EXPECT_EQ(vsm::sanitize_backup_label(a32 + "b"), a32);  // 33rd ASCII char dropped
+  // 31 ASCII + one 2-byte codepoint = 32 characters, kept whole (byte length 33 is irrelevant).
+  const std::string a31(vsm::kMaxBackupLabelLength - 1, 'a');
+  EXPECT_EQ(vsm::sanitize_backup_label(a31 + "\xC3\xA9"), a31 + "\xC3\xA9");
+  // 31 ASCII + two 2-byte codepoints = 33 characters, the last codepoint dropped whole.
+  EXPECT_EQ(vsm::sanitize_backup_label(a31 + "\xC3\xA9\xC3\xA9"), a31 + "\xC3\xA9");
+
+  EXPECT_TRUE(vsm::backup_label_conflicts_with_auto("auto"));
+  EXPECT_TRUE(vsm::backup_label_conflicts_with_auto("my auto"));
+  EXPECT_TRUE(!vsm::backup_label_conflicts_with_auto("automatic"));
+  EXPECT_TRUE(!vsm::backup_label_conflicts_with_auto("autosave"));
+  EXPECT_TRUE(!vsm::backup_label_conflicts_with_auto(""));
 }
 
 void test_path_component_normalization_replaces_unsafe_characters() {
@@ -645,10 +706,16 @@ void test_app_settings_roundtrip_and_unknown_keys() {
 }
 
 void test_auto_backup_suffix_display_and_content_matching() {
-  const vsm::BackupEntry plain = vsm::BackupEntry::local("2026-07-05 10-00-00.zip");
+  vsm::BackupRow plain;
+  plain.local_name = "2026-07-05 10-00-00.zip";
   EXPECT_EQ(plain.display_name(), "2026-07-05 10-00-00");
-  const vsm::BackupEntry automatic = vsm::BackupEntry::local("2026-07-05 10-00-00 auto.zip");
+  vsm::BackupRow automatic;
+  automatic.local_name = "2026-07-05 10-00-00 auto.zip";
   EXPECT_EQ(automatic.display_name(), "[AUTO] 2026-07-05 10-00-00");
+  // The auto marker travels with the name, so a cloud-only auto snapshot renders the same way.
+  vsm::BackupRow remote_auto;
+  remote_auto.remote_name = "2026-07-05 10-00-00 auto.zip";
+  EXPECT_EQ(remote_auto.display_name(), "[AUTO] 2026-07-05 10-00-00");
 
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() / "save-keeper-auto-backup-test";
@@ -873,8 +940,10 @@ void test_drive_rename_metadata_json_escapes_the_name() {
 
 int main() {
   test_timestamped_backup_name_uses_jksv_style_zip_name();
-  test_remote_entries_are_prefixed_and_local_entries_are_plain();
-  test_backup_menu_order_matches_jksv_style();
+  test_backup_rows_merge_local_and_remote_by_timestamp_identity();
+  test_backup_rows_do_not_merge_foreign_names_sharing_a_prefix();
+  test_backup_name_identity_label_and_rename_helpers();
+  test_backup_label_sanitizer_and_auto_conflict();
   test_path_component_normalization_replaces_unsafe_characters();
   test_sfo_parser_reads_title_strings();
   test_save_scanner_lists_direct_child_save_directories();

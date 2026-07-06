@@ -2,56 +2,82 @@
 
 #include "core/BackupName.hpp"
 
+#include <algorithm>
+
 namespace vsm {
 
-BackupEntry BackupEntry::new_backup() {
-  return {BackupEntryKind::NewBackup, "New Backup"};
+BackupRow BackupRow::new_backup_row() {
+  BackupRow row;
+  row.new_backup = true;
+  return row;
 }
 
-BackupEntry BackupEntry::local(std::string file_name) {
-  return {BackupEntryKind::Local, std::move(file_name)};
-}
-
-BackupEntry BackupEntry::remote(std::string file_name) {
-  return {BackupEntryKind::Remote, std::move(file_name)};
-}
-
-std::string BackupEntry::display_name() const {
-  // Match JKSV's visual model: local backups keep their plain timestamp name, while cloud
-  // entries get a provider prefix. Only the display is transformed (prefixes, no ".zip") -
-  // keeping the stored file name unmodified avoids leaking UI labels into local paths or Drive
-  // object names.
-  const std::string plain = vsm::display_backup_name(name);
-  if (kind == BackupEntryKind::Remote) {
-    return "[GD] " + plain;
+std::string BackupRow::display_name() const {
+  if (new_backup) {
+    return "New Backup";
   }
-  // Automatic pre-restore snapshots carry an " auto" marker in the file name (so chronological
-  // sorting still works) and are displayed with an [AUTO] prefix instead.
+  // Only the display is transformed (no ".zip", the " auto" marker shown as an [AUTO] prefix) -
+  // the stored file name is never mutated. Cloud presence is drawn as a pill by the UI instead
+  // of a "[GD] " text prefix, so both sides render the same name.
+  const std::string plain = vsm::display_backup_name(primary_name());
   constexpr const char *kAutoSuffix = " auto";
   const std::size_t suffix_length = 5;
-  if (kind == BackupEntryKind::Local && plain.size() > suffix_length &&
+  if (plain.size() > suffix_length &&
       plain.compare(plain.size() - suffix_length, suffix_length, kAutoSuffix) == 0) {
     return "[AUTO] " + plain.substr(0, plain.size() - suffix_length);
   }
   return plain;
 }
 
-std::vector<BackupEntry> build_backup_menu(const std::vector<std::string> &remote_files,
-                                           const std::vector<std::string> &local_files) {
-  std::vector<BackupEntry> result;
-  result.reserve(1 + remote_files.size() + local_files.size());
-  result.push_back(BackupEntry::new_backup());
+std::vector<BackupRow> build_backup_rows(const std::vector<std::string> &remote_files,
+                                         const std::vector<std::string> &local_files) {
+  std::vector<BackupRow> snapshots;
+  snapshots.reserve(remote_files.size() + local_files.size());
 
-  // JKSV lists cloud snapshots in the same backup picker instead of forcing a separate sync
-  // screen. Remote entries are inserted before local entries so the prefixed Drive backups stay
-  // grouped and easy to scan, while local saves remain untagged as requested.
-  for (const std::string &file : remote_files) {
-    result.push_back(BackupEntry::remote(file));
-  }
   for (const std::string &file : local_files) {
-    result.push_back(BackupEntry::local(file));
+    BackupRow row;
+    row.local_name = file;
+    snapshots.push_back(std::move(row));
   }
 
+  // A Drive copy attaches to the first identity match still missing its remote side; the guard
+  // keeps two same-identity remote files (possible after out-of-band Drive edits) from
+  // collapsing into one row and hiding a file.
+  for (const std::string &file : remote_files) {
+    const std::string identity = backup_identity(file);
+    bool attached = false;
+    for (BackupRow &row : snapshots) {
+      if (!row.has_remote() && row.has_local() && backup_identity(row.local_name) == identity) {
+        row.remote_name = file;
+        attached = true;
+        break;
+      }
+    }
+    if (!attached) {
+      BackupRow row;
+      row.remote_name = file;
+      snapshots.push_back(std::move(row));
+    }
+  }
+
+  // Newest first regardless of which side holds the snapshot; the timestamp identity keeps the
+  // order chronological even after a label rename. Same-identity rows (foreign names, rare
+  // duplicates) tiebreak on the full name so the order stays stable.
+  std::sort(snapshots.begin(), snapshots.end(), [](const BackupRow &a, const BackupRow &b) {
+    const std::string identity_a = backup_identity(a.primary_name());
+    const std::string identity_b = backup_identity(b.primary_name());
+    if (identity_a != identity_b) {
+      return identity_a > identity_b;
+    }
+    return a.primary_name() > b.primary_name();
+  });
+
+  std::vector<BackupRow> result;
+  result.reserve(1 + snapshots.size());
+  result.push_back(BackupRow::new_backup_row());
+  for (BackupRow &row : snapshots) {
+    result.push_back(std::move(row));
+  }
   return result;
 }
 

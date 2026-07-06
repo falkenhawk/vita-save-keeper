@@ -5,9 +5,14 @@
 #include "core/GridWindow.hpp"
 #include "core/TextUtil.hpp"
 
+#include <psp2/common_dialog.h>
+#include <psp2/ctrl.h>
+#include <psp2/ime_dialog.h>
+#include <psp2/kernel/threadmgr.h>
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <qrcodegen.hpp>
 #include <string>
@@ -279,6 +284,92 @@ std::string format_minutes_seconds(int total_seconds) {
   return buffer;
 }
 
+// Where a snapshot lives is drawn as small hand-made glyphs at the row's right edge (like the
+// button shapes above), replacing the old "[GD] " text prefix: a cloud for the Drive copy, a
+// memory-card silhouette for the card copy.
+void draw_cloud_glyph(int x, int y, unsigned int color) {
+  vita2d_draw_fill_circle(x + 6, y + 7, 5, color);
+  vita2d_draw_fill_circle(x + 12, y + 5, 6, color);
+  vita2d_draw_rectangle(x + 2, y + 7, 16, 5, color);
+}
+
+void draw_card_glyph(int x, int y, unsigned int color) {
+  // Body with a clipped top-left corner, the classic memory-card outline.
+  vita2d_draw_rectangle(x, y + 4, 12, 11, color);
+  vita2d_draw_rectangle(x + 4, y, 8, 4, color);
+}
+
+// The IME dialog wants UTF-16 in and hands UTF-16 back; the rest of the app is UTF-8. Both
+// helpers handle supplementary-plane codepoints (surrogate pairs) so pasted symbols survive the
+// round trip instead of corrupting the file name.
+void utf8_to_utf16(const std::string &utf8, SceWChar16 *out, std::size_t out_capacity) {
+  std::size_t out_index = 0;
+  std::size_t i = 0;
+  while (i < utf8.size() && out_index + 1 < out_capacity) {
+    const unsigned char lead = static_cast<unsigned char>(utf8[i]);
+    std::uint32_t codepoint = 0xFFFD;
+    std::size_t length = 1;
+    if (lead < 0x80) {
+      codepoint = lead;
+    } else if ((lead & 0xE0) == 0xC0 && i + 1 < utf8.size()) {
+      codepoint = static_cast<std::uint32_t>(lead & 0x1F) << 6 |
+                  (static_cast<unsigned char>(utf8[i + 1]) & 0x3F);
+      length = 2;
+    } else if ((lead & 0xF0) == 0xE0 && i + 2 < utf8.size()) {
+      codepoint = static_cast<std::uint32_t>(lead & 0x0F) << 12 |
+                  static_cast<std::uint32_t>(static_cast<unsigned char>(utf8[i + 1]) & 0x3F) << 6 |
+                  (static_cast<unsigned char>(utf8[i + 2]) & 0x3F);
+      length = 3;
+    } else if ((lead & 0xF8) == 0xF0 && i + 3 < utf8.size()) {
+      codepoint = static_cast<std::uint32_t>(lead & 0x07) << 18 |
+                  static_cast<std::uint32_t>(static_cast<unsigned char>(utf8[i + 1]) & 0x3F) << 12 |
+                  static_cast<std::uint32_t>(static_cast<unsigned char>(utf8[i + 2]) & 0x3F) << 6 |
+                  (static_cast<unsigned char>(utf8[i + 3]) & 0x3F);
+      length = 4;
+    }
+    if (codepoint >= 0x10000) {
+      if (out_index + 2 >= out_capacity) {
+        break;
+      }
+      const std::uint32_t offset = codepoint - 0x10000;
+      out[out_index++] = static_cast<SceWChar16>(0xD800 | (offset >> 10));
+      out[out_index++] = static_cast<SceWChar16>(0xDC00 | (offset & 0x3FF));
+    } else {
+      out[out_index++] = static_cast<SceWChar16>(codepoint);
+    }
+    i += length;
+  }
+  out[out_index] = 0;
+}
+
+std::string utf16_to_utf8(const SceWChar16 *utf16) {
+  std::string out;
+  for (std::size_t i = 0; utf16[i] != 0; ++i) {
+    std::uint32_t codepoint = utf16[i];
+    if (codepoint >= 0xD800 && codepoint <= 0xDBFF && utf16[i + 1] >= 0xDC00 &&
+        utf16[i + 1] <= 0xDFFF) {
+      codepoint = 0x10000 + ((codepoint - 0xD800) << 10) + (utf16[i + 1] - 0xDC00);
+      ++i;
+    }
+    if (codepoint < 0x80) {
+      out += static_cast<char>(codepoint);
+    } else if (codepoint < 0x800) {
+      out += static_cast<char>(0xC0 | (codepoint >> 6));
+      out += static_cast<char>(0x80 | (codepoint & 0x3F));
+    } else if (codepoint < 0x10000) {
+      out += static_cast<char>(0xE0 | (codepoint >> 12));
+      out += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+      out += static_cast<char>(0x80 | (codepoint & 0x3F));
+    } else {
+      out += static_cast<char>(0xF0 | (codepoint >> 18));
+      out += static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F));
+      out += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+      out += static_cast<char>(0x80 | (codepoint & 0x3F));
+    }
+  }
+  return out;
+}
+
 } // namespace
 
 bool Ui::initialize() {
@@ -521,25 +612,25 @@ void Ui::draw_backup_panel(const UiState &state) {
   draw_text(fonts_, 528, 84, kColorText, kTextSizeNormal, title.c_str());
   draw_text(fonts_, 528, 110, kColorMuted, kTextSizeSmall, details.c_str());
 
-  constexpr std::size_t kVisibleEntries = 7;
-  const std::vector<BackupEntry> all_entries =
-      build_backup_menu(state.remote_backups, *state.local_backups);
-  // Menu indices match the App: 0 is the always-selectable "New Backup" entry. The window only
-  // scrolls when the selection reaches its edge, like the save grid.
-  const std::size_t selected_entry = state.selected_backup;
-  backup_top_row_ = grid_window_top_row(backup_top_row_, selected_entry, all_entries.size(), 1,
-                                        kVisibleEntries);
-  const std::size_t backup_window = backup_top_row_;
-
-  std::vector<BackupEntry> entries;
-  for (std::size_t i = backup_window;
-       i < all_entries.size() && entries.size() < kVisibleEntries; ++i) {
-    entries.push_back(all_entries[i]);
+  if (!state.backup_rows) {
+    draw_status_line(state);
+    return;
   }
 
+  constexpr std::size_t kVisibleEntries = 7;
+  // Row indices match the App: 0 is the always-selectable "New Backup" entry. The window only
+  // scrolls when the selection reaches its edge, like the save grid.
+  const std::vector<BackupRow> &all_rows = *state.backup_rows;
+  const std::size_t selected_entry = state.selected_backup;
+  backup_top_row_ = grid_window_top_row(backup_top_row_, selected_entry, all_rows.size(), 1,
+                                        kVisibleEntries);
+  const std::size_t backup_window = backup_top_row_;
+  const std::size_t visible_count =
+      std::min(kVisibleEntries, all_rows.size() - std::min(backup_window, all_rows.size()));
+
   int y = 136;
-  const std::size_t visible_count = entries.size();
   for (std::size_t i = 0; i < visible_count; ++i) {
+    const BackupRow &row = all_rows[i + backup_window];
     const bool selected = (i + backup_window) == selected_entry;
     const unsigned int bg = selected ? kColorAccentSoft : RGBA8(255, 255, 255, 18);
     vita2d_draw_rectangle(528, y, 408, 36, bg);
@@ -547,7 +638,20 @@ void Ui::draw_backup_panel(const UiState &state) {
       vita2d_draw_rectangle(528, y, 4, 36, kColorAccent);
     }
 
-    const std::string label = fit_text(kTextSizeSmall, entries[i].display_name(), 386);
+    // Presence pills sit right-aligned in fixed slots (card, then cloud at the edge) so the
+    // names stay one aligned column; the text stops before the pill area.
+    int max_text_width = 386;
+    if (!row.new_backup) {
+      max_text_width = 330;
+      if (row.has_remote()) {
+        draw_cloud_glyph(906, y + 12, selected ? kColorAccent : RGBA8(56, 189, 248, 170));
+      }
+      if (row.has_local()) {
+        draw_card_glyph(884, y + 11,
+                        selected ? RGBA8(203, 213, 225, 255) : RGBA8(148, 163, 184, 170));
+      }
+    }
+    const std::string label = fit_text(kTextSizeSmall, row.display_name(), max_text_width);
     draw_text(fonts_, 542, y + 24, selected ? kColorText : kColorMuted,
               kTextSizeSmall, label.c_str());
     y += 42;
@@ -559,12 +663,12 @@ void Ui::draw_backup_panel(const UiState &state) {
     vita2d_draw_line(714, 128, 720, 122, kColorMuted);
     vita2d_draw_line(720, 122, 726, 128, kColorMuted);
   }
-  if (all_entries.size() > backup_window + entries.size()) {
+  if (all_rows.size() > backup_window + visible_count) {
     vita2d_draw_line(714, 432, 720, 438, kColorMuted);
     vita2d_draw_line(720, 438, 726, 432, kColorMuted);
   }
 
-  if (state.remote_backups.size() + state.local_backups->size() > 0) {
+  if (all_rows.size() > 1) {
     draw_rstick_hint(930, 470);
   }
 
@@ -624,7 +728,8 @@ void Ui::draw_status_line(const UiState &state) {
   const std::string status = fit_text(kTextSizeSmall, state.status_message, 380);
   unsigned int color = kColorMuted;
   if (state.restore_confirmation_pending || state.delete_confirmation_pending ||
-      state.sync_all_confirmation_pending || state.duplicate_backup_confirmation_pending) {
+      state.delete_scope_prompt_pending || state.sync_all_confirmation_pending ||
+      state.duplicate_backup_confirmation_pending) {
     color = kColorAccent;
   } else if (!state.status_message.empty()) {
     switch (state.status_kind) {
@@ -642,10 +747,10 @@ void Ui::draw_status_line(const UiState &state) {
   // Baseline chosen so the text centers on the R-stick pictogram (cy = 470) next to it.
   draw_text(fonts_, 528, 476, color, kTextSizeSmall, status.c_str());
 
-  // Select-hold gauge: fills toward the batch trigger right under the hint text, so the gesture
-  // announces itself before anything runs.
-  if (state.select_hold_fraction > 0.0f) {
-    const float fraction = std::min(1.0f, state.select_hold_fraction);
+  // Hold gauge (Select = batch, Square = label): fills toward the trigger right under the hint
+  // text, so the gesture announces itself before anything runs.
+  if (state.hold_gauge_fraction > 0.0f) {
+    const float fraction = std::min(1.0f, state.hold_gauge_fraction);
     vita2d_draw_rectangle(528, 482, 380, 3, RGBA8(255, 255, 255, 24));
     vita2d_draw_rectangle(528, 482, static_cast<int>(380.0f * fraction), 3, kColorAccent);
   }
@@ -669,6 +774,14 @@ void Ui::draw_footer(const UiState &state) {
     draw_hints_right_aligned(fonts_, hints, 2);
     return;
   }
+  if (state.delete_scope_prompt_pending) {
+    const HintSpec hints[] = {{cancel, "Cancel"},
+                              {ButtonSymbol::Square, "Card only"},
+                              {ButtonSymbol::Triangle, "Drive only"},
+                              {ButtonSymbol::Start, "Both"}};
+    draw_hints_right_aligned(fonts_, hints, 4);
+    return;
+  }
   if (state.delete_confirmation_pending) {
     const HintSpec hints[] = {{cancel, "Cancel"}, {ButtonSymbol::Start, "Confirm delete"}};
     draw_hints_right_aligned(fonts_, hints, 2);
@@ -689,7 +802,11 @@ void Ui::draw_footer(const UiState &state) {
   const std::string sort_label =
       std::string("Sort: ") + save_sort_mode_label(state.sort_mode);
   const HintSpec hints[] = {
-      {ButtonSymbol::Square, sort_label.c_str()},
+      // Square splits like Select does: tap sorts, a hold labels the focused backup. The sort
+      // mode readout keeps the New Backup slot; on a backup entry the hold gesture is the more
+      // useful hint and Sort still works as a tap.
+      {ButtonSymbol::Square,
+       state.selected_backup == 0 ? sort_label.c_str() : "Sort / hold: Label"},
       {ButtonSymbol::Triangle, state.google_connected ? "Refresh" : "Google"},
       {ButtonSymbol::Start, "Delete"},
       // On the New Backup entry a tap-upload has nothing to act on, so the slot advertises the
@@ -794,6 +911,72 @@ void Ui::draw_busy(const std::string &label, long long done, long long total) {
 
   vita2d_end_drawing();
   vita2d_swap_buffers();
+}
+
+TextInputResult Ui::prompt_text_input(const char *title, const std::string &initial_text,
+                                      std::size_t max_length, std::string *out_text) {
+  // The dialog reads these buffers for its whole lifetime; they stay alive because this call
+  // blocks until the dialog is closed.
+  SceWChar16 title_utf16[SCE_IME_DIALOG_MAX_TITLE_LENGTH + 1] = {};
+  SceWChar16 initial_utf16[SCE_IME_DIALOG_MAX_TEXT_LENGTH + 1] = {};
+  SceWChar16 input_utf16[SCE_IME_DIALOG_MAX_TEXT_LENGTH + 1] = {};
+  utf8_to_utf16(title, title_utf16, SCE_IME_DIALOG_MAX_TITLE_LENGTH + 1);
+  utf8_to_utf16(initial_text, initial_utf16, SCE_IME_DIALOG_MAX_TEXT_LENGTH + 1);
+
+  SceImeDialogParam param;
+  sceImeDialogParamInit(&param);
+  param.type = SCE_IME_TYPE_DEFAULT;
+  param.dialogMode = SCE_IME_DIALOG_DIALOG_MODE_WITH_CANCEL;
+  // The clear button doubles as "remove the label" - clearing the text and confirming renames
+  // the backup back to its bare timestamp.
+  param.textBoxMode = SCE_IME_DIALOG_TEXTBOX_MODE_WITH_CLEAR;
+  param.title = title_utf16;
+  param.maxTextLength = static_cast<SceUInt32>(
+      std::min<std::size_t>(max_length, SCE_IME_DIALOG_MAX_TEXT_LENGTH));
+  param.initialText = initial_utf16;
+  param.inputTextBuffer = input_utf16;
+  if (sceImeDialogInit(&param) < 0) {
+    return TextInputResult::Failed;
+  }
+
+  bool accepted = false;
+  while (true) {
+    if (sceImeDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_FINISHED) {
+      SceImeDialogResult result{};
+      sceImeDialogGetResult(&result);
+      accepted = result.button == SCE_IME_DIALOG_BUTTON_ENTER;
+      break;
+    }
+    // Same dimmed backdrop the busy modal uses; the dialog itself is composited by the common
+    // dialog layer, which needs the update call between end_drawing and swap_buffers.
+    vita2d_start_drawing();
+    vita2d_clear_screen();
+    if (has_last_state_) {
+      draw_header(last_state_);
+      draw_title_grid(last_state_);
+      draw_backup_panel(last_state_);
+      draw_footer(last_state_);
+      vita2d_draw_rectangle(0, 0, 960, 544, RGBA8(3, 7, 18, 200));
+    }
+    vita2d_end_drawing();
+    vita2d_common_dialog_update();
+    vita2d_swap_buffers();
+  }
+  sceImeDialogTerm();
+
+  // The press that closed the dialog is still down; returning now would hand the main loop a
+  // fresh button edge (the confirm button doubles as Restore). Block until the pad is idle.
+  SceCtrlData pad{};
+  do {
+    sceCtrlPeekBufferPositive(0, &pad, 1);
+    sceKernelDelayThread(16 * 1000);
+  } while (pad.buttons != 0);
+
+  if (!accepted) {
+    return TextInputResult::Cancelled;
+  }
+  *out_text = utf16_to_utf8(input_utf16);
+  return TextInputResult::Accepted;
 }
 
 } // namespace vsm::vita

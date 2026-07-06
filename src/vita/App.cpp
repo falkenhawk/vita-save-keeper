@@ -14,6 +14,7 @@
 #include "vita/net/HttpClient.hpp"
 
 #include <psp2/apputil.h>
+#include <psp2/common_dialog.h>
 #include <psp2/ctrl.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
@@ -355,10 +356,12 @@ void App::refresh_local_backups() {
   if (!save) {
     local_backups_.clear();
     selected_backup_ = 0;
+    rebuild_backup_rows();
     return;
   }
 
   local_backups_ = scan_local_backup_names(kBackupRoot, save->id);
+  rebuild_backup_rows();
   if (selected_backup_ > backup_count()) {
     selected_backup_ = 0;
   }
@@ -431,8 +434,9 @@ void App::cancel_restore_confirmation() {
 }
 
 void App::cancel_delete_confirmation() {
-  if (delete_confirmation_pending_) {
+  if (delete_confirmation_pending_ || delete_scope_prompt_pending_) {
     delete_confirmation_pending_ = false;
+    delete_scope_prompt_pending_ = false;
     set_status(StatusKind::Info, "Delete cancelled.");
   }
 }
@@ -440,6 +444,7 @@ void App::cancel_delete_confirmation() {
 void App::create_new_backup() {
   restore_confirmation_pending_ = false;
   delete_confirmation_pending_ = false;
+  delete_scope_prompt_pending_ = false;
   const SaveRecord *selected = selected_save_record();
   if (!selected) {
     set_status(StatusKind::Info, "No save selected.");
@@ -476,15 +481,9 @@ void App::create_new_backup() {
   });
   if (result.ok) {
     refresh_local_backups();
-    // Focus the fresh snapshot so an immediate Select-to-upload needs no scrolling. Local
-    // backups sort newest first, but matching by name keeps this correct regardless.
+    // Focus the fresh snapshot so an immediate Select-to-upload needs no scrolling.
     const std::string file_name = archive_file_name(result.archive_path);
-    for (std::size_t i = 0; i < local_backups_.size(); ++i) {
-      if (local_backups_[i] == file_name) {
-        selected_backup_ = 1 + remote_backups_.size() + i;
-        break;
-      }
-    }
+    focus_backup_row_by_identity(file_name);
     set_status(StatusKind::Success, "Created " + display_backup_name(file_name));
   } else {
     set_status(StatusKind::Error, "Backup failed: " + result.error);
@@ -499,29 +498,63 @@ void App::handle_delete_button() {
     set_status(StatusKind::Info, "No save selected.");
     return;
   }
-  if (selected_backup_ == 0 || backup_count() == 0) {
+  const BackupRow *row = selected_backup_row();
+  if (!row) {
     set_status(StatusKind::Info, "Select a backup to delete.");
     return;
   }
 
-  const std::string backup_name = selected_backup_name();
+  if (delete_scope_prompt_pending_) {
+    // Second Start press with the scope prompt open means "everywhere".
+    delete_scope_prompt_pending_ = false;
+    perform_scoped_delete(true, true);
+    return;
+  }
+
+  const std::string display = row->display_name();
+  if (row->has_local() && row->has_remote()) {
+    restore_confirmation_pending_ = false;
+    delete_confirmation_pending_ = false;
+    delete_scope_prompt_pending_ = true;
+    set_status(StatusKind::Info, "Delete " + display + "? Choose where.");
+    return;
+  }
+
   if (!delete_confirmation_pending_) {
     restore_confirmation_pending_ = false;
     delete_confirmation_pending_ = true;
-    set_status(StatusKind::Info, "Delete " + display_backup_name(backup_name) + "?");
+    set_status(StatusKind::Info, "Delete " + display +
+                                     (row->has_remote() ? " from Drive?" : " from this card?"));
     return;
   }
   delete_confirmation_pending_ = false;
+  perform_scoped_delete(row->has_local(), row->has_remote());
+}
 
-  if (selected_backup_is_remote()) {
+void App::perform_scoped_delete(bool delete_local, bool delete_remote) {
+  const SaveRecord *selected = selected_save_record();
+  const BackupRow *selected_row = selected_backup_row();
+  if (!selected || !selected_row) {
+    return;
+  }
+  // The refreshes below rebuild backup_rows_ and invalidate the pointer.
+  const BackupRow row = *selected_row;
+  const std::string display = row.display_name();
+
+  // Drive first: if the Drive delete fails, the card copy is untouched and the pair is intact,
+  // instead of a half-deleted snapshot surviving only in the cloud.
+  const bool remote_requested = delete_remote && row.has_remote();
+  if (remote_requested) {
     if (!ensure_google_access_token()) {
       return;
     }
-    const std::size_t remote_index = (selected_backup_ - 1) % remote_backups_.size();
-    const RemoteBackup remote = remote_backups_[remote_index];
+    const std::string file_id = remote_file_id_for(row.remote_name);
+    if (file_id.empty()) {
+      set_status(StatusKind::Error, "Drive copy not found; refresh and retry.");
+      return;
+    }
     BusyLabelScope busy("Deleting Drive backup");
-    const std::string url =
-        std::string(kDriveFilesEndpoint) + "/" + form_url_encode(remote.file_id);
+    const std::string url = std::string(kDriveFilesEndpoint) + "/" + form_url_encode(file_id);
     const HttpResponse response = drive_request([&](const std::string &token) {
       return HttpClient().delete_request(url, token);
     });
@@ -534,7 +567,7 @@ void App::handle_delete_button() {
     if (indexed != drive_index_.end()) {
       std::vector<RemoteBackup> &list = indexed->second;
       for (std::size_t i = 0; i < list.size(); ++i) {
-        if (list[i].file_id == remote.file_id) {
+        if (list[i].file_id == file_id) {
           list.erase(list.begin() + static_cast<long>(i));
           break;
         }
@@ -545,25 +578,32 @@ void App::handle_delete_button() {
       }
     }
     refresh_remote_backups_view();
-    if (selected_backup_ > backup_count()) {
-      selected_backup_ = backup_count();
-    }
-    set_status(StatusKind::Success, "Deleted [GD] " + display_backup_name(backup_name) + ".");
-    return;
   }
 
-  const SaveRecord &save = *selected;
-  const std::string archive_path = local_backup_archive_path(kBackupRoot, save.id, backup_name);
-  if (std::remove(archive_path.c_str()) != 0) {
-    set_status(StatusKind::Error,
-               "Could not delete " + display_backup_name(backup_name) + ".");
-    return;
+  bool local_failed = false;
+  if (delete_local && row.has_local()) {
+    const std::string archive_path =
+        local_backup_archive_path(kBackupRoot, selected->id, row.local_name);
+    local_failed = std::remove(archive_path.c_str()) != 0;
+    refresh_local_backups();
   }
-  refresh_local_backups();
   if (selected_backup_ > backup_count()) {
     selected_backup_ = backup_count();
   }
-  set_status(StatusKind::Success, "Deleted " + display_backup_name(backup_name) + ".");
+
+  if (local_failed) {
+    set_status(StatusKind::Error, remote_requested
+                                      ? "Deleted the Drive copy, but not the card copy."
+                                      : "Could not delete " + display + ".");
+    return;
+  }
+  if (delete_local && remote_requested) {
+    set_status(StatusKind::Success, "Deleted " + display + " from card and Drive.");
+  } else if (remote_requested) {
+    set_status(StatusKind::Success, "Deleted the Drive copy of " + display + ".");
+  } else {
+    set_status(StatusKind::Success, "Deleted " + display + ".");
+  }
 }
 
 void App::handle_action_button() {
@@ -587,20 +627,26 @@ void App::handle_action_button() {
 
 void App::handle_restore() {
   const SaveRecord *selected = selected_save_record();
-  if (!selected || selected_backup_ == 0 || backup_count() == 0) {
+  const BackupRow *selected_row = selected_backup_row();
+  if (!selected || !selected_row) {
     return;
   }
-  const std::string backup_name = selected_backup_name();
+  // Refreshes below rebuild backup_rows_; keep a stable copy of the row being restored.
+  const BackupRow row = *selected_row;
+  const std::string backup_name = row.primary_name();
   if (!restore_confirmation_pending_) {
     delete_confirmation_pending_ = false;
+    delete_scope_prompt_pending_ = false;
     restore_confirmation_pending_ = true;
-    set_status(StatusKind::Info, "Restore " + display_backup_name(backup_name) + "?");
+    set_status(StatusKind::Info, "Restore " + row.display_name() + "?");
     return;
   }
 
   const SaveRecord &save = *selected;
+  // A card copy restores directly; a cloud-only snapshot downloads into the local backup folder
+  // first (and stays there, so the row becomes card + Drive).
   std::string archive_path = local_backup_archive_path(kBackupRoot, save.id, backup_name);
-  const bool remote_restore = selected_backup_is_remote();
+  const bool remote_restore = !row.has_local();
 
   // Safety net: snapshot the current save before overwriting it, unless some local backup
   // already holds exactly this content (compared by per-file path, size, and CRC32, because
@@ -629,15 +675,8 @@ void App::handle_restore() {
         return;
       }
       refresh_local_backups();
-      if (!remote_restore) {
-        // The new snapshot shifted the local indices; re-locate the entry being restored.
-        for (std::size_t i = 0; i < local_backups_.size(); ++i) {
-          if (local_backups_[i] == backup_name) {
-            selected_backup_ = 1 + remote_backups_.size() + i;
-            break;
-          }
-        }
-      }
+      // The new snapshot shifted the rows; re-locate the entry being restored.
+      focus_backup_row_by_identity(backup_name);
     }
   }
 
@@ -646,7 +685,12 @@ void App::handle_restore() {
       restore_confirmation_pending_ = false;
       return;
     }
-    const RemoteBackup &remote = remote_backups_[(selected_backup_ - 1) % remote_backups_.size()];
+    const std::string file_id = remote_file_id_for(row.remote_name);
+    if (file_id.empty()) {
+      set_status(StatusKind::Error, "Drive copy not found; refresh and retry.");
+      restore_confirmation_pending_ = false;
+      return;
+    }
     if (!ensure_parent_directory(archive_path)) {
       set_status(StatusKind::Error, "Could not create local backup folder.");
       restore_confirmation_pending_ = false;
@@ -654,7 +698,7 @@ void App::handle_restore() {
     }
     BusyLabelScope busy("Downloading backup");
     const std::string download_url = std::string(kDriveFilesEndpoint) + "/" +
-                                     form_url_encode(remote.file_id) + "?alt=media";
+                                     form_url_encode(file_id) + "?alt=media";
     const HttpResponse download = drive_request([&](const std::string &token) {
       return HttpClient().download_file(download_url, archive_path, token);
     });
@@ -674,7 +718,7 @@ void App::handle_restore() {
   restore_confirmation_pending_ = false;
   if (result.ok) {
     set_status(StatusKind::Success,
-               remote_restore ? "Downloaded and restored [GD] " + display_backup_name(backup_name)
+               remote_restore ? "Downloaded and restored " + display_backup_name(backup_name)
                               : "Restored " + display_backup_name(backup_name));
   } else {
     set_status(StatusKind::Error, "Restore failed: " + result.error);
@@ -1110,6 +1154,7 @@ void App::refresh_remote_backups_view() {
       remote_backups_ = found->second;
     }
   }
+  rebuild_backup_rows();
   if (selected_backup_ > backup_count()) {
     selected_backup_ = 0;
   }
@@ -1124,26 +1169,46 @@ std::vector<std::string> App::remote_backup_names() const {
   return names;
 }
 
-std::size_t App::backup_count() const {
-  return remote_backups_.size() + local_backups_.size();
+void App::rebuild_backup_rows() {
+  backup_rows_ = build_backup_rows(remote_backup_names(), local_backups_);
 }
 
-bool App::selected_backup_is_remote() const {
-  return selected_backup_ > 0 && selected_backup_ - 1 < remote_backups_.size();
+std::size_t App::backup_count() const {
+  // Snapshot rows only; the "New Backup" sentinel at index 0 is not a backup.
+  return backup_rows_.empty() ? 0 : backup_rows_.size() - 1;
+}
+
+const BackupRow *App::selected_backup_row() const {
+  if (selected_backup_ == 0 || selected_backup_ >= backup_rows_.size()) {
+    return nullptr;
+  }
+  return &backup_rows_[selected_backup_];
 }
 
 std::string App::selected_backup_name() const {
-  if (selected_backup_ == 0) {
-    return {};
+  const BackupRow *row = selected_backup_row();
+  return row ? row->primary_name() : std::string();
+}
+
+// Re-locate a snapshot after the rows were rebuilt (new sibling, rename, upload); matching by
+// identity keeps the focus on the same snapshot whichever side its name came from.
+void App::focus_backup_row_by_identity(const std::string &backup_name) {
+  const std::string identity = backup_identity(backup_name);
+  for (std::size_t i = 1; i < backup_rows_.size(); ++i) {
+    if (backup_identity(backup_rows_[i].primary_name()) == identity) {
+      selected_backup_ = i;
+      return;
+    }
   }
-  if (selected_backup_is_remote()) {
-    return remote_backups_[selected_backup_ - 1].name;
+}
+
+std::string App::remote_file_id_for(const std::string &remote_name) const {
+  for (const RemoteBackup &backup : remote_backups_) {
+    if (backup.name == remote_name) {
+      return backup.file_id;
+    }
   }
-  if (local_backups_.empty()) {
-    return {};
-  }
-  const std::size_t local_index = selected_backup_ - 1 - remote_backups_.size();
-  return local_backups_[local_index % local_backups_.size()];
+  return {};
 }
 
 // Actual Drive folder holding this save's backups: either the bare key created by older versions
@@ -1172,8 +1237,12 @@ bool App::remote_backup_exists(const std::string &save_id, const std::string &ba
   if (indexed == drive_index_.end()) {
     return false;
   }
+  // Identity (timestamp prefix) instead of full-name equality: a label rename that reached only
+  // one side must not look like a new backup, or the batch and the manual upload would stack a
+  // duplicate under the other name.
+  const std::string identity = backup_identity(backup_name);
   for (const RemoteBackup &remote : indexed->second) {
-    if (remote.name == backup_name) {
+    if (backup_identity(remote.name) == identity) {
       return true;
     }
   }
@@ -1183,20 +1252,23 @@ bool App::remote_backup_exists(const std::string &save_id, const std::string &ba
 void App::handle_upload_button() {
   cancel_sync_all_confirmation();
   cancel_duplicate_backup_confirmation();
+  delete_scope_prompt_pending_ = false;
   const SaveRecord *selected = selected_save_record();
   if (!selected) {
     set_status(StatusKind::Info, "No save selected.");
     return;
   }
-  if (selected_backup_ == 0 || selected_backup_is_remote() || local_backups_.empty()) {
+  const BackupRow *row = selected_backup_row();
+  if (!row || !row->has_local()) {
     set_status(StatusKind::Info, "Select a local backup to upload.");
     return;
   }
-  const std::string backup_name = selected_backup_name();
+  const std::string backup_name = row->local_name;
 
-  // A snapshot never changes after creation, so a same-named file already in Drive is the same
-  // backup; skip the upload instead of stacking duplicates (Drive allows same-name siblings).
-  if (remote_backup_exists(selected->id, backup_name)) {
+  // A snapshot never changes after creation, so a Drive file with the same timestamp identity is
+  // the same backup (even under a stale pre-rename name); skip the upload instead of stacking
+  // duplicates (Drive allows same-name siblings).
+  if (row->has_remote() || remote_backup_exists(selected->id, backup_name)) {
     set_status(StatusKind::Info, "This backup is already on Google Drive.");
     return;
   }
@@ -1210,15 +1282,9 @@ void App::handle_upload_button() {
     return;
   }
   refresh_remote_backups_view();
-  // The insert shifted every menu index below the new entry; focus the uploaded copy so the
-  // selection stays on the file this action was about.
-  for (std::size_t i = 0; i < remote_backups_.size(); ++i) {
-    if (remote_backups_[i].name == backup_name) {
-      selected_backup_ = 1 + i;
-      break;
-    }
-  }
-  set_status(StatusKind::Success, "Uploaded [GD] " + display_backup_name(backup_name));
+  // The rebuild may have shifted the rows; keep the selection on the file this action was about.
+  focus_backup_row_by_identity(backup_name);
+  set_status(StatusKind::Success, "Uploaded " + display_backup_name(backup_name) + " to Drive");
 }
 
 // Sends one local archive to its save folder on Drive and slots it into the index. Error status
@@ -1306,6 +1372,124 @@ bool App::upload_local_backup(const SaveRecord &save, const std::string &backup_
   return true;
 }
 
+// PATCHes the Drive file's name and updates the cached index, mirroring the folder-rename block
+// in upload_local_backup. Local rename happens first at the call site, so a failure here leaves a
+// stale Drive name that identity matching tolerates and the next label edit heals (PATCH is by
+// file id, not by name).
+bool App::rename_remote_backup(const SaveRecord &save, const std::string &remote_name,
+                               const std::string &new_name) {
+  if (!ensure_google_access_token()) {
+    return false;
+  }
+  const std::string file_id = remote_file_id_for(remote_name);
+  if (file_id.empty()) {
+    return false;
+  }
+  BusyLabelScope busy("Renaming Drive backup");
+  const std::string rename_url =
+      std::string(kDriveFilesEndpoint) + "/" + form_url_encode(file_id) + "?fields=id%2Cname";
+  const HttpResponse renamed = drive_request([&](const std::string &token) {
+    return HttpClient().patch_json(rename_url, build_drive_rename_metadata_json(new_name), token);
+  });
+  if (!renamed.ok) {
+    return false;
+  }
+  const std::string folder_name = resolved_drive_folder_name(save.id);
+  const auto indexed = drive_index_.find(folder_name);
+  if (indexed != drive_index_.end()) {
+    for (RemoteBackup &backup : indexed->second) {
+      if (backup.file_id == file_id) {
+        backup.name = new_name;
+        break;
+      }
+    }
+    std::sort(indexed->second.begin(), indexed->second.end(),
+              [](const RemoteBackup &a, const RemoteBackup &b) { return a.name > b.name; });
+  }
+  return true;
+}
+
+void App::begin_label_edit() {
+  // Silent clears: opening the keyboard is itself the new context, a "cancelled" status line
+  // under the IME would only be noise.
+  restore_confirmation_pending_ = false;
+  delete_confirmation_pending_ = false;
+  delete_scope_prompt_pending_ = false;
+  duplicate_backup_confirmation_pending_ = false;
+  sync_all_confirmation_pending_ = false;
+  if (google_auth_pending_) {
+    return;
+  }
+  const SaveRecord *selected = selected_save_record();
+  if (!selected) {
+    set_status(StatusKind::Info, "No save selected.");
+    return;
+  }
+  const BackupRow *selected_row = selected_backup_row();
+  if (!selected_row) {
+    set_status(StatusKind::Info, "Select a backup to label.");
+    return;
+  }
+  const BackupRow row = *selected_row;
+  const std::string primary = row.primary_name();
+  if (!has_backup_timestamp_prefix(primary)) {
+    // A foreign zip without the timestamp identity cannot be renamed in place safely.
+    set_status(StatusKind::Error, "This backup cannot be labeled.");
+    return;
+  }
+
+  std::string entered;
+  const TextInputResult input = ui_.prompt_text_input(
+      "Backup label", backup_label(primary), kMaxBackupLabelLength, &entered);
+  if (input == TextInputResult::Failed) {
+    set_status(StatusKind::Error, "Could not open the keyboard.");
+    return;
+  }
+  if (input == TextInputResult::Cancelled) {
+    return;
+  }
+
+  const std::string label = sanitize_backup_label(entered);
+  const std::string new_name = backup_name_with_label(primary, label);
+  const bool remote_stale = row.has_remote() && row.remote_name != new_name;
+  if (new_name == primary && !remote_stale) {
+    set_status(StatusKind::Info, "Label unchanged.");
+    return;
+  }
+  if (backup_label_conflicts_with_auto(label)) {
+    set_status(StatusKind::Error, "\"auto\" is reserved for automatic snapshots.");
+    return;
+  }
+
+  if (row.has_local() && new_name != row.local_name) {
+    const std::string old_path =
+        local_backup_archive_path(kBackupRoot, selected->id, row.local_name);
+    const std::string new_path = local_backup_archive_path(kBackupRoot, selected->id, new_name);
+    if (std::rename(old_path.c_str(), new_path.c_str()) != 0) {
+      // Leaving both sides untouched beats a half-renamed pair.
+      set_status(StatusKind::Error, "Could not rename the card copy.");
+      return;
+    }
+  }
+  bool drive_ok = true;
+  if (remote_stale) {
+    drive_ok = rename_remote_backup(*selected, row.remote_name, new_name);
+  }
+
+  refresh_local_backups();
+  refresh_remote_backups_view();
+  focus_backup_row_by_identity(new_name);
+
+  if (!drive_ok) {
+    set_status(StatusKind::Error, row.has_local()
+                                      ? "Renamed on card; the Drive rename failed."
+                                      : "Drive rename failed.");
+    return;
+  }
+  set_status(StatusKind::Success,
+             label.empty() ? "Label removed." : "Labeled " + display_backup_name(new_name));
+}
+
 void App::cancel_sync_all_confirmation() {
   if (sync_all_confirmation_pending_) {
     sync_all_confirmation_pending_ = false;
@@ -1338,6 +1522,7 @@ void App::cancel_duplicate_backup_confirmation() {
 void App::begin_sync_all() {
   restore_confirmation_pending_ = false;
   delete_confirmation_pending_ = false;
+  delete_scope_prompt_pending_ = false;
   duplicate_backup_confirmation_pending_ = false;
   sync_all_confirmation_pending_ = false;
 
@@ -1522,6 +1707,16 @@ int App::run() {
   const unsigned int backup_button = enter_is_cross_ ? SCE_CTRL_CROSS : SCE_CTRL_CIRCLE;
   const unsigned int cancel_button = enter_is_cross_ ? SCE_CTRL_CIRCLE : SCE_CTRL_CROSS;
 
+  // The IME dialog (backup labels) renders through the common dialog layer; it follows the
+  // console's language and enter-button settings only if they are handed over once at startup.
+  SceCommonDialogConfigParam common_dialog_config;
+  sceCommonDialogConfigParamInit(&common_dialog_config);
+  sceAppUtilSystemParamGetInt(SCE_SYSTEM_PARAM_ID_LANG,
+                              reinterpret_cast<int *>(&common_dialog_config.language));
+  sceAppUtilSystemParamGetInt(SCE_SYSTEM_PARAM_ID_ENTER_BUTTON,
+                              reinterpret_cast<int *>(&common_dialog_config.enterButtonAssign));
+  sceCommonDialogSetConfigParam(&common_dialog_config);
+
   sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
 
   // With a stored sign-in, load the Drive index right away so every game shows its [GD] entries
@@ -1543,6 +1738,8 @@ int App::run() {
   int rstick_frames = 0;
   int select_hold_frames = 0;
   bool select_hold_consumed = false;
+  int square_hold_frames = 0;
+  bool square_hold_consumed = false;
   int network_poll_delay_frames = 0;
   while (running) {
     if (network_poll_delay_frames <= 0) {
@@ -1607,7 +1804,12 @@ int App::run() {
       cancel_google_auth();
     }
     if ((pressed & SCE_CTRL_TRIANGLE) != 0) {
-      handle_google_button();
+      if (delete_scope_prompt_pending_) {
+        delete_scope_prompt_pending_ = false;
+        perform_scoped_delete(false, true);
+      } else {
+        handle_google_button();
+      }
     }
     // Select distinguishes tap from hold: a tap uploads the focused backup, a one-second hold
     // starts the tab-wide backup & upload batch. Only a release within the tap window counts as
@@ -1630,8 +1832,30 @@ int App::run() {
     if ((pressed & SCE_CTRL_START) != 0) {
       handle_delete_button();
     }
-    if ((pressed & SCE_CTRL_SQUARE) != 0) {
-      cycle_sort_mode();
+    // Square mirrors the Select tap/hold split: a tap keeps its sort meaning, a one-second hold
+    // opens the label editor for the focused backup. While the delete-scope prompt is open the
+    // press means "card only" instead, and the spent press must not sort on release.
+    if ((buttons & SCE_CTRL_SQUARE) != 0) {
+      if ((pressed & SCE_CTRL_SQUARE) != 0 && delete_scope_prompt_pending_) {
+        delete_scope_prompt_pending_ = false;
+        perform_scoped_delete(true, false);
+        square_hold_consumed = true;
+      } else if (!delete_scope_prompt_pending_) {
+        // Only grow the label-edit hold when no scope prompt is up; a Square held across the
+        // Start press that opened the prompt must not silently graduate into a label edit.
+        ++square_hold_frames;
+        if (!square_hold_consumed && square_hold_frames >= kSelectHoldTriggerFrames) {
+          square_hold_consumed = true;
+          begin_label_edit();
+        }
+      }
+    } else {
+      if (square_hold_frames > 0 && !square_hold_consumed &&
+          square_hold_frames < kSelectHoldHintFrames) {
+        cycle_sort_mode();
+      }
+      square_hold_frames = 0;
+      square_hold_consumed = false;
     }
 
     UiState ui_state;
@@ -1643,11 +1867,11 @@ int App::run() {
       ui_state.category_counts[i] = category_count(static_cast<SaveCategory>(i));
     }
     ui_state.selected_save = selected_save_;
-    ui_state.remote_backups = remote_backup_names();
-    ui_state.local_backups = &local_backups_;
+    ui_state.backup_rows = &backup_rows_;
     ui_state.selected_backup = selected_backup_;
     ui_state.restore_confirmation_pending = restore_confirmation_pending_;
     ui_state.delete_confirmation_pending = delete_confirmation_pending_;
+    ui_state.delete_scope_prompt_pending = delete_scope_prompt_pending_;
     ui_state.sync_all_confirmation_pending = sync_all_confirmation_pending_;
     ui_state.duplicate_backup_confirmation_pending = duplicate_backup_confirmation_pending_;
     ui_state.enter_is_cross = enter_is_cross_;
@@ -1663,14 +1887,22 @@ int App::run() {
             : 0;
     ui_state.status_message = status_message_;
     ui_state.status_kind = status_kind_;
-    // While Select is held past the tap window, the status line explains what is about to happen
-    // and a gauge fills toward the trigger; this overlays the frame only, without touching the
-    // stored status, so an early release restores whatever was there.
+    // While Select or Square is held past the tap window, the status line explains what is about
+    // to happen and a gauge fills toward the trigger; this overlays the frame only, without
+    // touching the stored status, so an early release restores whatever was there.
     if (!select_hold_consumed && select_hold_frames >= kSelectHoldHintFrames) {
-      ui_state.select_hold_fraction =
+      ui_state.hold_gauge_fraction =
           std::min(1.0f, static_cast<float>(select_hold_frames) /
                              static_cast<float>(kSelectHoldTriggerFrames));
       ui_state.status_message = sync_all_hold_message(save_category_label(category_));
+      ui_state.status_kind = StatusKind::Info;
+    } else if (!square_hold_consumed && square_hold_frames >= kSelectHoldHintFrames) {
+      ui_state.hold_gauge_fraction =
+          std::min(1.0f, static_cast<float>(square_hold_frames) /
+                             static_cast<float>(kSelectHoldTriggerFrames));
+      ui_state.status_message = selected_backup_row() != nullptr
+                                    ? "Keep holding to edit this backup's label"
+                                    : "Pick a backup first to give it a label";
       ui_state.status_kind = StatusKind::Info;
     }
     ui_.draw(ui_state);
