@@ -1,5 +1,7 @@
 #include "core/BackupList.hpp"
 
+#include "core/BackupName.hpp"
+
 namespace vsm {
 
 BackupEntry BackupEntry::new_backup() {
@@ -15,21 +17,23 @@ BackupEntry BackupEntry::remote(std::string file_name) {
 }
 
 std::string BackupEntry::display_name() const {
+  // Match JKSV's visual model: local backups keep their plain timestamp name, while cloud
+  // entries get a provider prefix. Only the display is transformed (prefixes, no ".zip") -
+  // keeping the stored file name unmodified avoids leaking UI labels into local paths or Drive
+  // object names.
+  const std::string plain = vsm::display_backup_name(name);
   if (kind == BackupEntryKind::Remote) {
-    // Match JKSV's visual model: local backups keep their plain timestamp name, while cloud
-    // entries get a provider prefix. Keeping the stored file name unmodified avoids leaking UI
-    // labels into local paths or Drive object names.
-    return "[GD] " + name;
+    return "[GD] " + plain;
   }
   // Automatic pre-restore snapshots carry an " auto" marker in the file name (so chronological
   // sorting still works) and are displayed with an [AUTO] prefix instead.
-  constexpr const char *kAutoSuffix = " auto.zip";
-  const std::size_t suffix_length = 9;
-  if (kind == BackupEntryKind::Local && name.size() > suffix_length &&
-      name.compare(name.size() - suffix_length, suffix_length, kAutoSuffix) == 0) {
-    return "[AUTO] " + name.substr(0, name.size() - suffix_length) + ".zip";
+  constexpr const char *kAutoSuffix = " auto";
+  const std::size_t suffix_length = 5;
+  if (kind == BackupEntryKind::Local && plain.size() > suffix_length &&
+      plain.compare(plain.size() - suffix_length, suffix_length, kAutoSuffix) == 0) {
+    return "[AUTO] " + plain.substr(0, plain.size() - suffix_length);
   }
-  return name;
+  return plain;
 }
 
 std::vector<BackupEntry> build_backup_menu(const std::vector<std::string> &remote_files,

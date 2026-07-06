@@ -1,6 +1,7 @@
 #include "core/GoogleDrive.hpp"
 
 #include "core/GoogleAuth.hpp"
+#include "core/PathUtil.hpp"
 
 #include <string>
 
@@ -71,6 +72,28 @@ bool find_json_string_from(const std::string &json, std::size_t start, const std
 }
 
 } // namespace
+
+std::string drive_save_folder_name(const std::string &save_key,
+                                   const std::string &display_name) {
+  const std::string title = normalize_path_component(display_name);
+  if (title.empty() || title == save_key) {
+    return save_key;
+  }
+  return save_key + " " + title;
+}
+
+bool drive_folder_matches_save(const std::string &folder_name, const std::string &save_key) {
+  if (folder_name == save_key) {
+    return true;
+  }
+  return folder_name.size() > save_key.size() + 1 &&
+         folder_name.compare(0, save_key.size(), save_key) == 0 &&
+         folder_name[save_key.size()] == ' ';
+}
+
+std::string build_drive_rename_metadata_json(const std::string &name) {
+  return "{\"name\":\"" + json_escape(name) + "\"}";
+}
 
 std::string build_drive_folder_metadata_json(const std::string &folder_name,
                                              const std::string &parent_id) {

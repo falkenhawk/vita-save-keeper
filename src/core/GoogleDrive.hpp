@@ -19,6 +19,14 @@ struct DriveFileList {
   std::string error;
 };
 
+// Drive folder name for a save: the normalized save key plus the game's title, so the Drive UI is
+// browsable ("PCSB00456 FEZ"); falls back to the bare key when no distinct title is known. The
+// matcher accepts both forms, so folders created by older versions (bare key) keep working and
+// can be renamed opportunistically later.
+std::string drive_save_folder_name(const std::string &save_key, const std::string &display_name);
+bool drive_folder_matches_save(const std::string &folder_name, const std::string &save_key);
+std::string build_drive_rename_metadata_json(const std::string &name);
+
 std::string build_drive_folder_metadata_json(const std::string &folder_name,
                                              const std::string &parent_id);
 std::string build_drive_upload_metadata_json(const std::string &file_name,

@@ -163,8 +163,8 @@ void test_remote_entries_are_prefixed_and_local_entries_are_plain() {
   const vsm::BackupEntry remote = vsm::BackupEntry::remote("2026-05-21 16-14.zip");
   const vsm::BackupEntry local = vsm::BackupEntry::local("2026-05-19 09-05.zip");
 
-  EXPECT_EQ(remote.display_name(), "[GD] 2026-05-21 16-14.zip");
-  EXPECT_EQ(local.display_name(), "2026-05-19 09-05.zip");
+  EXPECT_EQ(remote.display_name(), "[GD] 2026-05-21 16-14");
+  EXPECT_EQ(local.display_name(), "2026-05-19 09-05");
 }
 
 void test_backup_menu_order_matches_jksv_style() {
@@ -174,9 +174,9 @@ void test_backup_menu_order_matches_jksv_style() {
   EXPECT_EQ(menu.size(), static_cast<std::size_t>(4));
   EXPECT_TRUE(menu[0].kind == vsm::BackupEntryKind::NewBackup);
   EXPECT_EQ(menu[0].display_name(), "New Backup");
-  EXPECT_EQ(menu[1].display_name(), "[GD] 2026-05-21 16-14.zip");
-  EXPECT_EQ(menu[2].display_name(), "[GD] 2026-05-20 22-31.zip");
-  EXPECT_EQ(menu[3].display_name(), "2026-05-19 09-05.zip");
+  EXPECT_EQ(menu[1].display_name(), "[GD] 2026-05-21 16-14");
+  EXPECT_EQ(menu[2].display_name(), "[GD] 2026-05-20 22-31");
+  EXPECT_EQ(menu[3].display_name(), "2026-05-19 09-05");
 }
 
 void test_path_component_normalization_replaces_unsafe_characters() {
@@ -646,9 +646,9 @@ void test_app_settings_roundtrip_and_unknown_keys() {
 
 void test_auto_backup_suffix_display_and_content_matching() {
   const vsm::BackupEntry plain = vsm::BackupEntry::local("2026-07-05 10-00-00.zip");
-  EXPECT_EQ(plain.display_name(), "2026-07-05 10-00-00.zip");
+  EXPECT_EQ(plain.display_name(), "2026-07-05 10-00-00");
   const vsm::BackupEntry automatic = vsm::BackupEntry::local("2026-07-05 10-00-00 auto.zip");
-  EXPECT_EQ(automatic.display_name(), "[AUTO] 2026-07-05 10-00-00.zip");
+  EXPECT_EQ(automatic.display_name(), "[AUTO] 2026-07-05 10-00-00");
 
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() / "save-keeper-auto-backup-test";
@@ -839,6 +839,36 @@ void test_sync_all_hold_message_names_the_tab() {
             "Keep holding: backup & upload all Vita saves...");
 }
 
+void test_display_backup_name_strips_zip_extension() {
+  EXPECT_EQ(vsm::display_backup_name("2026-05-21 16-14.zip"), "2026-05-21 16-14");
+  EXPECT_EQ(vsm::display_backup_name("no-extension"), "no-extension");
+  EXPECT_EQ(vsm::display_backup_name(".zip"), "");
+}
+
+void test_drive_save_folder_names_carry_the_game_title() {
+  EXPECT_EQ(vsm::drive_save_folder_name("PCSB00456", "FEZ"), "PCSB00456 FEZ");
+  // No usable title: the folder stays the bare key, as older versions created it.
+  EXPECT_EQ(vsm::drive_save_folder_name("PCSB00456", ""), "PCSB00456");
+  EXPECT_EQ(vsm::drive_save_folder_name("PCSB00456", "PCSB00456"), "PCSB00456");
+  // Titles are sanitized the same way local paths are.
+  EXPECT_EQ(vsm::drive_save_folder_name("PCSE00120", "Persona/4? Golden"),
+            "PCSE00120 Persona_4_ Golden");
+}
+
+void test_drive_folder_matching_accepts_bare_and_titled_names() {
+  EXPECT_TRUE(vsm::drive_folder_matches_save("PCSB00456", "PCSB00456"));
+  EXPECT_TRUE(vsm::drive_folder_matches_save("PCSB00456 FEZ", "PCSB00456"));
+  EXPECT_TRUE(!vsm::drive_folder_matches_save("PCSB00456FEZ", "PCSB00456"));
+  EXPECT_TRUE(!vsm::drive_folder_matches_save("PCSB004567", "PCSB00456"));
+  EXPECT_TRUE(!vsm::drive_folder_matches_save("PCSB0045", "PCSB00456"));
+  EXPECT_TRUE(!vsm::drive_folder_matches_save("", "PCSB00456"));
+}
+
+void test_drive_rename_metadata_json_escapes_the_name() {
+  EXPECT_EQ(vsm::build_drive_rename_metadata_json("PCSB00456 \"FEZ\""),
+            "{\"name\":\"PCSB00456 \\\"FEZ\\\"\"}");
+}
+
 } // namespace
 
 int main() {
@@ -884,6 +914,10 @@ int main() {
   test_sync_all_confirm_message_states_scope();
   test_sync_run_summary_reports_results_and_cancellation();
   test_sync_all_hold_message_names_the_tab();
+  test_display_backup_name_strips_zip_extension();
+  test_drive_save_folder_names_carry_the_game_title();
+  test_drive_folder_matching_accepts_bare_and_titled_names();
+  test_drive_rename_metadata_json_escapes_the_name();
 
   std::cout << "vsm_core_tests passed\n";
   return 0;

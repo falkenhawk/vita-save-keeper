@@ -18,4 +18,15 @@ std::string make_timestamped_backup_name(const BackupTimestamp &timestamp) {
   return out.str();
 }
 
+std::string display_backup_name(const std::string &file_name) {
+  constexpr const char *kZipExtension = ".zip";
+  constexpr std::size_t kZipExtensionLength = 4;
+  if (file_name.size() >= kZipExtensionLength &&
+      file_name.compare(file_name.size() - kZipExtensionLength, kZipExtensionLength,
+                        kZipExtension) == 0) {
+    return file_name.substr(0, file_name.size() - kZipExtensionLength);
+  }
+  return file_name;
+}
+
 } // namespace vsm
