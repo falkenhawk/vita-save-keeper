@@ -303,19 +303,34 @@ std::string format_minutes_seconds(int total_seconds) {
   return buffer;
 }
 
-// Where a snapshot lives is drawn as small hand-made glyphs at the row's right edge (like the
-// button shapes above), replacing the old "[GD] " text prefix: a cloud for the Drive copy, a
-// memory-card silhouette for the card copy.
-void draw_cloud_glyph(int x, int y, unsigned int color) {
-  vita2d_draw_fill_circle(x + 6, y + 7, 5, color);
-  vita2d_draw_fill_circle(x + 12, y + 5, 6, color);
-  vita2d_draw_rectangle(x + 2, y + 7, 16, 5, color);
+// Drive state is the only thing a row marks: a card copy is the normal case and stays unmarked.
+// Sky cloud + check = synced (card and Drive); amber cloud + down arrow = lives only on Drive
+// (Select downloads a card copy, restore fetches it automatically). Drawn in a 28x19 box so the
+// glyph fills the 36px row without growing it and without clipping (rows span x 528..936, the
+// glyph sits at x+2..x+26 inside a box placed at 902).
+void draw_cloud_synced_glyph(int x, int y) {
+  vita2d_draw_fill_circle(x + 9, y + 10, 6, kColorAccent);
+  vita2d_draw_fill_circle(x + 18, y + 8, 8, kColorAccent);
+  vita2d_draw_rectangle(x + 2, y + 10, 24, 7, kColorAccent);
+  // The check is cut out in the panel color; vita2d lines are 1px, so each stroke is tripled
+  // with 1px offsets to read as a ~3px mark on hardware.
+  const unsigned int mark = RGBA8(15, 23, 42, 255);
+  for (int off = -1; off <= 1; ++off) {
+    vita2d_draw_line(x + 9, y + 10 + off, x + 13, y + 14 + off, mark);
+    vita2d_draw_line(x + 13, y + 14 + off, x + 20, y + 7 + off, mark);
+  }
 }
 
-void draw_card_glyph(int x, int y, unsigned int color) {
-  // Body with a clipped top-left corner, the classic memory-card outline.
-  vita2d_draw_rectangle(x, y + 4, 12, 11, color);
-  vita2d_draw_rectangle(x + 4, y, 8, 4, color);
+void draw_cloud_drive_only_glyph(int x, int y) {
+  vita2d_draw_fill_circle(x + 9, y + 10, 6, kColorPendingDot);
+  vita2d_draw_fill_circle(x + 18, y + 8, 8, kColorPendingDot);
+  vita2d_draw_rectangle(x + 2, y + 10, 24, 7, kColorPendingDot);
+  // Down arrow: stem plus a stacked-rect arrowhead (vita2d has no filled-triangle primitive).
+  const unsigned int mark = RGBA8(15, 23, 42, 255);
+  vita2d_draw_rectangle(x + 13, y + 4, 3, 7, mark);
+  vita2d_draw_rectangle(x + 10, y + 11, 9, 2, mark);
+  vita2d_draw_rectangle(x + 12, y + 13, 5, 2, mark);
+  vita2d_draw_rectangle(x + 14, y + 15, 1, 2, mark);
 }
 
 // The IME dialog wants UTF-16 in and hands UTF-16 back; the rest of the app is UTF-8. Both
@@ -657,17 +672,18 @@ void Ui::draw_backup_panel(const UiState &state) {
       vita2d_draw_rectangle(528, y, 4, 36, kColorAccent);
     }
 
-    // Presence pills sit right-aligned in fixed slots (card, then cloud at the edge) so the
-    // names stay one aligned column; the text stops before the pill area.
+    // Only the Drive state is marked, right-aligned in one fixed slot; card-only rows carry no
+    // glyph (a card copy is the normal case). Full color even when unselected - the sky/amber
+    // hue is the signal, so dimming it would cost meaning.
     int max_text_width = 386;
     if (!row.new_backup) {
-      max_text_width = 330;
+      max_text_width = 340;
       if (row.has_remote()) {
-        draw_cloud_glyph(906, y + 12, selected ? kColorAccent : RGBA8(56, 189, 248, 170));
-      }
-      if (row.has_local()) {
-        draw_card_glyph(884, y + 11,
-                        selected ? RGBA8(203, 213, 225, 255) : RGBA8(148, 163, 184, 170));
+        if (row.has_local()) {
+          draw_cloud_synced_glyph(902, y + 9);
+        } else {
+          draw_cloud_drive_only_glyph(902, y + 9);
+        }
       }
     }
     const std::string display = row.display_name();
@@ -853,21 +869,33 @@ void Ui::draw_footer(const UiState &state) {
   // One context action: create a snapshot on the "New Backup" entry, restore on a backup entry.
   const std::string sort_label =
       std::string("Sort: ") + save_sort_mode_label(state.sort_mode);
-  const HintSpec hints[] = {
-      // Square taps to sort and holds to label. The sort-mode readout always stays visible; the
-      // label gesture appears as a dim qualifier only on backup rows, where it applies.
-      {ButtonSymbol::Square, sort_label.c_str(), nullptr,
-       state.selected_backup == 0 ? nullptr : "(hold: Label)"},
-      {ButtonSymbol::Triangle, state.google_connected ? "Refresh" : "Google"},
-      {ButtonSymbol::Start, "Delete"},
-      // On the New Backup entry a tap-upload has nothing to act on, so the slot advertises the
-      // hold gesture instead; on backup entries it stays the plain upload hint. The "(hold)"
-      // qualifier renders dim and small so it reads as a gesture note, not the action name.
-      {ButtonSymbol::Select, state.selected_backup == 0 ? "Backup & Upload All" : "Upload",
-       state.selected_backup == 0 ? "(hold)" : nullptr, nullptr},
-      {confirm, state.selected_backup == 0 ? "Backup" : "Restore"},
-  };
-  draw_hints_right_aligned(fonts_, hints, 5);
+  const BackupRow *focused_row = nullptr;
+  if (state.backup_rows && state.selected_backup > 0 &&
+      state.selected_backup < state.backup_rows->size()) {
+    focused_row = &(*state.backup_rows)[state.selected_backup];
+  }
+  std::vector<HintSpec> hints;
+  hints.reserve(5);
+  // Square taps to sort and holds to label. The sort-mode readout always stays visible; the
+  // label gesture appears as a dim qualifier only on backup rows, where it applies.
+  hints.push_back({ButtonSymbol::Square, sort_label.c_str(), nullptr,
+                   focused_row ? "(hold: Label)" : nullptr});
+  hints.push_back({ButtonSymbol::Triangle, state.google_connected ? "Refresh" : "Google",
+                   nullptr, nullptr});
+  hints.push_back({ButtonSymbol::Start, "Delete", nullptr, nullptr});
+  // Select moves the focused snapshot across: Upload from a card-only row, Download to the card
+  // from a Drive-only row. A synced row has no tap action left, so the slot disappears rather
+  // than advertise a no-op; on the New Backup entry it names the hold gesture instead, with the
+  // "(hold)" qualifier dim and small so it reads as a gesture note, not the action name.
+  if (!focused_row) {
+    hints.push_back({ButtonSymbol::Select, "Backup & Upload All", "(hold)", nullptr});
+  } else if (!focused_row->has_local()) {
+    hints.push_back({ButtonSymbol::Select, "Download", nullptr, nullptr});
+  } else if (!focused_row->has_remote()) {
+    hints.push_back({ButtonSymbol::Select, "Upload", nullptr, nullptr});
+  }
+  hints.push_back({confirm, state.selected_backup == 0 ? "Backup" : "Restore", nullptr, nullptr});
+  draw_hints_right_aligned(fonts_, hints.data(), static_cast<int>(hints.size()));
 }
 
 void Ui::set_batch_progress(std::string label, std::size_t done_games, std::size_t total_games,

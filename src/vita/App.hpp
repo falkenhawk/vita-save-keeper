@@ -77,7 +77,7 @@ private:
   void begin_label_edit();
   bool rename_remote_backup(const SaveRecord &save, const std::string &remote_name,
                             const std::string &new_name);
-  void handle_upload_button();
+  void handle_transfer_button();
   bool upload_local_backup(const SaveRecord &save, const std::string &backup_name);
   bool remote_backup_exists(const std::string &save_id, const std::string &backup_name) const;
   void begin_sync_all();

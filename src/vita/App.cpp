@@ -53,7 +53,8 @@ constexpr int kRepeatIntervalFrames = 5;
 constexpr unsigned int kRepeatableButtons = SCE_CTRL_LEFT | SCE_CTRL_RIGHT | SCE_CTRL_UP |
                                             SCE_CTRL_DOWN | SCE_CTRL_LTRIGGER |
                                             SCE_CTRL_RTRIGGER;
-// Holding Select runs the tab-wide backup & upload batch; a tap keeps its single-upload meaning.
+// Holding Select runs the tab-wide backup & upload batch; a tap keeps its single-transfer
+// meaning (upload a card-only snapshot, download a Drive-only one).
 // The hint gauge starts a few frames in so a quick tap never flashes it.
 constexpr int kSelectHoldTriggerFrames = 60;
 constexpr int kSelectHoldHintFrames = 12;
@@ -712,6 +713,8 @@ void App::handle_restore() {
       return HttpClient().download_file(download_url, archive_path, token);
     });
     if (!download.ok) {
+      // A failed stream leaves a partial zip that would list as a real backup on next refresh.
+      std::remove(archive_path.c_str());
       restore_confirmation_pending_ = false;
       set_status(StatusKind::Error, "Drive download failed.");
       return;
@@ -1259,7 +1262,9 @@ bool App::remote_backup_exists(const std::string &save_id, const std::string &ba
   return false;
 }
 
-void App::handle_upload_button() {
+// Select moves the focused snapshot across: a card-only row uploads, a Drive-only row downloads
+// a card copy without touching the live save (unlike restore, which downloads as a side effect).
+void App::handle_transfer_button() {
   cancel_sync_all_confirmation();
   cancel_duplicate_backup_confirmation();
   delete_scope_prompt_pending_ = false;
@@ -1268,17 +1273,54 @@ void App::handle_upload_button() {
     set_status(StatusKind::Info, "No save selected.");
     return;
   }
-  const BackupRow *row = selected_backup_row();
-  if (!row || !row->has_local()) {
-    set_status(StatusKind::Info, "Select a local backup to upload.");
+  const BackupRow *selected_row = selected_backup_row();
+  if (!selected_row) {
+    set_status(StatusKind::Info, "Select a backup to upload or download.");
     return;
   }
-  const std::string backup_name = row->local_name;
+  const BackupRow row = *selected_row;
+
+  if (!row.has_local()) {
+    if (!ensure_google_access_token()) {
+      return;
+    }
+    const std::string file_id = remote_file_id_for(row.remote_name);
+    if (file_id.empty()) {
+      set_status(StatusKind::Error, "Drive copy not found; refresh and retry.");
+      return;
+    }
+    const std::string archive_path =
+        local_backup_archive_path(kBackupRoot, selected->id, row.remote_name);
+    if (!ensure_parent_directory(archive_path)) {
+      set_status(StatusKind::Error, "Could not create local backup folder.");
+      return;
+    }
+    BusyLabelScope busy("Downloading backup");
+    const std::string download_url =
+        std::string(kDriveFilesEndpoint) + "/" + form_url_encode(file_id) + "?alt=media";
+    const HttpResponse download = drive_request([&](const std::string &token) {
+      return HttpClient().download_file(download_url, archive_path, token);
+    });
+    if (!download.ok) {
+      // download_file streams to disk, so a failed transfer leaves a partial zip that the next
+      // refresh would list as a real backup; remove it.
+      std::remove(archive_path.c_str());
+      set_status(StatusKind::Error, "Drive download failed.");
+      return;
+    }
+    refresh_local_backups();
+    focus_backup_row_by_identity(row.remote_name);
+    set_status(StatusKind::Success,
+               "Downloaded " + display_backup_name(row.remote_name) + " to card.");
+    return;
+  }
+
+  const std::string backup_name = row.local_name;
 
   // A snapshot never changes after creation, so a Drive file with the same timestamp identity is
   // the same backup (even under a stale pre-rename name); skip the upload instead of stacking
   // duplicates (Drive allows same-name siblings).
-  if (row->has_remote() || remote_backup_exists(selected->id, backup_name)) {
+  if (row.has_remote() || remote_backup_exists(selected->id, backup_name)) {
     set_status(StatusKind::Info, "This backup is already on Google Drive.");
     return;
   }
@@ -1821,7 +1863,8 @@ int App::run() {
         handle_google_button();
       }
     }
-    // Select distinguishes tap from hold: a tap uploads the focused backup, a one-second hold
+    // Select distinguishes tap from hold: a tap transfers the focused backup (upload or
+    // download, whichever side is missing), a one-second hold
     // starts the tab-wide backup & upload batch. Only a release within the tap window counts as
     // a tap - once the hold hint has appeared, releasing early is a no-op, so backing out of the
     // gesture can never fire an accidental upload.
@@ -1834,7 +1877,7 @@ int App::run() {
     } else {
       if (select_hold_frames > 0 && !select_hold_consumed &&
           select_hold_frames < kSelectHoldHintFrames) {
-        handle_upload_button();
+        handle_transfer_button();
       }
       select_hold_frames = 0;
       select_hold_consumed = false;
