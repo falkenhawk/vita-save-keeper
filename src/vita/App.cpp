@@ -2,6 +2,7 @@
 
 #include "core/AppSettings.hpp"
 #include "core/BackupArchive.hpp"
+#include "core/BackupName.hpp"
 #include "core/BackupStore.hpp"
 #include "core/GoogleAuth.hpp"
 #include "core/GoogleConfig.hpp"
@@ -51,6 +52,10 @@ constexpr int kRepeatIntervalFrames = 5;
 constexpr unsigned int kRepeatableButtons = SCE_CTRL_LEFT | SCE_CTRL_RIGHT | SCE_CTRL_UP |
                                             SCE_CTRL_DOWN | SCE_CTRL_LTRIGGER |
                                             SCE_CTRL_RTRIGGER;
+// Holding Select runs the tab-wide backup & upload batch; a tap keeps its single-upload meaning.
+// The hint gauge starts a few frames in so a quick tap never flashes it.
+constexpr int kSelectHoldTriggerFrames = 60;
+constexpr int kSelectHoldHintFrames = 12;
 
 std::vector<SaveRoot> default_save_roots() {
   return {
@@ -198,6 +203,34 @@ std::string token_error_text(const TokenResponse &response) {
   return response.error.empty() ? "invalid token response" : response.error;
 }
 
+// Name of the local archive whose contents equal the given folder signature, or empty. Content is
+// compared against every archive, not just the newest: matching an older one still means the
+// bytes are preserved, and a new zip of them would only duplicate it under another timestamp.
+std::string matching_backup_name(const std::vector<ArchiveEntryInfo> &entries,
+                                 const std::string &save_id,
+                                 const std::vector<std::string> &backup_names) {
+  for (const std::string &existing : backup_names) {
+    if (entries_match_backup_archive(entries,
+                                     local_backup_archive_path(kBackupRoot, save_id, existing))) {
+      return existing;
+    }
+  }
+  return {};
+}
+
+std::string archive_file_name(const std::string &archive_path) {
+  const std::size_t slash = archive_path.find_last_of('/');
+  return slash == std::string::npos ? archive_path : archive_path.substr(slash + 1);
+}
+
+std::string drive_folder_name_for(const std::string &save_id) {
+  std::string folder_name = normalize_path_component(save_id);
+  if (folder_name.empty()) {
+    folder_name = "unknown-save";
+  }
+  return folder_name;
+}
+
 } // namespace
 
 void App::set_status(StatusKind kind, std::string message) {
@@ -224,11 +257,18 @@ void App::save_settings() {
 }
 
 std::map<std::string, std::string> App::newest_remote_by_folder() const {
+  // Keyed by the bare save key (what apply_save_sort derives from each save), resolving folders
+  // that carry a game title after the key.
   std::map<std::string, std::string> newest;
-  for (const auto &entry : drive_index_) {
-    if (!entry.second.empty()) {
+  for (const SaveRecord &save : saves_) {
+    const std::string folder_name = resolved_drive_folder_name(save.id);
+    if (folder_name.empty()) {
+      continue;
+    }
+    const auto entry = drive_index_.find(folder_name);
+    if (entry != drive_index_.end() && !entry->second.empty()) {
       // Per-save lists are sorted newest first, so the first name is the latest sync point.
-      newest[entry.first] = entry.second[0].name;
+      newest[drive_folder_name_for(save.id)] = entry->second[0].name;
     }
   }
   return newest;
@@ -260,6 +300,9 @@ void App::apply_sort_and_rebuild() {
 }
 
 void App::cycle_sort_mode() {
+  // Re-sorting reorders saves_, which the cached batch plan indexes into.
+  cancel_sync_all_confirmation();
+  cancel_duplicate_backup_confirmation();
   sort_mode_ =
       static_cast<SaveSortMode>((static_cast<int>(sort_mode_) + 1) % kSaveSortModeCount);
   apply_sort_and_rebuild();
@@ -327,6 +370,8 @@ void App::move_selected_save(int delta) {
   if (selected_save_ != previous) {
     cancel_restore_confirmation();
     cancel_delete_confirmation();
+    cancel_sync_all_confirmation();
+    cancel_duplicate_backup_confirmation();
     // A different save means a different backup list; focus its "New Backup" entry. Any status
     // message described the previous save, so it goes too.
     selected_backup_ = 0;
@@ -352,6 +397,8 @@ void App::move_selected_category(int delta) {
     category_ = candidate;
     cancel_restore_confirmation();
     cancel_delete_confirmation();
+    cancel_sync_all_confirmation();
+    cancel_duplicate_backup_confirmation();
     selected_save_ = category_selection_[static_cast<std::size_t>(category_)];
     selected_backup_ = 0;
     rebuild_visible_saves();
@@ -369,6 +416,10 @@ void App::move_selected_backup(int delta) {
   if (selected_backup_ != previous) {
     cancel_restore_confirmation();
     cancel_delete_confirmation();
+    cancel_sync_all_confirmation();
+    // The "press again to force" state refers to the New Backup entry; leaving it must not arm a
+    // silent force for later.
+    cancel_duplicate_backup_confirmation();
   }
 }
 
@@ -396,6 +447,25 @@ void App::create_new_backup() {
   }
 
   const SaveRecord &save = *selected;
+  if (!duplicate_backup_confirmation_pending_) {
+    // Content identical to an existing archive would only stack a same-bytes snapshot under a new
+    // timestamp; warn first, and let a second press force it anyway (the batch never forces).
+    ui_.draw_busy("Checking current save", 0, -1);
+    bool signature_ok = false;
+    const std::vector<ArchiveEntryInfo> entries = compute_folder_entries(save.path, &signature_ok);
+    if (signature_ok && !entries.empty()) {
+      const std::string match = matching_backup_name(entries, save.id, local_backups_);
+      if (!match.empty()) {
+        duplicate_backup_confirmation_pending_ = true;
+        // The footer carries the "confirm / cancel" instruction; the status line only needs the
+        // fact, so the archive name fits without truncation.
+        set_status(StatusKind::Info, "Identical to " + display_backup_name(match));
+        return;
+      }
+    }
+  }
+  duplicate_backup_confirmation_pending_ = false;
+
   // One busy frame before the blocking ZIP work, so the screen does not look frozen.
   ui_.draw_busy("Creating backup", 0, -1);
   const BackupResult result = create_backup_archive({
@@ -408,22 +478,22 @@ void App::create_new_backup() {
     refresh_local_backups();
     // Focus the fresh snapshot so an immediate Select-to-upload needs no scrolling. Local
     // backups sort newest first, but matching by name keeps this correct regardless.
-    const std::size_t slash = result.archive_path.find_last_of('/');
-    const std::string file_name =
-        slash == std::string::npos ? result.archive_path : result.archive_path.substr(slash + 1);
+    const std::string file_name = archive_file_name(result.archive_path);
     for (std::size_t i = 0; i < local_backups_.size(); ++i) {
       if (local_backups_[i] == file_name) {
         selected_backup_ = 1 + remote_backups_.size() + i;
         break;
       }
     }
-    set_status(StatusKind::Success, "Created " + file_name);
+    set_status(StatusKind::Success, "Created " + display_backup_name(file_name));
   } else {
     set_status(StatusKind::Error, "Backup failed: " + result.error);
   }
 }
 
 void App::handle_delete_button() {
+  cancel_sync_all_confirmation();
+  cancel_duplicate_backup_confirmation();
   const SaveRecord *selected = selected_save_record();
   if (!selected) {
     set_status(StatusKind::Info, "No save selected.");
@@ -438,7 +508,7 @@ void App::handle_delete_button() {
   if (!delete_confirmation_pending_) {
     restore_confirmation_pending_ = false;
     delete_confirmation_pending_ = true;
-    set_status(StatusKind::Info, "Delete " + backup_name + "?");
+    set_status(StatusKind::Info, "Delete " + display_backup_name(backup_name) + "?");
     return;
   }
   delete_confirmation_pending_ = false;
@@ -459,10 +529,7 @@ void App::handle_delete_button() {
       set_status(StatusKind::Error, "Drive delete failed.");
       return;
     }
-    std::string folder_name = normalize_path_component(selected->id);
-    if (folder_name.empty()) {
-      folder_name = "unknown-save";
-    }
+    const std::string folder_name = resolved_drive_folder_name(selected->id);
     const auto indexed = drive_index_.find(folder_name);
     if (indexed != drive_index_.end()) {
       std::vector<RemoteBackup> &list = indexed->second;
@@ -481,24 +548,29 @@ void App::handle_delete_button() {
     if (selected_backup_ > backup_count()) {
       selected_backup_ = backup_count();
     }
-    set_status(StatusKind::Success, "Deleted [GD] " + backup_name + ".");
+    set_status(StatusKind::Success, "Deleted [GD] " + display_backup_name(backup_name) + ".");
     return;
   }
 
   const SaveRecord &save = *selected;
   const std::string archive_path = local_backup_archive_path(kBackupRoot, save.id, backup_name);
   if (std::remove(archive_path.c_str()) != 0) {
-    set_status(StatusKind::Error, "Could not delete " + backup_name + ".");
+    set_status(StatusKind::Error,
+               "Could not delete " + display_backup_name(backup_name) + ".");
     return;
   }
   refresh_local_backups();
   if (selected_backup_ > backup_count()) {
     selected_backup_ = backup_count();
   }
-  set_status(StatusKind::Success, "Deleted " + backup_name + ".");
+  set_status(StatusKind::Success, "Deleted " + display_backup_name(backup_name) + ".");
 }
 
 void App::handle_action_button() {
+  if (sync_all_confirmation_pending_) {
+    run_sync_all();
+    return;
+  }
   const SaveRecord *selected = selected_save_record();
   if (!selected) {
     set_status(StatusKind::Info, "No save selected.");
@@ -522,7 +594,7 @@ void App::handle_restore() {
   if (!restore_confirmation_pending_) {
     delete_confirmation_pending_ = false;
     restore_confirmation_pending_ = true;
-    set_status(StatusKind::Info, "Restore " + backup_name + "?");
+    set_status(StatusKind::Info, "Restore " + display_backup_name(backup_name) + "?");
     return;
   }
 
@@ -538,14 +610,8 @@ void App::handle_restore() {
   const std::vector<ArchiveEntryInfo> current_entries =
       compute_folder_entries(save.path, &signature_ok);
   if (signature_ok && !current_entries.empty()) {
-    bool already_backed_up = false;
-    for (const std::string &existing : local_backups_) {
-      if (entries_match_backup_archive(
-              current_entries, local_backup_archive_path(kBackupRoot, save.id, existing))) {
-        already_backed_up = true;
-        break;
-      }
-    }
+    const bool already_backed_up =
+        !matching_backup_name(current_entries, save.id, local_backups_).empty();
     if (!already_backed_up) {
       ui_.draw_busy("Backing up current save", 0, -1);
       BackupRequest auto_request;
@@ -607,9 +673,9 @@ void App::handle_restore() {
   });
   restore_confirmation_pending_ = false;
   if (result.ok) {
-    set_status(StatusKind::Success, remote_restore
-                                        ? "Downloaded and restored [GD] " + backup_name
-                                        : "Restored " + backup_name);
+    set_status(StatusKind::Success,
+               remote_restore ? "Downloaded and restored [GD] " + display_backup_name(backup_name)
+                              : "Restored " + display_backup_name(backup_name));
   } else {
     set_status(StatusKind::Error, "Restore failed: " + result.error);
   }
@@ -650,6 +716,9 @@ bool App::load_google_credentials() {
 }
 
 void App::handle_google_button() {
+  // A refresh rewrites the Drive index the cached batch plan was computed from.
+  cancel_sync_all_confirmation();
+  cancel_duplicate_backup_confirmation();
   if (google_auth_pending_) {
     // Skip the remaining wait and check with Google right away.
     auth_poll_delay_frames_ = 0;
@@ -868,8 +937,8 @@ HttpResponse App::drive_request(const std::function<HttpResponse(const std::stri
   return response;
 }
 
-std::string App::find_or_create_drive_folder(const std::string &folder_name,
-                                             const std::string &parent_id) {
+std::string App::find_drive_folder(const std::string &folder_name,
+                                   const std::string &parent_id) {
   const std::string list_url = std::string(kDriveFilesEndpoint) + "?" +
                                build_drive_find_folder_query(folder_name, parent_id);
   const HttpResponse list_response = drive_request([&](const std::string &token) {
@@ -880,6 +949,15 @@ std::string App::find_or_create_drive_folder(const std::string &folder_name,
     if (files.ok && !files.files.empty()) {
       return files.files[0].id;
     }
+  }
+  return {};
+}
+
+std::string App::find_or_create_drive_folder(const std::string &folder_name,
+                                             const std::string &parent_id) {
+  const std::string existing = find_drive_folder(folder_name, parent_id);
+  if (!existing.empty()) {
+    return existing;
   }
 
   const std::string create_url = std::string(kDriveFilesEndpoint) + "?fields=id%2Cname";
@@ -1025,11 +1103,9 @@ void App::refresh_remote_backups_view() {
   remote_backups_.clear();
   const SaveRecord *save = selected_save_record();
   if (save && google_connected_) {
-    std::string folder_name = normalize_path_component(save->id);
-    if (folder_name.empty()) {
-      folder_name = "unknown-save";
-    }
-    const auto found = drive_index_.find(folder_name);
+    const std::string folder_name = resolved_drive_folder_name(save->id);
+    const auto found =
+        folder_name.empty() ? drive_index_.end() : drive_index_.find(folder_name);
     if (found != drive_index_.end()) {
       remote_backups_ = found->second;
     }
@@ -1070,7 +1146,43 @@ std::string App::selected_backup_name() const {
   return local_backups_[local_index % local_backups_.size()];
 }
 
+// Actual Drive folder holding this save's backups: either the bare key created by older versions
+// or a "<key> <title>" folder; empty when Drive has none yet.
+std::string App::resolved_drive_folder_name(const std::string &save_id) const {
+  const std::string save_key = drive_folder_name_for(save_id);
+  for (const auto &entry : drive_index_) {
+    if (drive_folder_matches_save(entry.first, save_key)) {
+      return entry.first;
+    }
+  }
+  for (const auto &entry : drive_folder_ids_) {
+    if (drive_folder_matches_save(entry.first, save_key)) {
+      return entry.first;
+    }
+  }
+  return {};
+}
+
+bool App::remote_backup_exists(const std::string &save_id, const std::string &backup_name) const {
+  const std::string folder_name = resolved_drive_folder_name(save_id);
+  if (folder_name.empty()) {
+    return false;
+  }
+  const auto indexed = drive_index_.find(folder_name);
+  if (indexed == drive_index_.end()) {
+    return false;
+  }
+  for (const RemoteBackup &remote : indexed->second) {
+    if (remote.name == backup_name) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void App::handle_upload_button() {
+  cancel_sync_all_confirmation();
+  cancel_duplicate_backup_confirmation();
   const SaveRecord *selected = selected_save_record();
   if (!selected) {
     set_status(StatusKind::Info, "No save selected.");
@@ -1081,51 +1193,95 @@ void App::handle_upload_button() {
     return;
   }
   const std::string backup_name = selected_backup_name();
-  std::string folder_name = normalize_path_component(selected->id);
-  if (folder_name.empty()) {
-    folder_name = "unknown-save";
-  }
 
   // A snapshot never changes after creation, so a same-named file already in Drive is the same
   // backup; skip the upload instead of stacking duplicates (Drive allows same-name siblings).
-  const auto existing = drive_index_.find(folder_name);
-  if (existing != drive_index_.end()) {
-    for (const RemoteBackup &remote : existing->second) {
-      if (remote.name == backup_name) {
-        set_status(StatusKind::Info, "This backup is already on Google Drive.");
-        return;
-      }
-    }
+  if (remote_backup_exists(selected->id, backup_name)) {
+    set_status(StatusKind::Info, "This backup is already on Google Drive.");
+    return;
   }
 
   if (!ensure_google_access_token()) {
     return;
   }
 
-  const std::string archive_path =
-      local_backup_archive_path(kBackupRoot, selected->id, backup_name);
-
   BusyLabelScope busy("Uploading backup");
-  // Folder ids from the last index sync avoid two lookup requests per upload; the find-or-create
-  // path still covers a first upload before any sync found the folders.
+  if (!upload_local_backup(*selected, backup_name)) {
+    return;
+  }
+  refresh_remote_backups_view();
+  // The insert shifted every menu index below the new entry; focus the uploaded copy so the
+  // selection stays on the file this action was about.
+  for (std::size_t i = 0; i < remote_backups_.size(); ++i) {
+    if (remote_backups_[i].name == backup_name) {
+      selected_backup_ = 1 + i;
+      break;
+    }
+  }
+  set_status(StatusKind::Success, "Uploaded [GD] " + display_backup_name(backup_name));
+}
+
+// Sends one local archive to its save folder on Drive and slots it into the index. Error status
+// is set here so both the single upload and the batch report the same failures.
+bool App::upload_local_backup(const SaveRecord &save, const std::string &backup_name) {
+  const std::string save_key = drive_folder_name_for(save.id);
+  const std::string desired_name = drive_save_folder_name(save_key, save.display_name);
+
   if (drive_root_folder_id_.empty()) {
     drive_root_folder_id_ = find_or_create_drive_folder(kGoogleDriveRootFolderName, "root");
     if (drive_root_folder_id_.empty()) {
-      return;
+      return false;
     }
   }
+
+  // Folder ids from the last index sync avoid lookup requests per upload. Without an index hit,
+  // a bare-key folder from an older version is searched for before creating a titled one, so the
+  // same save never splits across two Drive folders.
+  std::string folder_name = resolved_drive_folder_name(save.id);
   std::string folder_id;
-  const auto cached_folder = drive_folder_ids_.find(folder_name);
-  if (cached_folder != drive_folder_ids_.end()) {
-    folder_id = cached_folder->second;
-  } else {
-    folder_id = find_or_create_drive_folder(folder_name, drive_root_folder_id_);
-    if (folder_id.empty()) {
-      return;
+  if (!folder_name.empty()) {
+    const auto cached_folder = drive_folder_ids_.find(folder_name);
+    if (cached_folder != drive_folder_ids_.end()) {
+      folder_id = cached_folder->second;
+    }
+  }
+  if (folder_id.empty()) {
+    folder_id = find_drive_folder(save_key, drive_root_folder_id_);
+    if (!folder_id.empty()) {
+      folder_name = save_key;
+    } else {
+      folder_id = find_or_create_drive_folder(desired_name, drive_root_folder_id_);
+      if (folder_id.empty()) {
+        return false;
+      }
+      folder_name = desired_name;
     }
     drive_folder_ids_[folder_name] = folder_id;
   }
 
+  // Opportunistic upgrade: a bare-key folder gains the game title once it is known, so old
+  // uploads become browsable on Drive too. A failed rename is harmless - the bare name keeps
+  // matching by key prefix and the next upload retries.
+  if (folder_name == save_key && desired_name != save_key) {
+    const std::string rename_url = std::string(kDriveFilesEndpoint) + "/" +
+                                   form_url_encode(folder_id) + "?fields=id%2Cname";
+    const HttpResponse renamed = drive_request([&](const std::string &token) {
+      return HttpClient().patch_json(rename_url, build_drive_rename_metadata_json(desired_name),
+                                     token);
+    });
+    if (renamed.ok) {
+      drive_folder_ids_.erase(folder_name);
+      drive_folder_ids_[desired_name] = folder_id;
+      const auto indexed = drive_index_.find(folder_name);
+      if (indexed != drive_index_.end()) {
+        drive_index_[desired_name] = std::move(indexed->second);
+        drive_index_.erase(indexed);
+      }
+      folder_name = desired_name;
+    }
+  }
+
+  const std::string archive_path = local_backup_archive_path(kBackupRoot, save.id, backup_name);
   const HttpResponse upload_response = drive_request([&](const std::string &token) {
     return HttpClient().post_multipart_file(
         kDriveUploadEndpoint, build_drive_upload_metadata_json(backup_name, folder_id),
@@ -1133,7 +1289,7 @@ void App::handle_upload_button() {
   });
   if (!upload_response.ok) {
     set_status(StatusKind::Error, "Drive upload failed.");
-    return;
+    return false;
   }
 
   // The upload response carries the new file's id; slotting it into the index directly keeps the
@@ -1147,16 +1303,174 @@ void App::handle_upload_button() {
   } else {
     sync_drive_index();
   }
-  refresh_remote_backups_view();
-  // The insert shifted every menu index below the new entry; focus the uploaded copy so the
-  // selection stays on the file this action was about.
-  for (std::size_t i = 0; i < remote_backups_.size(); ++i) {
-    if (remote_backups_[i].name == backup_name) {
-      selected_backup_ = 1 + i;
-      break;
+  return true;
+}
+
+void App::cancel_sync_all_confirmation() {
+  if (sync_all_confirmation_pending_) {
+    sync_all_confirmation_pending_ = false;
+    set_status(StatusKind::Info, "Backup & upload cancelled.");
+  }
+}
+
+bool App::poll_batch_cancel() {
+  if (!batch_running_) {
+    return false;
+  }
+  if (!batch_cancel_requested_) {
+    SceCtrlData pad{};
+    sceCtrlPeekBufferPositive(0, &pad, 1);
+    const unsigned int cancel_mask = enter_is_cross_ ? SCE_CTRL_CIRCLE : SCE_CTRL_CROSS;
+    if ((pad.buttons & cancel_mask) != 0) {
+      batch_cancel_requested_ = true;
     }
   }
-  set_status(StatusKind::Success, "Uploaded [GD] " + backup_name);
+  return batch_cancel_requested_;
+}
+
+void App::cancel_duplicate_backup_confirmation() {
+  if (duplicate_backup_confirmation_pending_) {
+    duplicate_backup_confirmation_pending_ = false;
+    set_status(StatusKind::Info, "Backup cancelled.");
+  }
+}
+
+void App::begin_sync_all() {
+  restore_confirmation_pending_ = false;
+  delete_confirmation_pending_ = false;
+  duplicate_backup_confirmation_pending_ = false;
+  sync_all_confirmation_pending_ = false;
+
+  if (visible_saves_.empty()) {
+    set_status(StatusKind::Info, "No saves in this tab.");
+    return;
+  }
+  // A sign-in without internet cannot upload; the confirmation says so and the run only backs up.
+  const bool drive_online = google_connected_ && HttpClient::network_reachable();
+  // Accurate duplicate skipping needs the Drive index; a stored sign-in whose startup sync
+  // failed gets one more chance here.
+  if (drive_online && !drive_synced_) {
+    sync_drive_index();
+  }
+
+  // Confirmation is instant: per-game work (signature check, zip, upload) is decided and done
+  // during the run itself, so nothing is read twice and there is no scan phase to wait through.
+  sync_all_confirmation_pending_ = true;
+  set_status(StatusKind::Info,
+             sync_all_confirm_message(visible_saves_.size(), save_category_label(category_),
+                                      drive_online));
+}
+
+void App::run_sync_all() {
+  sync_all_confirmation_pending_ = false;
+  const std::vector<std::size_t> targets = visible_saves_;
+  const std::size_t total = targets.size();
+  SyncRunCounts run;
+  bool auth_lost = false;
+  const bool drive_online = google_connected_ && HttpClient::network_reachable();
+  batch_running_ = true;
+  batch_cancel_requested_ = false;
+
+  for (std::size_t i = 0; i < total; ++i) {
+    // Cancel lands between games (polled here) or mid-upload (polled by the HTTP cancel check);
+    // a zip in flight always completes so no partial archive is left behind.
+    if (poll_batch_cancel()) {
+      run.games_left = total - i;
+      break;
+    }
+
+    const SaveRecord &save = saves_[targets[i]];
+    const std::string progress = " (" + std::to_string(i + 1) + "/" + std::to_string(total) + ")";
+    ui_.set_batch_progress("Checking " + save.display_name + progress, i, total, enter_is_cross_);
+    ui_.draw_busy("", 0, -1);
+
+    const std::vector<std::string> backups = scan_local_backup_names(kBackupRoot, save.id);
+    SyncItemInput input;
+    input.drive_connected = drive_online;
+    const std::vector<ArchiveEntryInfo> entries =
+        compute_folder_entries(save.path, &input.entries_ok);
+    input.folder_empty = entries.empty();
+    if (input.entries_ok && !entries.empty()) {
+      input.matches_existing = !matching_backup_name(entries, save.id, backups).empty();
+    }
+    if (!backups.empty()) {
+      input.newest_local = backups[0];
+      input.newest_on_drive = remote_backup_exists(save.id, backups[0]);
+    }
+    const SyncItemPlan plan = plan_sync_item(input);
+
+    if (plan.unreadable) {
+      ++run.failed;
+      continue;
+    }
+    if (!plan.create_backup && !plan.will_upload) {
+      ++run.up_to_date;
+      continue;
+    }
+
+    std::string upload_name = plan.upload_existing;
+    if (plan.create_backup) {
+      ui_.set_batch_progress("Backing up " + save.display_name + progress, i, total,
+                             enter_is_cross_);
+      ui_.draw_busy("", 0, -1);
+      const BackupResult result = create_backup_archive({
+          save.path,
+          kBackupRoot,
+          save.id,
+          current_backup_timestamp(),
+      });
+      if (!result.ok) {
+        // The planned upload was this archive; there is nothing to send for this game.
+        ++run.failed;
+        continue;
+      }
+      ++run.backed_up;
+      upload_name = archive_file_name(result.archive_path);
+    }
+
+    if (!plan.will_upload || upload_name.empty()) {
+      continue;
+    }
+    if (auth_lost) {
+      ++run.failed;
+      continue;
+    }
+    if (!ensure_google_access_token()) {
+      // A dead session would fail every remaining upload the same way; disable them instead of
+      // sitting through one error per game.
+      auth_lost = true;
+      ++run.failed;
+      continue;
+    }
+    ui_.set_batch_progress("Uploading " + save.display_name + progress, i, total,
+                           enter_is_cross_);
+    const std::string upload_label = "Uploading " + save.display_name + progress;
+    BusyLabelScope busy(upload_label.c_str());
+    if (upload_local_backup(save, upload_name)) {
+      ++run.uploaded;
+    } else if (batch_cancel_requested_) {
+      // The failure was our own abort, not a network error; the game stays "left", its backup
+      // (already counted) is safe locally and the next run will upload it.
+      run.games_left = total - i;
+      break;
+    } else {
+      ++run.failed;
+    }
+  }
+  batch_running_ = false;
+  batch_cancel_requested_ = false;
+  ui_.clear_batch_progress();
+
+  refresh_local_backups();
+  refresh_remote_backups_view();
+  if (run.uploaded > 0 && sort_mode_ == SaveSortMode::LastSynced) {
+    apply_sort_and_rebuild();
+  }
+  std::string summary = sync_run_summary(run);
+  if (auth_lost) {
+    summary += " Google session expired.";
+  }
+  set_status(run.failed > 0 ? StatusKind::Error : StatusKind::Success, std::move(summary));
 }
 
 int App::run() {
@@ -1190,9 +1504,11 @@ int App::run() {
   if (!HttpClient::network_startup(&network_error)) {
     set_status(StatusKind::Error, network_error);
   }
+  network_connected_ = HttpClient::network_reachable();
   HttpClient::set_progress_hook([this](const std::string &label, long long done, long long total) {
     ui_.draw_busy(label, done, total);
   });
+  HttpClient::set_cancel_check([this] { return poll_batch_cancel(); });
 
   // Follow the console's enter-button setting: western consoles confirm with Cross, Japanese
   // consoles with Circle. The primary Backup action sits on the confirm button and Cancel on the
@@ -1225,7 +1541,16 @@ int App::run() {
   int repeat_frames = 0;
   int rstick_direction_prev = 0;
   int rstick_frames = 0;
+  int select_hold_frames = 0;
+  bool select_hold_consumed = false;
+  int network_poll_delay_frames = 0;
   while (running) {
+    if (network_poll_delay_frames <= 0) {
+      network_connected_ = HttpClient::network_reachable();
+      network_poll_delay_frames = kFramesPerSecond;
+    }
+    --network_poll_delay_frames;
+
     SceCtrlData pad{};
     sceCtrlPeekBufferPositive(0, &pad, 1);
     const unsigned int buttons = buttons_with_left_analog(pad);
@@ -1277,13 +1602,30 @@ int App::run() {
     if ((pressed & cancel_button) != 0) {
       cancel_restore_confirmation();
       cancel_delete_confirmation();
+      cancel_sync_all_confirmation();
+      cancel_duplicate_backup_confirmation();
       cancel_google_auth();
     }
     if ((pressed & SCE_CTRL_TRIANGLE) != 0) {
       handle_google_button();
     }
-    if ((pressed & SCE_CTRL_SELECT) != 0) {
-      handle_upload_button();
+    // Select distinguishes tap from hold: a tap uploads the focused backup, a one-second hold
+    // starts the tab-wide backup & upload batch. Only a release within the tap window counts as
+    // a tap - once the hold hint has appeared, releasing early is a no-op, so backing out of the
+    // gesture can never fire an accidental upload.
+    if ((buttons & SCE_CTRL_SELECT) != 0) {
+      ++select_hold_frames;
+      if (!select_hold_consumed && select_hold_frames >= kSelectHoldTriggerFrames) {
+        select_hold_consumed = true;
+        begin_sync_all();
+      }
+    } else {
+      if (select_hold_frames > 0 && !select_hold_consumed &&
+          select_hold_frames < kSelectHoldHintFrames) {
+        handle_upload_button();
+      }
+      select_hold_frames = 0;
+      select_hold_consumed = false;
     }
     if ((pressed & SCE_CTRL_START) != 0) {
       handle_delete_button();
@@ -1306,9 +1648,12 @@ int App::run() {
     ui_state.selected_backup = selected_backup_;
     ui_state.restore_confirmation_pending = restore_confirmation_pending_;
     ui_state.delete_confirmation_pending = delete_confirmation_pending_;
+    ui_state.sync_all_confirmation_pending = sync_all_confirmation_pending_;
+    ui_state.duplicate_backup_confirmation_pending = duplicate_backup_confirmation_pending_;
     ui_state.enter_is_cross = enter_is_cross_;
     ui_state.google_connected = google_connected_;
     ui_state.drive_synced = drive_synced_;
+    ui_state.network_connected = network_connected_;
     ui_state.google_auth_pending = google_auth_pending_;
     ui_state.google_verification_url = device_code_.verification_url;
     ui_state.google_user_code = device_code_.user_code;
@@ -1318,6 +1663,16 @@ int App::run() {
             : 0;
     ui_state.status_message = status_message_;
     ui_state.status_kind = status_kind_;
+    // While Select is held past the tap window, the status line explains what is about to happen
+    // and a gauge fills toward the trigger; this overlays the frame only, without touching the
+    // stored status, so an early release restores whatever was there.
+    if (!select_hold_consumed && select_hold_frames >= kSelectHoldHintFrames) {
+      ui_state.select_hold_fraction =
+          std::min(1.0f, static_cast<float>(select_hold_frames) /
+                             static_cast<float>(kSelectHoldTriggerFrames));
+      ui_state.status_message = sync_all_hold_message(save_category_label(category_));
+      ui_state.status_kind = StatusKind::Info;
+    }
     ui_.draw(ui_state);
     previous_buttons = buttons;
 

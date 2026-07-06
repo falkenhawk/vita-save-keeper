@@ -37,9 +37,16 @@ struct UiState {
   std::size_t selected_backup{};
   bool restore_confirmation_pending{};
   bool delete_confirmation_pending{};
+  bool sync_all_confirmation_pending{};
+  bool duplicate_backup_confirmation_pending{};
+  // 0 when idle; fraction of the Select-hold gesture completed, drawn as a gauge under the
+  // status line while the hold hint is showing.
+  float select_hold_fraction{};
   bool google_connected{};
   bool drive_synced{};
   bool google_auth_pending{};
+  // Live internet state; signed-in without a connection renders as "Google Drive offline".
+  bool network_connected{true};
   // Which physical button the system treats as "enter"; western consoles use Cross, Japanese
   // consoles use Circle. Primary/cancel symbols in the footer follow it.
   bool enter_is_cross{true};
@@ -67,6 +74,12 @@ public:
   // Full-screen modal frame for blocking work; safe to call from transfer callbacks because all
   // network requests run on the UI thread. total <= 0 draws an indeterminate sweep.
   void draw_busy(const std::string &label, long long done, long long total);
+  // Batch context for draw_busy: while set, the modal's title and bar track overall games
+  // progress, any transfer progress passed to draw_busy shows as a percent line instead of a
+  // second bar, and a "hold to cancel" hint appears.
+  void set_batch_progress(std::string label, std::size_t done_games, std::size_t total_games,
+                          bool cancel_is_circle);
+  void clear_batch_progress();
 
 private:
   void draw_header(const UiState &state);
@@ -81,6 +94,11 @@ private:
   vita2d_texture *load_icon_texture(const std::string &path);
 
   FontSet fonts_;
+  std::string batch_label_;
+  std::size_t batch_done_{};
+  std::size_t batch_total_{};
+  bool batch_cancel_is_circle_{true};
+  bool batch_active_{};
   // Snapshot of the last frame's state so busy frames can repaint the UI, dimmed, behind the
   // progress modal. The embedded pointers reference App members that outlive any operation.
   UiState last_state_;

@@ -5,6 +5,7 @@
 #include "core/SaveCategory.hpp"
 #include "core/SaveRecord.hpp"
 #include "core/SaveScanner.hpp"
+#include "core/SyncPlan.hpp"
 #include "vita/net/HttpClient.hpp"
 #include "vita/ui/Ui.hpp"
 
@@ -57,8 +58,10 @@ private:
   bool refresh_google_access_token();
   bool ensure_google_access_token();
   HttpResponse drive_request(const std::function<HttpResponse(const std::string &)> &send);
+  std::string find_drive_folder(const std::string &folder_name, const std::string &parent_id);
   std::string find_or_create_drive_folder(const std::string &folder_name,
                                           const std::string &parent_id);
+  std::string resolved_drive_folder_name(const std::string &save_id) const;
   bool sync_drive_index();
   void remove_drive_folder_if_empty(const std::string &folder_name);
   void refresh_remote_backups_view();
@@ -67,6 +70,13 @@ private:
   bool selected_backup_is_remote() const;
   std::string selected_backup_name() const;
   void handle_upload_button();
+  bool upload_local_backup(const SaveRecord &save, const std::string &backup_name);
+  bool remote_backup_exists(const std::string &save_id, const std::string &backup_name) const;
+  void begin_sync_all();
+  void run_sync_all();
+  void cancel_sync_all_confirmation();
+  void cancel_duplicate_backup_confirmation();
+  bool poll_batch_cancel();
   void set_status(StatusKind kind, std::string message);
   void clear_status();
 
@@ -94,7 +104,17 @@ private:
   std::size_t selected_backup_{};
   bool restore_confirmation_pending_{};
   bool delete_confirmation_pending_{};
+  // Second-press force for a manual backup whose content already exists in a local archive.
+  bool duplicate_backup_confirmation_pending_{};
+  bool sync_all_confirmation_pending_{};
+  // Set while run_sync_all is executing; the HTTP cancel check polls the pad only then, so a
+  // held cancel button can abort an in-flight upload without affecting single-file transfers.
+  bool batch_running_{};
+  bool batch_cancel_requested_{};
   bool google_connected_{};
+  // Live internet state, polled once per second; a stored sign-in without a connection shows as
+  // "offline" and turns the batch into a backups-only run.
+  bool network_connected_{};
   // Set when sign-in completes so the first Drive listing runs one frame later, after the
   // "connected" state has been drawn, instead of freezing the sign-in screen.
   bool pending_remote_refresh_{};

@@ -384,11 +384,16 @@ void Ui::draw_header(const UiState &state) {
 
   draw_text(fonts_, 18, 34, kColorText, kTextSizeTitle, "Save Keeper");
 
+  // "connected" means a working sign-in; without internet the account is only configured, so the
+  // header says offline instead of pretending Drive is reachable.
+  const bool offline = state.google_connected && !state.network_connected;
   const char *drive_status = state.google_auth_pending ? "Connecting to Google..."
                              : !state.google_connected ? "Google Drive not connected"
+                             : offline                 ? "Google Drive offline"
                              : state.drive_synced      ? "Google Drive synced"
                                                        : "Google Drive connected";
-  const unsigned int dot_color = state.google_connected      ? kColorSuccess
+  const unsigned int dot_color = offline                     ? kColorPendingDot
+                                 : state.google_connected    ? kColorSuccess
                                  : state.google_auth_pending ? kColorPendingDot
                                                              : kColorIdleDot;
   const int status_x = 960 - 18 - measure_text(kTextSizeSmall, drive_status);
@@ -618,7 +623,8 @@ void Ui::draw_status_line(const UiState &state) {
   }
   const std::string status = fit_text(kTextSizeSmall, state.status_message, 380);
   unsigned int color = kColorMuted;
-  if (state.restore_confirmation_pending || state.delete_confirmation_pending) {
+  if (state.restore_confirmation_pending || state.delete_confirmation_pending ||
+      state.sync_all_confirmation_pending || state.duplicate_backup_confirmation_pending) {
     color = kColorAccent;
   } else if (!state.status_message.empty()) {
     switch (state.status_kind) {
@@ -635,6 +641,14 @@ void Ui::draw_status_line(const UiState &state) {
   }
   // Baseline chosen so the text centers on the R-stick pictogram (cy = 470) next to it.
   draw_text(fonts_, 528, 476, color, kTextSizeSmall, status.c_str());
+
+  // Select-hold gauge: fills toward the batch trigger right under the hint text, so the gesture
+  // announces itself before anything runs.
+  if (state.select_hold_fraction > 0.0f) {
+    const float fraction = std::min(1.0f, state.select_hold_fraction);
+    vita2d_draw_rectangle(528, 482, 380, 3, RGBA8(255, 255, 255, 24));
+    vita2d_draw_rectangle(528, 482, static_cast<int>(380.0f * fraction), 3, kColorAccent);
+  }
 }
 
 void Ui::draw_footer(const UiState &state) {
@@ -660,6 +674,16 @@ void Ui::draw_footer(const UiState &state) {
     draw_hints_right_aligned(fonts_, hints, 2);
     return;
   }
+  if (state.sync_all_confirmation_pending) {
+    const HintSpec hints[] = {{cancel, "Cancel"}, {confirm, "Confirm Backup & Upload All"}};
+    draw_hints_right_aligned(fonts_, hints, 2);
+    return;
+  }
+  if (state.duplicate_backup_confirmation_pending) {
+    const HintSpec hints[] = {{cancel, "Cancel"}, {confirm, "Backup anyway"}};
+    draw_hints_right_aligned(fonts_, hints, 2);
+    return;
+  }
 
   // One context action: create a snapshot on the "New Backup" entry, restore on a backup entry.
   const std::string sort_label =
@@ -668,10 +692,28 @@ void Ui::draw_footer(const UiState &state) {
       {ButtonSymbol::Square, sort_label.c_str()},
       {ButtonSymbol::Triangle, state.google_connected ? "Refresh" : "Google"},
       {ButtonSymbol::Start, "Delete"},
-      {ButtonSymbol::Select, "Upload"},
+      // On the New Backup entry a tap-upload has nothing to act on, so the slot advertises the
+      // hold gesture instead; on backup entries it stays the plain upload hint. Title caps on
+      // purpose: the label names the feature rather than forming a sentence.
+      {ButtonSymbol::Select,
+       state.selected_backup == 0 ? "(hold) Backup & Upload All" : "Upload"},
       {confirm, state.selected_backup == 0 ? "Backup" : "Restore"},
   };
   draw_hints_right_aligned(fonts_, hints, 5);
+}
+
+void Ui::set_batch_progress(std::string label, std::size_t done_games, std::size_t total_games,
+                            bool cancel_is_circle) {
+  batch_label_ = std::move(label);
+  batch_done_ = done_games;
+  batch_total_ = total_games;
+  batch_cancel_is_circle_ = cancel_is_circle;
+  batch_active_ = batch_total_ > 0;
+}
+
+void Ui::clear_batch_progress() {
+  batch_active_ = false;
+  batch_label_.clear();
 }
 
 void Ui::draw_busy(const std::string &label, long long done, long long total) {
@@ -696,8 +738,13 @@ void Ui::draw_busy(const std::string &label, long long done, long long total) {
   vita2d_draw_rectangle(kBoxX, kBoxY, kBoxW, kBoxH, kColorPanelAlt);
   vita2d_draw_rectangle(kBoxX, kBoxY, kBoxW, 4, kColorAccent);
 
+  // During a batch the title and the bar always track overall games progress, so the display
+  // never flips between per-file and per-run scales; transfer progress becomes the percent text.
+  const std::string &title = batch_active_ ? batch_label_ : label;
+  // Labels carry game titles of arbitrary length; keep them inside the box.
+  const std::string fitted_label = fit_text(kTextSizeNormal, title, kBoxW - 48);
   draw_text(fonts_, kBoxX + 24, kBoxY + 42, kColorText, kTextSizeNormal,
-            label.c_str());
+            fitted_label.c_str());
 
   const int bar_x = kBoxX + 24;
   const int bar_y = kBoxY + 62;
@@ -705,13 +752,12 @@ void Ui::draw_busy(const std::string &label, long long done, long long total) {
   const int bar_h = 12;
   vita2d_draw_rectangle(bar_x, bar_y, bar_w, bar_h, RGBA8(255, 255, 255, 24));
 
-  if (total > 0) {
-    float fraction = static_cast<float>(done) / static_cast<float>(total);
+  const long long bar_done = batch_active_ ? static_cast<long long>(batch_done_) : done;
+  const long long bar_total = batch_active_ ? static_cast<long long>(batch_total_) : total;
+  if (bar_total > 0) {
+    float fraction = static_cast<float>(bar_done) / static_cast<float>(bar_total);
     fraction = std::max(0.0f, std::min(1.0f, fraction));
     vita2d_draw_rectangle(bar_x, bar_y, static_cast<int>(bar_w * fraction), bar_h, kColorAccent);
-    char percent[16];
-    std::snprintf(percent, sizeof(percent), "%d%%", static_cast<int>(fraction * 100.0f));
-    draw_text(fonts_, bar_x, kBoxY + 98, kColorMuted, kTextSizeSmall, percent);
   } else {
     // Unknown size: sweep a segment across the bar so the app visibly keeps working.
     const int segment = bar_w / 4;
@@ -719,6 +765,31 @@ void Ui::draw_busy(const std::string &label, long long done, long long total) {
     const int offset = static_cast<int>((frame_counter_ * 8U) % static_cast<unsigned int>(travel * 2));
     const int start = offset <= travel ? offset : travel * 2 - offset;
     vita2d_draw_rectangle(bar_x + start, bar_y, segment, bar_h, kColorAccent);
+  }
+
+  // Percent line: overall fraction normally, the in-flight transfer during a batch.
+  if (total > 0) {
+    char percent[16];
+    float fraction = static_cast<float>(done) / static_cast<float>(total);
+    fraction = std::max(0.0f, std::min(1.0f, fraction));
+    std::snprintf(percent, sizeof(percent), "%d%%", static_cast<int>(fraction * 100.0f));
+    draw_text(fonts_, bar_x, kBoxY + 98, kColorMuted, kTextSizeSmall, percent);
+  }
+
+  if (batch_active_) {
+    // "hold (cancel) to cancel" hint, right-aligned on the percent line.
+    const char *hold_text = "hold";
+    const char *cancel_text = "to cancel";
+    const int hold_w = text_width(fonts_, kTextSizeSmall, hold_text);
+    const int cancel_w = text_width(fonts_, kTextSizeSmall, cancel_text);
+    int x = kBoxX + kBoxW - 24 - (hold_w + 6 + 22 + cancel_w);
+    draw_text(fonts_, x, kBoxY + 98, kColorMuted, kTextSizeSmall, hold_text);
+    x += hold_w + 6;
+    draw_button_shape(x, kBoxY + 84,
+                      batch_cancel_is_circle_ ? ButtonSymbol::Circle : ButtonSymbol::Cross,
+                      kColorMuted);
+    x += 22;
+    draw_text(fonts_, x, kBoxY + 98, kColorMuted, kTextSizeSmall, cancel_text);
   }
 
   vita2d_end_drawing();
