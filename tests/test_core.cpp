@@ -894,10 +894,10 @@ void test_sync_run_summary_reports_results_and_cancellation() {
             "Backed up 2, uploaded 6, 56 up to date, 3 failed.");
   EXPECT_EQ(vsm::sync_run_summary({0, 0, 73, 0, 0}), "All 73 games up to date.");
   EXPECT_EQ(vsm::sync_run_summary({1, 2, 0, 0, 9}),
-            "Cancelled: backed up 1, uploaded 2, 9 games left.");
-  EXPECT_EQ(vsm::sync_run_summary({0, 0, 0, 0, 9}), "Cancelled: 9 games left.");
+            "Canceled: backed up 1, uploaded 2, 9 games left.");
+  EXPECT_EQ(vsm::sync_run_summary({0, 0, 0, 0, 9}), "Canceled: 9 games left.");
   EXPECT_EQ(vsm::sync_run_summary({0, 0, 3, 0, 1}),
-            "Cancelled: 3 up to date, 1 game left.");
+            "Canceled: 3 up to date, 1 game left.");
   EXPECT_EQ(vsm::sync_run_summary({0, 0, 0, 0, 0}), "Nothing to do.");
 }
 

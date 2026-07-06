@@ -70,7 +70,7 @@ struct FontSet {
 };
 
 // Outcome of the modal IME dialog; Failed means the dialog could not open at all.
-enum class TextInputResult { Accepted, Cancelled, Failed };
+enum class TextInputResult { Accepted, Canceled, Failed };
 
 class Ui {
 public:
@@ -116,6 +116,10 @@ private:
   bool has_last_state_{};
   std::size_t title_top_row_{};
   std::size_t backup_top_row_{};
+  // Marquee state for the focused backup row: which row is scrolling and how many frames it has
+  // been focused, so the scroll restarts from the left whenever the selection moves.
+  std::size_t marquee_entry_{};
+  unsigned int marquee_frame_{};
   unsigned int frame_counter_{};
   std::map<std::string, vita2d_texture *> icon_cache_;
 };

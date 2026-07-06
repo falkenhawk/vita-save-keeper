@@ -69,7 +69,7 @@ std::string sync_run_summary(const SyncRunCounts &counts) {
 
   if (counts.games_left > 0) {
     append(count_noun(counts.games_left, "game left", "games left"));
-    return "Cancelled: " + parts + ".";
+    return "Canceled: " + parts + ".";
   }
   if (parts.empty()) {
     return "Nothing to do.";

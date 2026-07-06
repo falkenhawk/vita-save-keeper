@@ -429,7 +429,7 @@ void App::move_selected_backup(int delta) {
 void App::cancel_restore_confirmation() {
   if (restore_confirmation_pending_) {
     restore_confirmation_pending_ = false;
-    set_status(StatusKind::Info, "Restore cancelled.");
+    set_status(StatusKind::Info, "Restore canceled.");
   }
 }
 
@@ -437,7 +437,7 @@ void App::cancel_delete_confirmation() {
   if (delete_confirmation_pending_ || delete_scope_prompt_pending_) {
     delete_confirmation_pending_ = false;
     delete_scope_prompt_pending_ = false;
-    set_status(StatusKind::Info, "Delete cancelled.");
+    set_status(StatusKind::Info, "Delete canceled.");
   }
 }
 
@@ -484,7 +484,14 @@ void App::create_new_backup() {
     // Focus the fresh snapshot so an immediate Select-to-upload needs no scrolling.
     const std::string file_name = archive_file_name(result.archive_path);
     focus_backup_row_by_identity(file_name);
-    set_status(StatusKind::Success, "Created " + display_backup_name(file_name));
+    // With Drive available, nudge the natural next step. The fresh snapshot is focused, so the
+    // timestamp name would only repeat what the highlighted row already shows - and without it
+    // the nudge always fits the status line untruncated.
+    if (google_connected_ && network_connected_) {
+      set_status(StatusKind::Success, "Backup created. Press Select to upload it.");
+    } else {
+      set_status(StatusKind::Success, "Created " + display_backup_name(file_name) + ".");
+    }
   } else {
     set_status(StatusKind::Error, "Backup failed: " + result.error);
   }
@@ -516,7 +523,9 @@ void App::handle_delete_button() {
     restore_confirmation_pending_ = false;
     delete_confirmation_pending_ = false;
     delete_scope_prompt_pending_ = true;
-    set_status(StatusKind::Info, "Delete " + display + "? Choose where.");
+    // Instruction first so it always survives status-line truncation; a long labeled name is what
+    // gets ellipsized, not the "Choose where to delete:" part.
+    set_status(StatusKind::Info, "Choose where to delete: " + display);
     return;
   }
 
@@ -718,8 +727,9 @@ void App::handle_restore() {
   restore_confirmation_pending_ = false;
   if (result.ok) {
     set_status(StatusKind::Success,
-               remote_restore ? "Downloaded and restored " + display_backup_name(backup_name)
-                              : "Restored " + display_backup_name(backup_name));
+               (remote_restore ? "Downloaded and restored " + display_backup_name(backup_name)
+                               : "Restored " + display_backup_name(backup_name)) +
+                   ".");
   } else {
     set_status(StatusKind::Error, "Restore failed: " + result.error);
   }
@@ -824,7 +834,7 @@ void App::cancel_google_auth() {
   }
   google_auth_pending_ = false;
   device_code_ = {};
-  set_status(StatusKind::Info, "Google sign-in cancelled.");
+  set_status(StatusKind::Info, "Google sign-in canceled.");
 }
 
 void App::update_google_auth() {
@@ -1284,7 +1294,7 @@ void App::handle_upload_button() {
   refresh_remote_backups_view();
   // The rebuild may have shifted the rows; keep the selection on the file this action was about.
   focus_backup_row_by_identity(backup_name);
-  set_status(StatusKind::Success, "Uploaded " + display_backup_name(backup_name) + " to Drive");
+  set_status(StatusKind::Success, "Uploaded " + display_backup_name(backup_name) + " to Drive.");
 }
 
 // Sends one local archive to its save folder on Drive and slots it into the index. Error status
@@ -1410,7 +1420,7 @@ bool App::rename_remote_backup(const SaveRecord &save, const std::string &remote
 }
 
 void App::begin_label_edit() {
-  // Silent clears: opening the keyboard is itself the new context, a "cancelled" status line
+  // Silent clears: opening the keyboard is itself the new context, a "canceled" status line
   // under the IME would only be noise.
   restore_confirmation_pending_ = false;
   delete_confirmation_pending_ = false;
@@ -1445,7 +1455,7 @@ void App::begin_label_edit() {
     set_status(StatusKind::Error, "Could not open the keyboard.");
     return;
   }
-  if (input == TextInputResult::Cancelled) {
+  if (input == TextInputResult::Canceled) {
     return;
   }
 
@@ -1487,13 +1497,13 @@ void App::begin_label_edit() {
     return;
   }
   set_status(StatusKind::Success,
-             label.empty() ? "Label removed." : "Labeled " + display_backup_name(new_name));
+             label.empty() ? "Label removed." : "Labeled " + display_backup_name(new_name) + ".");
 }
 
 void App::cancel_sync_all_confirmation() {
   if (sync_all_confirmation_pending_) {
     sync_all_confirmation_pending_ = false;
-    set_status(StatusKind::Info, "Backup & upload cancelled.");
+    set_status(StatusKind::Info, "Backup & upload canceled.");
   }
 }
 
@@ -1515,7 +1525,7 @@ bool App::poll_batch_cancel() {
 void App::cancel_duplicate_backup_confirmation() {
   if (duplicate_backup_confirmation_pending_) {
     duplicate_backup_confirmation_pending_ = false;
-    set_status(StatusKind::Info, "Backup cancelled.");
+    set_status(StatusKind::Info, "Backup canceled.");
   }
 }
 

@@ -40,7 +40,7 @@ struct SyncRunCounts {
   std::size_t uploaded{};
   std::size_t up_to_date{};
   std::size_t failed{};
-  // Games not reached because the user cancelled mid-run; zero for a completed run.
+  // Games not reached because the user canceled mid-run; zero for a completed run.
   std::size_t games_left{};
 };
 

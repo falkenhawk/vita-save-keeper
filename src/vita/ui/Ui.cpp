@@ -235,42 +235,61 @@ void draw_button_shape(int x, int y, ButtonSymbol symbol, unsigned int color) {
 constexpr int kFooterSymbolTop = 518;
 constexpr int kFooterBaseline = 532;
 
-int hint_width(const FontSet &fonts, ButtonSymbol symbol, const char *label) {
-  const int label_w = text_width(fonts, kTextSizeSmall, label);
-  if (symbol == ButtonSymbol::Select || symbol == ButtonSymbol::Start) {
-    const char *pill_text = symbol == ButtonSymbol::Start ? "START" : "SEL";
-    return text_width(fonts, kTextSizeTiny, pill_text) + 12 + 8 + label_w;
+// Lays hints out right-to-left so the primary action always sits at the right edge, the way the
+// system UI arranges its button hints. dim_prefix/dim_suffix render smaller and dimmer than the
+// label: gesture qualifiers like "(hold)" that should read as a note, not part of the action.
+struct HintSpec {
+  ButtonSymbol symbol;
+  const char *label;
+  const char *dim_prefix;
+  const char *dim_suffix;
+};
+
+int hint_width(const FontSet &fonts, const HintSpec &hint) {
+  int width = hint.label ? text_width(fonts, kTextSizeSmall, hint.label) : 0;
+  if (hint.dim_prefix) {
+    width += text_width(fonts, kTextSizeTiny, hint.dim_prefix) + 6;
   }
-  return 22 + label_w;
+  if (hint.dim_suffix) {
+    width += 6 + text_width(fonts, kTextSizeTiny, hint.dim_suffix);
+  }
+  if (hint.symbol == ButtonSymbol::Select || hint.symbol == ButtonSymbol::Start) {
+    const char *pill_text = hint.symbol == ButtonSymbol::Start ? "START" : "SEL";
+    return text_width(fonts, kTextSizeTiny, pill_text) + 12 + 8 + width;
+  }
+  return 22 + width;
 }
 
-void draw_hint(const FontSet &fonts, int x, ButtonSymbol symbol, const char *label) {
-  int label_x = x + 22;
-  if (symbol == ButtonSymbol::Select || symbol == ButtonSymbol::Start) {
-    const char *pill_text = symbol == ButtonSymbol::Start ? "START" : "SEL";
+void draw_hint(const FontSet &fonts, int x, const HintSpec &hint) {
+  int text_x = x + 22;
+  if (hint.symbol == ButtonSymbol::Select || hint.symbol == ButtonSymbol::Start) {
+    const char *pill_text = hint.symbol == ButtonSymbol::Start ? "START" : "SEL";
     // Size the pill from the measured text so the label never spills past its edge.
     const int pill_w = text_width(fonts, kTextSizeTiny, pill_text) + 12;
     vita2d_draw_rectangle(x, 516, pill_w, 20, RGBA8(255, 255, 255, 30));
     draw_text(fonts, x + 6, 531, kColorMuted, kTextSizeTiny, pill_text);
-    label_x = x + pill_w + 8;
+    text_x = x + pill_w + 8;
   } else {
-    draw_button_shape(x, kFooterSymbolTop, symbol, kColorMuted);
+    draw_button_shape(x, kFooterSymbolTop, hint.symbol, kColorMuted);
   }
-  draw_text(fonts, label_x, kFooterBaseline, kColorMuted, kTextSizeSmall, label);
+  if (hint.dim_prefix) {
+    draw_text(fonts, text_x, kFooterBaseline, kColorIdleDot, kTextSizeTiny, hint.dim_prefix);
+    text_x += text_width(fonts, kTextSizeTiny, hint.dim_prefix) + 6;
+  }
+  if (hint.label) {
+    draw_text(fonts, text_x, kFooterBaseline, kColorMuted, kTextSizeSmall, hint.label);
+    text_x += text_width(fonts, kTextSizeSmall, hint.label);
+  }
+  if (hint.dim_suffix) {
+    draw_text(fonts, text_x + 6, kFooterBaseline, kColorIdleDot, kTextSizeTiny, hint.dim_suffix);
+  }
 }
-
-// Lays hints out right-to-left so the primary action always sits at the right edge, the way the
-// system UI arranges its button hints.
-struct HintSpec {
-  ButtonSymbol symbol;
-  const char *label;
-};
 
 void draw_hints_right_aligned(const FontSet &fonts, const HintSpec *hints, int count) {
   int x = 936;
   for (int i = count - 1; i >= 0; --i) {
-    x -= hint_width(fonts, hints[i].symbol, hints[i].label);
-    draw_hint(fonts, x, hints[i].symbol, hints[i].label);
+    x -= hint_width(fonts, hints[i]);
+    draw_hint(fonts, x, hints[i]);
     x -= 36;
   }
 }
@@ -651,9 +670,42 @@ void Ui::draw_backup_panel(const UiState &state) {
                         selected ? RGBA8(203, 213, 225, 255) : RGBA8(148, 163, 184, 170));
       }
     }
-    const std::string label = fit_text(kTextSizeSmall, row.display_name(), max_text_width);
-    draw_text(fonts_, 542, y + 24, selected ? kColorText : kColorMuted,
-              kTextSizeSmall, label.c_str());
+    const std::string display = row.display_name();
+    const int full_width = measure_text(kTextSizeSmall, display.c_str());
+    if (selected && full_width > max_text_width) {
+      // Focused row with a name too long for the row: marquee the full text inside a clip window
+      // instead of ellipsizing, pausing at each end so both ends stay readable. The scroll
+      // restarts whenever the selection moves to a different row.
+      if (marquee_entry_ != i + backup_window) {
+        marquee_entry_ = i + backup_window;
+        marquee_frame_ = 0;
+      } else {
+        ++marquee_frame_;
+      }
+      const unsigned int travel = static_cast<unsigned int>(full_width - max_text_width);
+      constexpr unsigned int kMarqueePauseFrames = 45;
+      const unsigned int cycle = 2 * (kMarqueePauseFrames + travel);
+      const unsigned int t = marquee_frame_ % cycle;
+      unsigned int offset;
+      if (t < kMarqueePauseFrames) {
+        offset = 0;
+      } else if (t < kMarqueePauseFrames + travel) {
+        offset = t - kMarqueePauseFrames;
+      } else if (t < 2 * kMarqueePauseFrames + travel) {
+        offset = travel;
+      } else {
+        offset = travel - (t - 2 * kMarqueePauseFrames - travel);
+      }
+      vita2d_enable_clipping();
+      vita2d_set_clip_rectangle(542, y, 542 + max_text_width, y + 36);
+      draw_text(fonts_, 542 - static_cast<int>(offset), y + 24, kColorText, kTextSizeSmall,
+                display.c_str());
+      vita2d_disable_clipping();
+    } else {
+      const std::string label = fit_text(kTextSizeSmall, display, max_text_width);
+      draw_text(fonts_, 542, y + 24, selected ? kColorText : kColorMuted,
+                kTextSizeSmall, label.c_str());
+    }
     y += 42;
   }
 
@@ -765,25 +817,25 @@ void Ui::draw_footer(const UiState &state) {
   // The footer follows the current mode so a cancel hint only appears when there is actually
   // something to cancel. Hints are right-aligned with the primary action at the right edge.
   if (state.google_auth_pending) {
-    const HintSpec hints[] = {{cancel, "Cancel sign-in"}, {ButtonSymbol::Triangle, "Check now"}};
+    const HintSpec hints[] = {{cancel, "Cancel Sign-In"}, {ButtonSymbol::Triangle, "Check Now"}};
     draw_hints_right_aligned(fonts_, hints, 2);
     return;
   }
   if (state.restore_confirmation_pending) {
-    const HintSpec hints[] = {{cancel, "Cancel"}, {confirm, "Confirm restore"}};
+    const HintSpec hints[] = {{cancel, "Cancel"}, {confirm, "Confirm Restore"}};
     draw_hints_right_aligned(fonts_, hints, 2);
     return;
   }
   if (state.delete_scope_prompt_pending) {
     const HintSpec hints[] = {{cancel, "Cancel"},
-                              {ButtonSymbol::Square, "Card only"},
-                              {ButtonSymbol::Triangle, "Drive only"},
+                              {ButtonSymbol::Square, "Card Only"},
+                              {ButtonSymbol::Triangle, "Drive Only"},
                               {ButtonSymbol::Start, "Both"}};
     draw_hints_right_aligned(fonts_, hints, 4);
     return;
   }
   if (state.delete_confirmation_pending) {
-    const HintSpec hints[] = {{cancel, "Cancel"}, {ButtonSymbol::Start, "Confirm delete"}};
+    const HintSpec hints[] = {{cancel, "Cancel"}, {ButtonSymbol::Start, "Confirm Delete"}};
     draw_hints_right_aligned(fonts_, hints, 2);
     return;
   }
@@ -793,7 +845,7 @@ void Ui::draw_footer(const UiState &state) {
     return;
   }
   if (state.duplicate_backup_confirmation_pending) {
-    const HintSpec hints[] = {{cancel, "Cancel"}, {confirm, "Backup anyway"}};
+    const HintSpec hints[] = {{cancel, "Cancel"}, {confirm, "Create New Backup Anyway"}};
     draw_hints_right_aligned(fonts_, hints, 2);
     return;
   }
@@ -802,18 +854,17 @@ void Ui::draw_footer(const UiState &state) {
   const std::string sort_label =
       std::string("Sort: ") + save_sort_mode_label(state.sort_mode);
   const HintSpec hints[] = {
-      // Square splits like Select does: tap sorts, a hold labels the focused backup. The sort
-      // mode readout keeps the New Backup slot; on a backup entry the hold gesture is the more
-      // useful hint and Sort still works as a tap.
-      {ButtonSymbol::Square,
-       state.selected_backup == 0 ? sort_label.c_str() : "Sort / hold: Label"},
+      // Square taps to sort and holds to label. The sort-mode readout always stays visible; the
+      // label gesture appears as a dim qualifier only on backup rows, where it applies.
+      {ButtonSymbol::Square, sort_label.c_str(), nullptr,
+       state.selected_backup == 0 ? nullptr : "(hold: Label)"},
       {ButtonSymbol::Triangle, state.google_connected ? "Refresh" : "Google"},
       {ButtonSymbol::Start, "Delete"},
       // On the New Backup entry a tap-upload has nothing to act on, so the slot advertises the
-      // hold gesture instead; on backup entries it stays the plain upload hint. Title caps on
-      // purpose: the label names the feature rather than forming a sentence.
-      {ButtonSymbol::Select,
-       state.selected_backup == 0 ? "(hold) Backup & Upload All" : "Upload"},
+      // hold gesture instead; on backup entries it stays the plain upload hint. The "(hold)"
+      // qualifier renders dim and small so it reads as a gesture note, not the action name.
+      {ButtonSymbol::Select, state.selected_backup == 0 ? "Backup & Upload All" : "Upload",
+       state.selected_backup == 0 ? "(hold)" : nullptr, nullptr},
       {confirm, state.selected_backup == 0 ? "Backup" : "Restore"},
   };
   draw_hints_right_aligned(fonts_, hints, 5);
@@ -973,7 +1024,7 @@ TextInputResult Ui::prompt_text_input(const char *title, const std::string &init
   } while (pad.buttons != 0);
 
   if (!accepted) {
-    return TextInputResult::Cancelled;
+    return TextInputResult::Canceled;
   }
   *out_text = utf16_to_utf8(input_utf16);
   return TextInputResult::Accepted;
