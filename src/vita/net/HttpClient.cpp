@@ -27,6 +27,7 @@ void *g_net_memory = nullptr;
 // That reuse is what makes sign-in polling and Drive round-trips fast enough on the Vita CPU.
 CURL *g_curl = nullptr;
 HttpClient::ProgressHook g_progress_hook;
+HttpClient::CancelCheck g_cancel_check;
 std::string g_busy_label;
 SceUInt64 g_last_progress_us = 0;
 
@@ -64,6 +65,11 @@ int transfer_progress(void *, curl_off_t dltotal, curl_off_t dlnow, curl_off_t u
     return 0;
   }
   g_last_progress_us = now;
+
+  if (g_cancel_check && g_cancel_check()) {
+    // Non-zero return makes curl abort with CURLE_ABORTED_BY_CALLBACK.
+    return 1;
+  }
 
   if (ultotal > 0) {
     emit_progress(ulnow, ultotal);
@@ -208,6 +214,14 @@ bool HttpClient::network_startup(std::string *error_message) {
   return true;
 }
 
+bool HttpClient::network_reachable() {
+  int state = 0;
+  if (sceNetCtlInetGetState(&state) < 0) {
+    return false;
+  }
+  return state == SCE_NETCTL_STATE_CONNECTED;
+}
+
 void HttpClient::network_shutdown() {
   if (!g_network_ready) {
     return;
@@ -224,6 +238,10 @@ void HttpClient::network_shutdown() {
 
 void HttpClient::set_progress_hook(ProgressHook hook) {
   g_progress_hook = std::move(hook);
+}
+
+void HttpClient::set_cancel_check(CancelCheck check) {
+  g_cancel_check = std::move(check);
 }
 
 void HttpClient::set_busy_label(std::string label) {
@@ -291,6 +309,27 @@ HttpResponse HttpClient::post_json(const std::string &url, const std::string &js
   headers = append_bearer_header(headers, bearer_token);
   curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
   curl_easy_setopt(curl, CURLOPT_POST, 1L);
+  curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json.c_str());
+  curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(json.size()));
+
+  const HttpResponse response = perform_with_body(curl, headers);
+  curl_slist_free_all(headers);
+  return response;
+}
+
+HttpResponse HttpClient::patch_json(const std::string &url, const std::string &json,
+                                    const std::string &bearer_token) const {
+  CURL *curl = acquire_handle();
+  if (!curl) {
+    return transport_error("network not initialized");
+  }
+
+  curl_slist *headers = nullptr;
+  headers = curl_slist_append(headers, "Content-Type: application/json");
+  headers = curl_slist_append(headers, "Accept: application/json");
+  headers = append_bearer_header(headers, bearer_token);
+  curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+  curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PATCH");
   curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json.c_str());
   curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(json.size()));
 

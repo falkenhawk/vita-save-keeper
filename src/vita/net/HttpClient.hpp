@@ -24,8 +24,16 @@ public:
   // every request afterwards reported "curl init failed". Safe to call repeatedly.
   static bool network_startup(std::string *error_message);
   static void network_shutdown();
+  // Live connectivity, not configuration: true only while the console actually has an internet
+  // connection. Cheap enough to poll every second.
+  static bool network_reachable();
 
   static void set_progress_hook(ProgressHook hook);
+  // Polled during transfers (at the progress-frame interval); returning true aborts the request,
+  // which surfaces as a failed HttpResponse. Lets a batch cancel mid-upload instead of waiting
+  // out the transfer.
+  using CancelCheck = std::function<bool()>;
+  static void set_cancel_check(CancelCheck check);
   // Requests report progress only while a busy label is set; label-less requests (such as the
   // background sign-in polls) stay silent instead of flashing a modal every few seconds.
   static void set_busy_label(std::string label);
@@ -35,6 +43,8 @@ public:
   HttpResponse get_json(const std::string &url, const std::string &bearer_token) const;
   HttpResponse post_json(const std::string &url, const std::string &json,
                          const std::string &bearer_token) const;
+  HttpResponse patch_json(const std::string &url, const std::string &json,
+                          const std::string &bearer_token) const;
   HttpResponse post_multipart_file(const std::string &url, const std::string &metadata_json,
                                    const std::string &file_path,
                                    const std::string &bearer_token) const;
