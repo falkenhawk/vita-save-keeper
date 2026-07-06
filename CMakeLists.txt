@@ -35,6 +35,7 @@ add_library(vsm_core
   src/core/SaveScanner.cpp
   src/core/Selection.cpp
   src/core/SfoParser.cpp
+  src/core/SyncPlan.cpp
   src/core/TextUtil.cpp
 )
 target_include_directories(vsm_core PUBLIC

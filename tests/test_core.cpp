@@ -12,6 +12,7 @@
 #include "core/SaveScanner.hpp"
 #include "core/Selection.hpp"
 #include "core/SfoParser.hpp"
+#include "core/SyncPlan.hpp"
 #include "core/TextUtil.hpp"
 
 #include <cstdint>
@@ -726,6 +727,118 @@ void test_saves_sort_by_display_name_case_insensitive() {
   EXPECT_EQ(saves[2].display_name, "the Walking Dead");
 }
 
+void test_sync_plan_decides_backup_and_upload_per_game() {
+  // Changed content while connected: fresh backup, and the fresh archive is the upload (its name
+  // is only known after creation, so upload_existing stays empty).
+  {
+    const vsm::SyncItemPlan plan =
+        vsm::plan_sync_item({true, false, false, "2026-05-21 16-14.zip", true, true});
+    EXPECT_TRUE(!plan.unreadable);
+    EXPECT_TRUE(plan.create_backup);
+    EXPECT_TRUE(plan.will_upload);
+    EXPECT_EQ(plan.upload_existing, "");
+  }
+
+  // First-ever backup of a game: no archives yet, content counts as changed.
+  {
+    const vsm::SyncItemPlan plan = vsm::plan_sync_item({true, false, false, "", false, true});
+    EXPECT_TRUE(plan.create_backup);
+    EXPECT_TRUE(plan.will_upload);
+  }
+
+  // Changed content while offline: backup still happens, nothing uploads.
+  {
+    const vsm::SyncItemPlan plan =
+        vsm::plan_sync_item({true, false, false, "2026-05-21 16-14.zip", false, false});
+    EXPECT_TRUE(plan.create_backup);
+    EXPECT_TRUE(!plan.will_upload);
+    EXPECT_EQ(plan.upload_existing, "");
+  }
+
+  // Unchanged content whose newest archive is missing from Drive: upload the existing archive.
+  {
+    const vsm::SyncItemPlan plan =
+        vsm::plan_sync_item({true, false, true, "2026-05-21 16-14.zip", false, true});
+    EXPECT_TRUE(!plan.create_backup);
+    EXPECT_TRUE(plan.will_upload);
+    EXPECT_EQ(plan.upload_existing, "2026-05-21 16-14.zip");
+  }
+
+  // Unchanged and already on Drive: nothing to do.
+  {
+    const vsm::SyncItemPlan plan =
+        vsm::plan_sync_item({true, false, true, "2026-05-21 16-14.zip", true, true});
+    EXPECT_TRUE(!plan.create_backup);
+    EXPECT_TRUE(!plan.will_upload);
+    EXPECT_EQ(plan.upload_existing, "");
+  }
+
+  // Unchanged while offline: no upload even though Drive lacks the archive.
+  {
+    const vsm::SyncItemPlan plan =
+        vsm::plan_sync_item({true, false, true, "2026-05-21 16-14.zip", false, false});
+    EXPECT_TRUE(!plan.will_upload);
+    EXPECT_EQ(plan.upload_existing, "");
+  }
+
+  // Unreadable folder: skipped entirely, even when an existing archive could upload.
+  {
+    const vsm::SyncItemPlan plan =
+        vsm::plan_sync_item({false, false, false, "2026-05-21 16-14.zip", false, true});
+    EXPECT_TRUE(plan.unreadable);
+    EXPECT_TRUE(!plan.create_backup);
+    EXPECT_TRUE(!plan.will_upload);
+    EXPECT_EQ(plan.upload_existing, "");
+  }
+
+  // Empty folder with no archives: nothing to back up or upload.
+  {
+    const vsm::SyncItemPlan plan = vsm::plan_sync_item({true, true, false, "", false, true});
+    EXPECT_TRUE(!plan.unreadable);
+    EXPECT_TRUE(!plan.create_backup);
+    EXPECT_TRUE(!plan.will_upload);
+  }
+
+  // Empty folder but an old archive exists and Drive lacks it: the archive still uploads.
+  {
+    const vsm::SyncItemPlan plan =
+        vsm::plan_sync_item({true, true, false, "2026-05-20 22-31.zip", false, true});
+    EXPECT_TRUE(!plan.create_backup);
+    EXPECT_TRUE(plan.will_upload);
+    EXPECT_EQ(plan.upload_existing, "2026-05-20 22-31.zip");
+  }
+}
+
+void test_sync_all_confirm_message_states_scope() {
+  EXPECT_EQ(vsm::sync_all_confirm_message(73, "Vita", true),
+            "Backup & upload all 73 Vita saves?");
+  // Offline is already indicated by the header and by the missing "& upload" in the verb; the
+  // prompt does not repeat it.
+  EXPECT_EQ(vsm::sync_all_confirm_message(4, "PSP", false), "Backup all 4 PSP saves?");
+  EXPECT_EQ(vsm::sync_all_confirm_message(1, "Homebrew", true),
+            "Backup & upload 1 Homebrew save?");
+}
+
+void test_sync_run_summary_reports_results_and_cancellation() {
+  EXPECT_EQ(vsm::sync_run_summary({3, 8, 0, 0, 0}), "Backed up 3, uploaded 8.");
+  EXPECT_EQ(vsm::sync_run_summary({3, 0, 0, 0, 0}), "Backed up 3.");
+  EXPECT_EQ(vsm::sync_run_summary({0, 8, 0, 0, 0}), "Uploaded 8.");
+  EXPECT_EQ(vsm::sync_run_summary({2, 6, 56, 3, 0}),
+            "Backed up 2, uploaded 6, 56 up to date, 3 failed.");
+  EXPECT_EQ(vsm::sync_run_summary({0, 0, 73, 0, 0}), "All 73 games up to date.");
+  EXPECT_EQ(vsm::sync_run_summary({1, 2, 0, 0, 9}),
+            "Cancelled: backed up 1, uploaded 2, 9 games left.");
+  EXPECT_EQ(vsm::sync_run_summary({0, 0, 0, 0, 9}), "Cancelled: 9 games left.");
+  EXPECT_EQ(vsm::sync_run_summary({0, 0, 3, 0, 1}),
+            "Cancelled: 3 up to date, 1 game left.");
+  EXPECT_EQ(vsm::sync_run_summary({0, 0, 0, 0, 0}), "Nothing to do.");
+}
+
+void test_sync_all_hold_message_names_the_tab() {
+  EXPECT_EQ(vsm::sync_all_hold_message("Vita"),
+            "Keep holding: backup & upload all Vita saves...");
+}
+
 } // namespace
 
 int main() {
@@ -767,6 +880,10 @@ int main() {
   test_utf8_truncation_and_system_font_detection();
   test_auto_backup_suffix_display_and_content_matching();
   test_app_settings_roundtrip_and_unknown_keys();
+  test_sync_plan_decides_backup_and_upload_per_game();
+  test_sync_all_confirm_message_states_scope();
+  test_sync_run_summary_reports_results_and_cancellation();
+  test_sync_all_hold_message_names_the_tab();
 
   std::cout << "vsm_core_tests passed\n";
   return 0;
