@@ -1420,7 +1420,7 @@ bool App::upload_local_backup(const SaveRecord &save, const std::string &backup_
   }
 
   // The upload response carries the new file's id; slotting it into the index directly keeps the
-  // [GD] list current without another full sync.
+  // Drive list current without another full sync.
   const DriveFileList uploaded = parse_drive_file_list(upload_response.body);
   if (uploaded.ok && !uploaded.files.empty()) {
     std::vector<RemoteBackup> &list = drive_index_[folder_name];
@@ -1780,7 +1780,7 @@ int App::run() {
 
   sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
 
-  // With a stored sign-in, load the Drive index right away so every game shows its [GD] entries
+  // With a stored sign-in, load the Drive index right away so every game shows its Drive backups
   // without a manual refresh; the progress overlay covers the wait.
   if (google_connected_) {
     if (sync_drive_index()) {

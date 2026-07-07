@@ -10,7 +10,13 @@ Made for people with more than one Vita (or a PS TV) who want their saves to fol
 - creates timestamped ZIP snapshots of Vita, game card, and PSP/Adrenaline saves
 - uploads snapshots to a `PSV Saves` folder in your own Google Drive
 - downloads and restores snapshots on any of your devices, so a save made on one Vita can
-  be picked up on another Vita or a PS TV
+  be picked up on another Vita or a PS TV (you can also download a copy without restoring)
+- backs up and uploads a whole tab in one gesture: hold Select to snapshot every game in the
+  current tab and sync it to Drive
+- shows one row per snapshot, with a small cloud glyph marking where it lives - on the memory
+  card, on Google Drive, or both
+- lets you label a backup ("before boss", "100% save") with the on-screen keyboard, so you can
+  tell snapshots apart; the label follows the backup to Drive
 - shows your games in a grid with real titles and icons, grouped into Vita / Homebrew / PSP tabs
 - sorts by name, by last saved, or by last synced (whatever was uploaded most recently,
   from any device, bubbles to the top)
@@ -61,21 +67,25 @@ The app can only see files it created itself. It cannot read anything else in yo
 | L / R | switch between the Vita / Homebrew / PSP tabs |
 | Right stick | move through the backup list |
 | Cross | create a backup (on "New Backup") or restore the selected one (press twice) |
-| Select | upload the selected local backup to Google Drive |
-| Start | delete the selected backup, locally or from Drive (press twice) |
-| Square | change sorting: by name, last saved, or last synced |
+| Select | upload a card-only backup, or download a Drive-only one; hold to back up & upload the whole tab |
+| Start | delete the selected backup - for one that is on both sides, choose card, Drive, or both |
+| Square | change sorting (by name, last saved, or last synced); hold to label the selected backup |
 | Triangle | connect Google Drive, or re-sync the remote backup list |
 | Circle | cancel a pending confirmation or the Google sign-in |
 
 On Japanese-region consoles Cross and Circle swap automatically, following the system setting.
-Backups from Google Drive show a `[GD]` prefix in the list. Use the PS button to leave the app.
+Each snapshot is one row with a small cloud glyph on the right showing where it lives: a check
+for a backup on both the card and Drive, a down arrow for one only on Drive (Select downloads it),
+and an up arrow for one only on the card (Select uploads it). Use the PS button to leave the app.
 
 ## Syncing between devices
 
 Every device uses the same `google-client.json` and signs in once to the same Google account.
 All backups land in the same `PSV Saves/<game id>/` folders in your Drive, so a snapshot
-uploaded from one Vita shows up as a `[GD]` entry on the others after a re-sync. Restoring a
-`[GD]` entry downloads it first, then unpacks it over the save folder.
+uploaded from one Vita shows up on the others (marked with a Drive cloud) after a re-sync.
+Restoring one downloads it first, then unpacks it over the save folder; you can also just
+download a copy to the card without restoring. Labeling or renaming a backup updates its copy
+on Drive too, so the two stay matched.
 
 Deleting the last Drive backup of a game also removes its (empty) folder from Drive.
 
@@ -123,7 +133,7 @@ or VitaShell fails promotion with error `0x8010113D`.
 
 ## Acknowledgements
 
-- backup model and `[GD]` convention inspired by [JKSV](https://github.com/J-D-K/JKSV)
+- [JKSV](https://github.com/J-D-K/JKSV) for the backup model inspiration
 - `third_party/qrcodegen`: [QR Code generator](https://github.com/nayuki/QR-Code-generator)
   by Project Nayuki, MIT License
 - `third_party/vitasqlite`: [SQLite R/W override](https://github.com/VitaSmith/libsqlite) by
