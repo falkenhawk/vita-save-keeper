@@ -713,7 +713,8 @@ void App::handle_restore() {
       restore_confirmation_pending_ = false;
       return;
     }
-    BusyLabelScope busy("Downloading backup");
+    const std::string busy_label = "Downloading " + display_backup_name(backup_name);
+    BusyLabelScope busy(busy_label.c_str());
     const std::string download_url = std::string(kDriveFilesEndpoint) + "/" +
                                      form_url_encode(file_id) + "?alt=media";
     const HttpResponse download = drive_request([&](const std::string &token) {
@@ -1302,7 +1303,8 @@ void App::handle_transfer_button() {
       set_status(StatusKind::Error, "Could not create local backup folder.");
       return;
     }
-    BusyLabelScope busy("Downloading backup");
+    const std::string busy_label = "Downloading " + display_backup_name(row.remote_name);
+    BusyLabelScope busy(busy_label.c_str());
     const std::string download_url =
         std::string(kDriveFilesEndpoint) + "/" + form_url_encode(file_id) + "?alt=media";
     const HttpResponse download = drive_request([&](const std::string &token) {
@@ -1319,7 +1321,7 @@ void App::handle_transfer_button() {
     focus_backup_row_by_identity(row.remote_name);
     set_status(StatusKind::Success,
                ui_.compose_status_with_name("Downloaded ", display_backup_name(row.remote_name),
-                                            " to the card."));
+                                            "."));
     return;
   }
 
@@ -1344,7 +1346,8 @@ void App::handle_transfer_button() {
     return;
   }
 
-  BusyLabelScope busy("Uploading backup");
+  const std::string busy_label = "Uploading " + display_backup_name(backup_name);
+  BusyLabelScope busy(busy_label.c_str());
   if (!upload_local_backup(*selected, backup_name)) {
     return;
   }
@@ -1626,6 +1629,9 @@ void App::run_sync_all() {
   const bool drive_online = google_connected_ && HttpClient::network_reachable();
   batch_running_ = true;
   batch_cancel_requested_ = false;
+  // The batch only uploads; a folder lookup/create response is the only download, and reporting
+  // its bytes would flash the per-file percent to 100% just before the upload counts from 0.
+  HttpClient::set_report_downloads(false);
 
   for (std::size_t i = 0; i < total; ++i) {
     // Cancel lands between games (polled here) or mid-upload (polled by the HTTP cancel check);
@@ -1715,6 +1721,7 @@ void App::run_sync_all() {
   }
   batch_running_ = false;
   batch_cancel_requested_ = false;
+  HttpClient::set_report_downloads(true);
   ui_.clear_batch_progress();
 
   refresh_local_backups();

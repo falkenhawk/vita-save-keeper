@@ -286,13 +286,12 @@ void draw_hint(const FontSet &fonts, int x, const HintSpec &hint) {
     text_x += text_width(fonts, kTextSizeTiny, hint.dim_prefix) + 6;
   }
   if (hint.label) {
-    // A group label is brighter and faux-bold (the Regular cut drawn twice, offset 1px) so it
-    // reads as a heading over the buttons it introduces, not as another button hint.
+    // A group label is faux-bold (the Regular cut drawn twice, offset 1px) so it reads as a
+    // heading over the buttons it introduces, not as another button hint. Same muted tone.
     const bool group_label = hint.symbol == ButtonSymbol::Label;
-    const unsigned int color = group_label ? kColorText : kColorMuted;
-    draw_text(fonts, text_x, kFooterBaseline, color, kTextSizeSmall, hint.label);
+    draw_text(fonts, text_x, kFooterBaseline, kColorMuted, kTextSizeSmall, hint.label);
     if (group_label) {
-      draw_text(fonts, text_x + 1, kFooterBaseline, color, kTextSizeSmall, hint.label);
+      draw_text(fonts, text_x + 1, kFooterBaseline, kColorMuted, kTextSizeSmall, hint.label);
     }
     text_x += text_width(fonts, kTextSizeSmall, hint.label);
   }
@@ -302,14 +301,22 @@ void draw_hint(const FontSet &fonts, int x, const HintSpec &hint) {
 }
 
 void draw_hints_right_aligned(const FontSet &fonts, const HintSpec *hints, int count) {
+  // A group label and every hint to its right form one tight cluster - the "Delete: Local Cloud
+  // Both" options group - set close together, while the gap that separates the cluster from the
+  // rest of the footer (e.g. Cancel) stays the standard width.
+  int group_start = count;
+  for (int i = 0; i < count; ++i) {
+    if (hints[i].symbol == ButtonSymbol::Label) {
+      group_start = i;
+      break;
+    }
+  }
   int x = 936;
   for (int i = count - 1; i >= 0; --i) {
     x -= hint_width(fonts, hints[i]);
     draw_hint(fonts, x, hints[i]);
-    // A group label hugs the buttons it introduces (small gap on its right); every other gap is
-    // the standard one.
-    const int gap = (i > 0 && hints[i - 1].symbol == ButtonSymbol::Label) ? 12 : 36;
-    x -= gap;
+    const bool inside_group = (i - 1) >= group_start;  // hint[i-1] and hint[i] both in the group
+    x -= inside_group ? 16 : 36;
   }
 }
 

@@ -29,6 +29,7 @@ CURL *g_curl = nullptr;
 HttpClient::ProgressHook g_progress_hook;
 HttpClient::CancelCheck g_cancel_check;
 std::string g_busy_label;
+bool g_report_downloads = true;
 SceUInt64 g_last_progress_us = 0;
 
 std::size_t append_response_body(char *ptr, std::size_t size, std::size_t nmemb, void *userdata) {
@@ -73,7 +74,7 @@ int transfer_progress(void *, curl_off_t dltotal, curl_off_t dlnow, curl_off_t u
 
   if (ultotal > 0) {
     emit_progress(ulnow, ultotal);
-  } else if (dltotal > 0) {
+  } else if (dltotal > 0 && g_report_downloads) {
     emit_progress(dlnow, dltotal);
   } else {
     emit_progress(0, -1);
@@ -250,6 +251,10 @@ void HttpClient::set_busy_label(std::string label) {
 
 const std::string &HttpClient::busy_label() {
   return g_busy_label;
+}
+
+void HttpClient::set_report_downloads(bool report) {
+  g_report_downloads = report;
 }
 
 BusyLabelScope::BusyLabelScope(const char *label) : previous_(HttpClient::busy_label()) {

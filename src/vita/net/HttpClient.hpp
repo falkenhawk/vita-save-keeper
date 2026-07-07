@@ -37,6 +37,10 @@ public:
   // Requests report progress only while a busy label is set; label-less requests (such as the
   // background sign-in polls) stay silent instead of flashing a modal every few seconds.
   static void set_busy_label(std::string label);
+  // When false, the progress callback ignores download byte counts and reports an indeterminate
+  // state instead. The batch sets this so a Drive folder lookup/create response (a quick download)
+  // does not flash the per-file percent to 100% right before the actual upload counts up.
+  static void set_report_downloads(bool report);
   static const std::string &busy_label();
 
   HttpResponse post_form(const std::string &url, const std::string &body) const;
