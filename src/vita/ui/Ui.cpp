@@ -305,32 +305,40 @@ std::string format_minutes_seconds(int total_seconds) {
 
 // Drive state is the only thing a row marks: a card copy is the normal case and stays unmarked.
 // Sky cloud + check = synced (card and Drive); amber cloud + down arrow = lives only on Drive
-// (Select downloads a card copy, restore fetches it automatically). Drawn in a 28x19 box so the
-// glyph fills the 36px row without growing it and without clipping (rows span x 528..936, the
-// glyph sits at x+2..x+26 inside a box placed at 902).
+// (Select downloads a card copy, restore fetches it automatically). The silhouette spans
+// x+1..x+27 by y..y+17, filling the 36px row without growing it; placed at x 902 it ends at 929,
+// inside the row's right edge at 936.
+// The cloud body is composed so no flat rectangle edge ever forms the outline: the base rect
+// spans only between the end circles' centers, so the circles round the left, right, and both
+// bottom corners, and two larger puffs shape the top. (The first attempt drew the rect wider
+// than the circles, which made the silhouette read as chopped off on the right and bottom.)
+void draw_cloud_body(int x, int y, unsigned int color) {
+  vita2d_draw_rectangle(x + 6, y + 7, 16, 10, color);
+  vita2d_draw_fill_circle(x + 6, y + 12, 5, color);
+  vita2d_draw_fill_circle(x + 22, y + 12, 5, color);
+  vita2d_draw_fill_circle(x + 12, y + 7, 7, color);
+  vita2d_draw_fill_circle(x + 19.5f, y + 8.5f, 5.5f, color);
+}
+
 void draw_cloud_synced_glyph(int x, int y) {
-  vita2d_draw_fill_circle(x + 9, y + 10, 6, kColorAccent);
-  vita2d_draw_fill_circle(x + 18, y + 8, 8, kColorAccent);
-  vita2d_draw_rectangle(x + 2, y + 10, 24, 7, kColorAccent);
+  draw_cloud_body(x, y, kColorAccent);
   // The check is cut out in the panel color; vita2d lines are 1px, so each stroke is tripled
   // with 1px offsets to read as a ~3px mark on hardware.
   const unsigned int mark = RGBA8(15, 23, 42, 255);
   for (int off = -1; off <= 1; ++off) {
-    vita2d_draw_line(x + 9, y + 10 + off, x + 13, y + 14 + off, mark);
-    vita2d_draw_line(x + 13, y + 14 + off, x + 20, y + 7 + off, mark);
+    vita2d_draw_line(x + 9, y + 11 + off, x + 12.5f, y + 14.5f + off, mark);
+    vita2d_draw_line(x + 12.5f, y + 14.5f + off, x + 19.5f, y + 7 + off, mark);
   }
 }
 
 void draw_cloud_drive_only_glyph(int x, int y) {
-  vita2d_draw_fill_circle(x + 9, y + 10, 6, kColorPendingDot);
-  vita2d_draw_fill_circle(x + 18, y + 8, 8, kColorPendingDot);
-  vita2d_draw_rectangle(x + 2, y + 10, 24, 7, kColorPendingDot);
+  draw_cloud_body(x, y, kColorPendingDot);
   // Down arrow: stem plus a stacked-rect arrowhead (vita2d has no filled-triangle primitive).
   const unsigned int mark = RGBA8(15, 23, 42, 255);
-  vita2d_draw_rectangle(x + 13, y + 4, 3, 7, mark);
-  vita2d_draw_rectangle(x + 10, y + 11, 9, 2, mark);
-  vita2d_draw_rectangle(x + 12, y + 13, 5, 2, mark);
-  vita2d_draw_rectangle(x + 14, y + 15, 1, 2, mark);
+  vita2d_draw_rectangle(x + 13, y + 3, 3, 7, mark);
+  vita2d_draw_rectangle(x + 10, y + 10, 9, 2, mark);
+  vita2d_draw_rectangle(x + 12, y + 12, 5, 2, mark);
+  vita2d_draw_rectangle(x + 14, y + 14, 1, 2, mark);
 }
 
 // The IME dialog wants UTF-16 in and hands UTF-16 back; the rest of the app is UTF-8. Both
@@ -470,6 +478,29 @@ std::string Ui::fit_text(unsigned int size, const std::string &text, int max_wid
     }
   }
   return "...";
+}
+
+std::string Ui::compose_status_with_name(const std::string &prefix, const std::string &name,
+                                         const std::string &suffix) const {
+  // Matches the 380px budget draw_status_line renders with.
+  constexpr int kStatusWidth = 380;
+  std::string candidate = prefix + name + suffix;
+  if (measure_text(kTextSizeSmall, candidate.c_str()) <= kStatusWidth) {
+    return candidate;
+  }
+  std::string cut = name;
+  while (!cut.empty()) {
+    std::size_t last = cut.size() - 1;
+    while (last > 0 && (static_cast<unsigned char>(cut[last]) & 0xC0) == 0x80) {
+      --last;
+    }
+    cut.erase(last);
+    candidate = prefix + cut + "..." + suffix;
+    if (measure_text(kTextSizeSmall, candidate.c_str()) <= kStatusWidth) {
+      return candidate;
+    }
+  }
+  return prefix + "..." + suffix;
 }
 
 vita2d_texture *Ui::load_icon_texture(const std::string &path) {

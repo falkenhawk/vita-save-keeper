@@ -82,6 +82,12 @@ public:
   // leak into the main loop as a fresh button edge.
   TextInputResult prompt_text_input(const char *title, const std::string &initial_text,
                                     std::size_t max_length, std::string *out_text);
+  // "prefix + name + suffix" fitted to the status line by ellipsizing only the name, so fixed
+  // instruction text always survives. Measures the whole composed string per step: a CJK name
+  // routes the entire line to the wider PGF fallback font, so the fixed parts cannot be measured
+  // separately with Latin-font metrics.
+  std::string compose_status_with_name(const std::string &prefix, const std::string &name,
+                                       const std::string &suffix) const;
   // Full-screen modal frame for blocking work; safe to call from transfer callbacks because all
   // network requests run on the UI thread. total <= 0 draws an indeterminate sweep.
   void draw_busy(const std::string &label, long long done, long long total);

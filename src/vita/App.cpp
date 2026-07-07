@@ -524,17 +524,19 @@ void App::handle_delete_button() {
     restore_confirmation_pending_ = false;
     delete_confirmation_pending_ = false;
     delete_scope_prompt_pending_ = true;
-    // Instruction first so it always survives status-line truncation; a long labeled name is what
-    // gets ellipsized, not the "Choose where to delete:" part.
-    set_status(StatusKind::Info, "Choose where to delete: " + display);
+    // Natural sentence order; only the name ellipsizes, so "Choose where:" always survives even
+    // for long labeled (or CJK, wider-font) names.
+    set_status(StatusKind::Info,
+               ui_.compose_status_with_name("Delete ", display, "? Choose where:"));
     return;
   }
 
   if (!delete_confirmation_pending_) {
     restore_confirmation_pending_ = false;
     delete_confirmation_pending_ = true;
-    set_status(StatusKind::Info, "Delete " + display +
-                                     (row->has_remote() ? " from Drive?" : " from this card?"));
+    set_status(StatusKind::Info,
+               ui_.compose_status_with_name(
+                   "Delete ", display, row->has_remote() ? " from Drive?" : " from this card?"));
     return;
   }
   delete_confirmation_pending_ = false;
