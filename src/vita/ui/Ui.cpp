@@ -49,6 +49,9 @@ enum class ButtonSymbol {
   Triangle,
   Select,
   Start,
+  // Text-only footer entry with no glyph: a group label like "Delete:" that introduces the
+  // buttons to its right.
+  Label,
 };
 
 void draw_text(const FontSet &fonts, int x, int y, unsigned int color, unsigned int size,
@@ -253,6 +256,9 @@ int hint_width(const FontSet &fonts, const HintSpec &hint) {
   if (hint.dim_suffix) {
     width += 6 + text_width(fonts, kTextSizeTiny, hint.dim_suffix);
   }
+  if (hint.symbol == ButtonSymbol::Label) {
+    return width;  // text only, no glyph box
+  }
   if (hint.symbol == ButtonSymbol::Select || hint.symbol == ButtonSymbol::Start) {
     const char *pill_text = hint.symbol == ButtonSymbol::Start ? "START" : "SEL";
     return text_width(fonts, kTextSizeTiny, pill_text) + 12 + 8 + width;
@@ -262,7 +268,10 @@ int hint_width(const FontSet &fonts, const HintSpec &hint) {
 
 void draw_hint(const FontSet &fonts, int x, const HintSpec &hint) {
   int text_x = x + 22;
-  if (hint.symbol == ButtonSymbol::Select || hint.symbol == ButtonSymbol::Start) {
+  if (hint.symbol == ButtonSymbol::Label) {
+    // No glyph: the label text starts at the entry's left edge.
+    text_x = x;
+  } else if (hint.symbol == ButtonSymbol::Select || hint.symbol == ButtonSymbol::Start) {
     const char *pill_text = hint.symbol == ButtonSymbol::Start ? "START" : "SEL";
     // Size the pill from the measured text so the label never spills past its edge.
     const int pill_w = text_width(fonts, kTextSizeTiny, pill_text) + 12;
@@ -900,11 +909,14 @@ void Ui::draw_footer(const UiState &state) {
     return;
   }
   if (state.delete_scope_prompt_pending) {
+    // One "Delete:" label introduces the three scope buttons, so each button just names its
+    // target instead of repeating the verb.
     const HintSpec hints[] = {{cancel, "Cancel"},
-                              {ButtonSymbol::Square, "Delete Local"},
-                              {ButtonSymbol::Triangle, "Delete Cloud"},
-                              {ButtonSymbol::Start, "Delete Both"}};
-    draw_hints_right_aligned(fonts_, hints, 4);
+                              {ButtonSymbol::Label, "Delete:"},
+                              {ButtonSymbol::Square, "Local"},
+                              {ButtonSymbol::Triangle, "Cloud"},
+                              {ButtonSymbol::Start, "Both"}};
+    draw_hints_right_aligned(fonts_, hints, 5);
     return;
   }
   if (state.delete_confirmation_pending) {
