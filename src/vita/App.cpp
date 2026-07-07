@@ -535,9 +535,9 @@ void App::handle_delete_button() {
   if (!delete_confirmation_pending_) {
     restore_confirmation_pending_ = false;
     delete_confirmation_pending_ = true;
-    set_status(StatusKind::Info,
-               ui_.compose_status_with_name(
-                   "Delete ", display, row->has_remote() ? " from the Cloud?" : " from the card?"));
+    // Single-sided: the row's own glyph already says whether it lives on the card or the Cloud,
+    // so the prompt just names what.
+    set_status(StatusKind::Info, ui_.compose_status_with_name("Delete ", display, "?"));
     return;
   }
   delete_confirmation_pending_ = false;
@@ -1732,6 +1732,10 @@ int App::run() {
     return -1;
   }
 
+  // Scanning storage and reading the system app database (titles, icons) blocks for a moment on a
+  // full library; draw a frame first so the screen is not blank while it runs.
+  ui_.draw_busy("Loading saves", 0, -1);
+
   // Scan once at startup for the foundation build. Later actions that create, restore, or delete a
   // save will refresh this list explicitly so the UI does not rescan storage every frame.
   saves_ = scan_save_roots(default_save_roots());
@@ -1754,6 +1758,8 @@ int App::run() {
 
   // Bring the network stack up once for the whole run. Doing this per request was fragile: a
   // second initialization of an already-running stack fails and every request after that failed.
+  // It blocks for a beat, so keep a frame on screen while it happens.
+  ui_.draw_busy("Starting network", 0, -1);
   std::string network_error;
   if (!HttpClient::network_startup(&network_error)) {
     set_status(StatusKind::Error, network_error);

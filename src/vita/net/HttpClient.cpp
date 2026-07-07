@@ -254,6 +254,13 @@ const std::string &HttpClient::busy_label() {
 
 BusyLabelScope::BusyLabelScope(const char *label) : previous_(HttpClient::busy_label()) {
   HttpClient::set_busy_label(label ? label : "");
+  // Draw the modal once, immediately, so it appears the instant the operation starts rather than
+  // only when the transfer's first progress callback fires. A large upload spends a noticeable
+  // beat first reading the file and packing the multipart body, during which curl reports nothing;
+  // without this the screen sits frozen on the previous frame. total < 0 = indeterminate sweep.
+  if (g_progress_hook && !g_busy_label.empty()) {
+    g_progress_hook(g_busy_label, 0, -1);
+  }
 }
 
 BusyLabelScope::~BusyLabelScope() {
