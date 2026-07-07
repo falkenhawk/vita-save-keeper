@@ -535,9 +535,11 @@ void App::handle_delete_button() {
   if (!delete_confirmation_pending_) {
     restore_confirmation_pending_ = false;
     delete_confirmation_pending_ = true;
-    // Single-sided: the row's own glyph already says whether it lives on the card or the Cloud,
-    // so the prompt just names what.
-    set_status(StatusKind::Info, ui_.compose_status_with_name("Delete ", display, "?"));
+    // Card-only is the plain case, so the prompt just names what; a Cloud-only delete keeps its
+    // "from the Cloud?" qualifier since removing the only remote copy is the weightier action.
+    set_status(StatusKind::Info,
+               ui_.compose_status_with_name("Delete ", display,
+                                            row->has_remote() ? " from the Cloud?" : "?"));
     return;
   }
   delete_confirmation_pending_ = false;
