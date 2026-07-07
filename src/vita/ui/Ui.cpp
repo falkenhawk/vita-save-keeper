@@ -991,13 +991,27 @@ void Ui::draw_busy(const std::string &label, long long done, long long total) {
   vita2d_draw_rectangle(kBoxX, kBoxY, kBoxW, kBoxH, kColorPanelAlt);
   vita2d_draw_rectangle(kBoxX, kBoxY, kBoxW, 4, kColorAccent);
 
-  // During a batch the title and the bar always track overall games progress, so the display
-  // never flips between per-file and per-run scales; transfer progress becomes the percent text.
+  // The title and the bar track overall games progress in a batch. The in-flight transfer
+  // percent rides on the title line next to "Uploading ..." - it belongs to that one file - and
+  // only while bytes are actually moving. Backups report no byte progress, so nothing per-file
+  // shows while zipping, which is why a fast per-game backup no longer flashes a stray 100%.
   const std::string &title = batch_active_ ? batch_label_ : label;
+  const bool batch_transfer = batch_active_ && total > 0;
+  char transfer_pct[16] = {0};
+  int title_max_w = kBoxW - 48;
+  if (batch_transfer) {
+    float f = std::max(0.0f, std::min(1.0f, static_cast<float>(done) / static_cast<float>(total)));
+    std::snprintf(transfer_pct, sizeof(transfer_pct), "%d%%", static_cast<int>(f * 100.0f));
+    title_max_w -= text_width(fonts_, kTextSizeSmall, transfer_pct) + 12;
+  }
   // Labels carry game titles of arbitrary length; keep them inside the box.
-  const std::string fitted_label = fit_text(kTextSizeNormal, title, kBoxW - 48);
-  draw_text(fonts_, kBoxX + 24, kBoxY + 42, kColorText, kTextSizeNormal,
-            fitted_label.c_str());
+  const std::string fitted_label = fit_text(kTextSizeNormal, title, title_max_w);
+  draw_text(fonts_, kBoxX + 24, kBoxY + 42, kColorText, kTextSizeNormal, fitted_label.c_str());
+  if (batch_transfer) {
+    const int pw = text_width(fonts_, kTextSizeSmall, transfer_pct);
+    draw_text(fonts_, kBoxX + kBoxW - 24 - pw, kBoxY + 42, kColorAccent, kTextSizeSmall,
+              transfer_pct);
+  }
 
   const int bar_x = kBoxX + 24;
   const int bar_y = kBoxY + 62;
@@ -1020,13 +1034,22 @@ void Ui::draw_busy(const std::string &label, long long done, long long total) {
     vita2d_draw_rectangle(bar_x + start, bar_y, segment, bar_h, kColorAccent);
   }
 
-  // Percent line: overall fraction normally, the in-flight transfer during a batch.
-  if (total > 0) {
-    char percent[16];
-    float fraction = static_cast<float>(done) / static_cast<float>(total);
-    fraction = std::max(0.0f, std::min(1.0f, fraction));
-    std::snprintf(percent, sizeof(percent), "%d%%", static_cast<int>(fraction * 100.0f));
-    draw_text(fonts_, bar_x, kBoxY + 98, kColorMuted, kTextSizeSmall, percent);
+  // Under the bar: the overall figure the bar represents. In a batch that is games completed of
+  // the total (matching the bar); for a single operation it is that operation's own transfer.
+  char overall_pct[16] = {0};
+  bool show_overall = false;
+  if (batch_active_ && batch_total_ > 0) {
+    float f = std::max(0.0f, std::min(1.0f, static_cast<float>(batch_done_) /
+                                                static_cast<float>(batch_total_)));
+    std::snprintf(overall_pct, sizeof(overall_pct), "%d%%", static_cast<int>(f * 100.0f));
+    show_overall = true;
+  } else if (!batch_active_ && total > 0) {
+    float f = std::max(0.0f, std::min(1.0f, static_cast<float>(done) / static_cast<float>(total)));
+    std::snprintf(overall_pct, sizeof(overall_pct), "%d%%", static_cast<int>(f * 100.0f));
+    show_overall = true;
+  }
+  if (show_overall) {
+    draw_text(fonts_, bar_x, kBoxY + 98, kColorMuted, kTextSizeSmall, overall_pct);
   }
 
   if (batch_active_) {
