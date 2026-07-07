@@ -37,6 +37,8 @@ struct AppDbTitle {
 
 struct AppDbContext {
   std::vector<AppDbTitle> titles;
+  const std::function<void()> *on_progress = nullptr;
+  std::size_t rows = 0;
 };
 
 std::string value_or_empty(char *value) {
@@ -59,8 +61,13 @@ int app_db_callback(void *context, int argc, char **argv, char **) {
   title.icon_path = value_or_empty(argv[3]);
   normalize_title(&title.title);
 
+  auto *ctx = static_cast<AppDbContext *>(context);
   if (!title.real_id.empty()) {
-    static_cast<AppDbContext *>(context)->titles.push_back(std::move(title));
+    ctx->titles.push_back(std::move(title));
+  }
+  // Pulse the caller every few rows so a startup animation keeps moving during the query.
+  if (ctx->on_progress && (++ctx->rows % 16 == 0)) {
+    (*ctx->on_progress)();
   }
   return 0;
 }
@@ -104,7 +111,8 @@ std::string format_sqlite_open_error(int result_code, sqlite3 *database) {
 
 } // namespace
 
-AppDbMetadataResult apply_app_db_metadata(std::vector<SaveRecord> *saves) {
+AppDbMetadataResult apply_app_db_metadata(std::vector<SaveRecord> *saves,
+                                          const std::function<void()> &on_progress) {
   AppDbMetadataResult result;
   if (!saves) {
     result.error = "No save list provided.";
@@ -129,6 +137,9 @@ AppDbMetadataResult apply_app_db_metadata(std::vector<SaveRecord> *saves) {
   }
 
   AppDbContext context;
+  if (on_progress) {
+    context.on_progress = &on_progress;
+  }
   char *error = nullptr;
   // SaveCloud Vita uses this same app.db relationship: tbl_appinfo stores a game title ID and a
   // separate "realid" value, and the save directory is often named by that realid. Querying every

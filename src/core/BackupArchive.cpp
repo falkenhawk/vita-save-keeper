@@ -355,7 +355,8 @@ bool write_local_header(FILE *zip, ZipEntry *entry, const ZipTimestamp &timestam
          write_string(zip, entry->zip_path);
 }
 
-bool write_file_data(FILE *zip, const std::string &source_path) {
+bool write_file_data(FILE *zip, const std::string &source_path,
+                     const std::function<void(std::size_t)> &on_bytes) {
   FILE *input = std::fopen(source_path.c_str(), "rb");
   if (!input) {
     return false;
@@ -367,6 +368,9 @@ bool write_file_data(FILE *zip, const std::string &source_path) {
     if (read > 0 && !write_bytes(zip, buffer.data(), read)) {
       std::fclose(input);
       return false;
+    }
+    if (read > 0 && on_bytes) {
+      on_bytes(read);
     }
     if (read < buffer.size()) {
       const bool ok = std::ferror(input) == 0;
@@ -561,10 +565,33 @@ BackupResult create_backup_archive(const BackupRequest &request) {
     return error_result(archive_path, "could not create archive file");
   }
 
+  // Sizes are known now (measure_file above), so the write can report determinate byte progress
+  // for a caller that wants to animate a bar. Throttle to ~every 256 KB to bound redraw cost.
+  std::uint64_t total_bytes = 0;
+  for (const ZipEntry &entry : entries) {
+    total_bytes += entry.size;
+  }
+  std::uint64_t written = 0;
+  std::uint64_t last_reported = 0;
+  const std::uint64_t report_step = 256u * 1024u;
+  const std::function<void(std::size_t)> on_bytes =
+      request.progress ? std::function<void(std::size_t)>([&](std::size_t chunk) {
+        written += chunk;
+        if (written - last_reported >= report_step || written == total_bytes) {
+          last_reported = written;
+          request.progress(written, total_bytes);
+        }
+      })
+                       : std::function<void(std::size_t)>();
+  if (request.progress) {
+    request.progress(0, total_bytes);
+  }
+
   const ZipTimestamp zip_timestamp = to_zip_timestamp(request.timestamp);
   bool ok = true;
   for (ZipEntry &entry : entries) {
-    ok = write_local_header(zip, &entry, zip_timestamp) && write_file_data(zip, entry.source_path);
+    ok = write_local_header(zip, &entry, zip_timestamp) &&
+         write_file_data(zip, entry.source_path, on_bytes);
     if (!ok) {
       break;
     }

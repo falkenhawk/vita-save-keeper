@@ -3,6 +3,7 @@
 #include "core/BackupName.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,10 @@ struct BackupRequest {
   // Appended to the timestamp in the file name (before ".zip"); automatic pre-restore snapshots
   // use " auto" so they are recognizable and sort next to their timestamp.
   std::string name_suffix;
+  // Optional: called with (bytes written, total bytes) as the archive is written, throttled, so a
+  // caller can animate a progress bar for a large save. Empty by default (the batch leaves it
+  // unset, so only the single "Creating backup" modal fills).
+  std::function<void(std::uint64_t done, std::uint64_t total)> progress;
 };
 
 struct BackupResult {

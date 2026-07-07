@@ -475,12 +475,18 @@ void App::create_new_backup() {
 
   // One busy frame before the blocking ZIP work, so the screen does not look frozen.
   ui_.draw_busy("Creating backup", 0, -1);
-  const BackupResult result = create_backup_archive({
-      save.path,
-      kBackupRoot,
-      save.id,
-      current_backup_timestamp(),
-  });
+  BackupRequest request;
+  request.source_path = save.path;
+  request.backup_root = kBackupRoot;
+  request.save_id = save.id;
+  request.timestamp = current_backup_timestamp();
+  // Animate the bar as the archive is written - meaningful for a large save. Only the single
+  // backup path sets this; the batch leaves it unset so its per-file percent stays upload-only.
+  request.progress = [this](std::uint64_t done, std::uint64_t total) {
+    ui_.draw_busy("Creating backup", static_cast<long long>(done),
+                  static_cast<long long>(total));
+  };
+  const BackupResult result = create_backup_archive(request);
   if (result.ok) {
     refresh_local_backups();
     // Focus the fresh snapshot so an immediate Select-to-upload needs no scrolling.
@@ -1748,7 +1754,10 @@ int App::run() {
   // Scan once at startup for the foundation build. Later actions that create, restore, or delete a
   // save will refresh this list explicitly so the UI does not rescan storage every frame.
   saves_ = scan_save_roots(default_save_roots());
-  const AppDbMetadataResult metadata_result = apply_app_db_metadata(&saves_);
+  // Keep the "Loading saves" sweep moving through the app-database query (its slowest part) by
+  // repainting a frame every few rows, instead of a frozen bar.
+  const AppDbMetadataResult metadata_result =
+      apply_app_db_metadata(&saves_, [this] { ui_.draw_busy("Loading saves", 0, -1); });
   if (!metadata_result.ok && !metadata_result.error.empty()) {
     set_status(StatusKind::Info, "Using save-folder metadata: " + metadata_result.error);
   }
