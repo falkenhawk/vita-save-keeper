@@ -431,10 +431,22 @@ bool Ui::initialize() {
   // does not; it always loads as the fallback for Japanese titles (and for everything if the
   // TTF itself failed to load).
   fonts_.fallback = vita2d_load_default_pgf();
+
+  cloud_synced_tex_ = vita2d_load_PNG_file("app0:sce_sys/resources/cloud-synced.png");
+  cloud_drive_only_tex_ = vita2d_load_PNG_file("app0:sce_sys/resources/cloud-drive-only.png");
+
   return any_font || fonts_.fallback != nullptr;
 }
 
 void Ui::shutdown() {
+  if (cloud_synced_tex_) {
+    vita2d_free_texture(cloud_synced_tex_);
+    cloud_synced_tex_ = nullptr;
+  }
+  if (cloud_drive_only_tex_) {
+    vita2d_free_texture(cloud_drive_only_tex_);
+    cloud_drive_only_tex_ = nullptr;
+  }
   for (auto &entry : icon_cache_) {
     if (entry.second) {
       vita2d_free_texture(entry.second);
@@ -710,7 +722,10 @@ void Ui::draw_backup_panel(const UiState &state) {
     if (!row.new_backup) {
       max_text_width = 340;
       if (row.has_remote()) {
-        if (row.has_local()) {
+        vita2d_texture *glyph = row.has_local() ? cloud_synced_tex_ : cloud_drive_only_tex_;
+        if (glyph) {
+          vita2d_draw_texture(glyph, 902, y + 9);
+        } else if (row.has_local()) {
           draw_cloud_synced_glyph(902, y + 9);
         } else {
           draw_cloud_drive_only_glyph(902, y + 9);

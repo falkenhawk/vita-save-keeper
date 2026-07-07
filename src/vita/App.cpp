@@ -1319,10 +1319,17 @@ void App::handle_transfer_button() {
 
   const std::string backup_name = row.local_name;
 
+  // A synced row advertises no Select action in the footer, so a tap is a silent no-op there -
+  // an "already on Drive" toast would nag about a button the UI never offered. (The hold gesture
+  // still runs the batch from any row.)
+  if (row.has_remote()) {
+    return;
+  }
   // A snapshot never changes after creation, so a Drive file with the same timestamp identity is
   // the same backup (even under a stale pre-rename name); skip the upload instead of stacking
-  // duplicates (Drive allows same-name siblings).
-  if (row.has_remote() || remote_backup_exists(selected->id, backup_name)) {
+  // duplicates (Drive allows same-name siblings). Unlike the synced-row case the footer did
+  // offer Upload here, so the refusal explains itself.
+  if (remote_backup_exists(selected->id, backup_name)) {
     set_status(StatusKind::Info, "This backup is already on Google Drive.");
     return;
   }

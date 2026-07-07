@@ -123,5 +123,7 @@ else()
     FILE sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
     FILE sce_sys/resources/Roboto-Regular.ttf sce_sys/resources/Roboto-Regular.ttf
     FILE sce_sys/resources/cacert.pem sce_sys/resources/cacert.pem
+    FILE sce_sys/resources/cloud-synced.png sce_sys/resources/cloud-synced.png
+    FILE sce_sys/resources/cloud-drive-only.png sce_sys/resources/cloud-drive-only.png
   )
 endif()
