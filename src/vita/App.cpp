@@ -465,8 +465,8 @@ void App::create_new_backup() {
         duplicate_backup_confirmation_pending_ = true;
         // Says why a new backup is redundant; the footer offers "Create New Backup Anyway".
         set_status(StatusKind::Info,
-                   ui_.compose_status_with_name("This save is already backed up as ",
-                                                display_backup_name(match), "."));
+                   ui_.compose_status_with_name("No changes since ", display_backup_name(match),
+                                                "."));
         return;
       }
     }
