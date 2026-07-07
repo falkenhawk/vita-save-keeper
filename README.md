@@ -26,9 +26,9 @@ Made for people with more than one Vita (or a PS TV) who want their saves to fol
 - before a restore overwrites anything, the current save is snapshotted automatically
   (shown as `[AUTO]`), unless an identical backup already exists
 
-| Google sign-in | Upload with progress |
-| --- | --- |
-| ![Sign in](docs/screenshots/google-signin.png) | ![Upload](docs/screenshots/upload-progress.png) |
+| Google sign-in | Upload with progress | Back up & upload a whole tab |
+| --- | --- | --- |
+| ![Sign in](docs/screenshots/google-signin.png) | ![Upload](docs/screenshots/upload-progress.png) | ![Batch](docs/screenshots/batch-upload.png) |
 
 ## What you need
 
