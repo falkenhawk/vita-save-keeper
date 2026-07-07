@@ -524,8 +524,10 @@ std::string Ui::fit_text(unsigned int size, const std::string &text, int max_wid
 }
 
 std::string Ui::fit_quoted_name(const std::string &prefix, const std::string &name,
-                                const std::string &suffix, unsigned int size, int max_width) const {
-  std::string candidate = prefix + "\"" + name + "\"" + suffix;
+                                const std::string &suffix, unsigned int size, int max_width,
+                                bool quote) const {
+  const char *q = quote ? "\"" : "";
+  std::string candidate = prefix + q + name + q + suffix;
   if (measure_text(size, candidate.c_str()) <= max_width) {
     return candidate;
   }
@@ -536,12 +538,12 @@ std::string Ui::fit_quoted_name(const std::string &prefix, const std::string &na
       --last;
     }
     cut.erase(last);
-    candidate = prefix + "\"" + cut + "...\"" + suffix;
+    candidate = prefix + q + cut + "..." + q + suffix;
     if (measure_text(size, candidate.c_str()) <= max_width) {
       return candidate;
     }
   }
-  return prefix + "\"...\"" + suffix;
+  return prefix + q + "..." + q + suffix;
 }
 
 std::string Ui::compose_status_with_name(const std::string &prefix, const std::string &name,
@@ -994,9 +996,10 @@ void Ui::draw_footer(const UiState &state) {
   draw_hints_right_aligned(fonts_, hints.data(), static_cast<int>(hints.size()));
 }
 
-void Ui::set_batch_progress(std::string label, std::size_t done_games, std::size_t total_games,
-                            bool cancel_is_circle) {
-  batch_label_ = std::move(label);
+void Ui::set_batch_progress(std::string action, std::string game, std::size_t done_games,
+                            std::size_t total_games, bool cancel_is_circle) {
+  batch_action_ = std::move(action);
+  batch_game_ = std::move(game);
   batch_done_ = done_games;
   batch_total_ = total_games;
   batch_cancel_is_circle_ = cancel_is_circle;
@@ -1005,7 +1008,8 @@ void Ui::set_batch_progress(std::string label, std::size_t done_games, std::size
 
 void Ui::clear_batch_progress() {
   batch_active_ = false;
-  batch_label_.clear();
+  batch_action_.clear();
+  batch_game_.clear();
 }
 
 void Ui::draw_busy(const std::string &label, long long done, long long total) {
@@ -1034,7 +1038,6 @@ void Ui::draw_busy(const std::string &label, long long done, long long total) {
   // percent rides on the title line next to "Uploading ..." - it belongs to that one file - and
   // only while bytes are actually moving. Backups report no byte progress, so nothing per-file
   // shows while zipping, which is why a fast per-game backup no longer flashes a stray 100%.
-  const std::string &title = batch_active_ ? batch_label_ : label;
   const bool batch_transfer = batch_active_ && total > 0;
   char transfer_pct[16] = {0};
   int title_max_w = kBoxW - 48;
@@ -1043,8 +1046,17 @@ void Ui::draw_busy(const std::string &label, long long done, long long total) {
     std::snprintf(transfer_pct, sizeof(transfer_pct), "%d%%", static_cast<int>(f * 100.0f));
     title_max_w -= text_width(fonts_, kTextSizeSmall, transfer_pct) + 12;
   }
-  // Labels carry game titles of arbitrary length; keep them inside the box.
-  const std::string fitted_label = fit_text(kTextSizeNormal, title, title_max_w);
+  // In a batch, ellipsize only the game title so the "(N/M)" counter is never cut; a single
+  // operation just fits its whole label. Game titles are of arbitrary length either way.
+  std::string fitted_label;
+  if (batch_active_) {
+    const std::string counter =
+        " (" + std::to_string(batch_done_ + 1) + "/" + std::to_string(batch_total_) + ")";
+    fitted_label = fit_quoted_name(batch_action_ + " ", batch_game_, counter, kTextSizeNormal,
+                                   title_max_w, /*quote=*/false);
+  } else {
+    fitted_label = fit_text(kTextSizeNormal, label, title_max_w);
+  }
   draw_text(fonts_, kBoxX + 24, kBoxY + 42, kColorText, kTextSizeNormal, fitted_label.c_str());
   if (batch_transfer) {
     const int pw = text_width(fonts_, kTextSizeSmall, transfer_pct);

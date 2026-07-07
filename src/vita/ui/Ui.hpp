@@ -98,8 +98,10 @@ public:
   // Batch context for draw_busy: while set, the modal's title and bar track overall games
   // progress, any transfer progress passed to draw_busy shows as a percent line instead of a
   // second bar, and a "hold to cancel" hint appears.
-  void set_batch_progress(std::string label, std::size_t done_games, std::size_t total_games,
-                          bool cancel_is_circle);
+  // action is the verb ("Uploading"), game is the title. The modal renders "action game (N/M)"
+  // and, when it does not fit, ellipsizes only the game so the (N/M) counter always shows.
+  void set_batch_progress(std::string action, std::string game, std::size_t done_games,
+                          std::size_t total_games, bool cancel_is_circle);
   void clear_batch_progress();
 
 private:
@@ -113,7 +115,8 @@ private:
   int measure_text(unsigned int size, const char *text) const;
   std::string fit_text(unsigned int size, const std::string &text, int max_width) const;
   std::string fit_quoted_name(const std::string &prefix, const std::string &name,
-                              const std::string &suffix, unsigned int size, int max_width) const;
+                              const std::string &suffix, unsigned int size, int max_width,
+                              bool quote = true) const;
   vita2d_texture *load_icon_texture(const std::string &path);
 
   FontSet fonts_;
@@ -122,7 +125,8 @@ private:
   vita2d_texture *cloud_synced_tex_{};
   vita2d_texture *cloud_drive_only_tex_{};
   vita2d_texture *cloud_local_only_tex_{};
-  std::string batch_label_;
+  std::string batch_action_;
+  std::string batch_game_;
   std::size_t batch_done_{};
   std::size_t batch_total_{};
   bool batch_cancel_is_circle_{true};

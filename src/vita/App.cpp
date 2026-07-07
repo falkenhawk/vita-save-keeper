@@ -1660,8 +1660,7 @@ void App::run_sync_all() {
     }
 
     const SaveRecord &save = saves_[targets[i]];
-    const std::string progress = " (" + std::to_string(i + 1) + "/" + std::to_string(total) + ")";
-    ui_.set_batch_progress("Checking " + save.display_name + progress, i, total, enter_is_cross_);
+    ui_.set_batch_progress("Checking", save.display_name, i, total, enter_is_cross_);
     ui_.draw_busy("", 0, -1);
 
     const std::vector<std::string> backups = scan_local_backup_names(kBackupRoot, save.id);
@@ -1690,8 +1689,7 @@ void App::run_sync_all() {
 
     std::string upload_name = plan.upload_existing;
     if (plan.create_backup) {
-      ui_.set_batch_progress("Backing up " + save.display_name + progress, i, total,
-                             enter_is_cross_);
+      ui_.set_batch_progress("Backing up", save.display_name, i, total, enter_is_cross_);
       ui_.draw_busy("", 0, -1);
       const BackupResult result = create_backup_archive({
           save.path,
@@ -1722,9 +1720,10 @@ void App::run_sync_all() {
       ++run.failed;
       continue;
     }
-    ui_.set_batch_progress("Uploading " + save.display_name + progress, i, total,
-                           enter_is_cross_);
-    const std::string upload_label = "Uploading " + save.display_name + progress;
+    ui_.set_batch_progress("Uploading", save.display_name, i, total, enter_is_cross_);
+    // The batch modal draws its own title from the action + game; this only needs to be non-empty
+    // so the transfer-progress callback reports the per-file upload percent.
+    const std::string upload_label = "Uploading " + save.display_name;
     BusyLabelScope busy(upload_label.c_str());
     if (upload_local_backup(save, upload_name)) {
       ++run.uploaded;
