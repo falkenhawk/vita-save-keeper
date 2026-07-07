@@ -15,7 +15,7 @@ All notable changes to Save Keeper are documented here. The format follows
   edit is mirrored to the Cloud copy
 
 ### Changed
-- one row per snapshot instead of separate card and Cloud entries, with a small cloud glyph
+- one row per snapshot instead of separate local and Cloud entries, with a small cloud glyph
   marking where it lives: on the memory card, in the Cloud, or both
 - download a Cloud-only backup to the memory card without restoring it (Select)
 - when a backup exists both on the card and in the Cloud, deleting it asks where: local only,

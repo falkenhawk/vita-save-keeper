@@ -501,7 +501,7 @@ std::string Ui::compose_status_with_name(const std::string &prefix, const std::s
                                          const std::string &suffix) const {
   // Matches the 380px budget draw_status_line renders with.
   constexpr int kStatusWidth = 380;
-  std::string candidate = prefix + name + suffix;
+  std::string candidate = prefix + "\"" + name + "\"" + suffix;
   if (measure_text(kTextSizeSmall, candidate.c_str()) <= kStatusWidth) {
     return candidate;
   }
@@ -512,12 +512,12 @@ std::string Ui::compose_status_with_name(const std::string &prefix, const std::s
       --last;
     }
     cut.erase(last);
-    candidate = prefix + cut + "..." + suffix;
+    candidate = prefix + "\"" + cut + "...\"" + suffix;
     if (measure_text(kTextSizeSmall, candidate.c_str()) <= kStatusWidth) {
       return candidate;
     }
   }
-  return prefix + "..." + suffix;
+  return prefix + "\"...\"" + suffix;
 }
 
 vita2d_texture *Ui::load_icon_texture(const std::string &path) {
@@ -901,9 +901,9 @@ void Ui::draw_footer(const UiState &state) {
   }
   if (state.delete_scope_prompt_pending) {
     const HintSpec hints[] = {{cancel, "Cancel"},
-                              {ButtonSymbol::Square, "Card Only"},
-                              {ButtonSymbol::Triangle, "Drive Only"},
-                              {ButtonSymbol::Start, "Both"}};
+                              {ButtonSymbol::Square, "Delete Local"},
+                              {ButtonSymbol::Triangle, "Delete Cloud"},
+                              {ButtonSymbol::Start, "Delete Both"}};
     draw_hints_right_aligned(fonts_, hints, 4);
     return;
   }

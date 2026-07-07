@@ -17,9 +17,11 @@ struct BackupTimestamp {
 // "YYYY-MM-DD HH-MM-SS" - the identity prefix every backup name starts with.
 constexpr std::size_t kBackupTimestampPrefixLength = 19;
 // Longest user label kept after sanitizing, counted in Unicode codepoints (characters), not
-// bytes. The IME caps typing at the same character count, so a multi-byte (CJK) label is never
-// silently cut below what the on-screen keyboard let the user enter.
-constexpr std::size_t kMaxBackupLabelLength = 32;
+// bytes. This is a readability choice, not a hard limit: the full name is only
+// "YYYY-MM-DD HH-MM-SS <label>.zip", so even at this length it stays well under the ~255-char
+// exFAT filename limit and far under Drive's. The IME caps typing at the same character count,
+// so a multi-byte (CJK) label is never silently cut below what the keyboard let the user enter.
+constexpr std::size_t kMaxBackupLabelLength = 60;
 
 std::string make_timestamped_backup_name(const BackupTimestamp &timestamp);
 // UI form of a backup file name: the ".zip" extension is an on-disk detail every backup shares,

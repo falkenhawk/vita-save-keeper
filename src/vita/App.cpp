@@ -463,9 +463,10 @@ void App::create_new_backup() {
       const std::string match = matching_backup_name(entries, save.id, local_backups_);
       if (!match.empty()) {
         duplicate_backup_confirmation_pending_ = true;
-        // The footer carries the "confirm / cancel" instruction; the status line only needs the
-        // fact, so the archive name fits without truncation.
-        set_status(StatusKind::Info, "Identical to " + display_backup_name(match));
+        // Says why a new backup is redundant; the footer offers "Create New Backup Anyway".
+        set_status(StatusKind::Info,
+                   ui_.compose_status_with_name("This save is already backed up as ",
+                                                display_backup_name(match), "."));
         return;
       }
     }
@@ -491,7 +492,8 @@ void App::create_new_backup() {
     if (google_connected_ && network_connected_) {
       set_status(StatusKind::Success, "Backup created. Press Select to upload it.");
     } else {
-      set_status(StatusKind::Success, "Created " + display_backup_name(file_name) + ".");
+      set_status(StatusKind::Success,
+                 ui_.compose_status_with_name("Created ", display_backup_name(file_name), "."));
     }
   } else {
     set_status(StatusKind::Error, "Backup failed: " + result.error);
@@ -524,10 +526,9 @@ void App::handle_delete_button() {
     restore_confirmation_pending_ = false;
     delete_confirmation_pending_ = false;
     delete_scope_prompt_pending_ = true;
-    // Natural sentence order; only the name ellipsizes, so "Choose where:" always survives even
-    // for long labeled (or CJK, wider-font) names.
-    set_status(StatusKind::Info,
-               ui_.compose_status_with_name("Delete ", display, "? Choose where:"));
+    // The footer's three scope buttons say where, so the status only needs to name what. Just
+    // the quoted name ellipsizes, so the "?" always survives.
+    set_status(StatusKind::Info, ui_.compose_status_with_name("Delete ", display, "?"));
     return;
   }
 
@@ -536,7 +537,7 @@ void App::handle_delete_button() {
     delete_confirmation_pending_ = true;
     set_status(StatusKind::Info,
                ui_.compose_status_with_name(
-                   "Delete ", display, row->has_remote() ? " from Drive?" : " from this card?"));
+                   "Delete ", display, row->has_remote() ? " from the Cloud?" : " from the card?"));
     return;
   }
   delete_confirmation_pending_ = false;
@@ -562,16 +563,16 @@ void App::perform_scoped_delete(bool delete_local, bool delete_remote) {
     }
     const std::string file_id = remote_file_id_for(row.remote_name);
     if (file_id.empty()) {
-      set_status(StatusKind::Error, "Drive copy not found; refresh and retry.");
+      set_status(StatusKind::Error, "Cloud copy not found; refresh and retry.");
       return;
     }
-    BusyLabelScope busy("Deleting Drive backup");
+    BusyLabelScope busy("Deleting Cloud backup");
     const std::string url = std::string(kDriveFilesEndpoint) + "/" + form_url_encode(file_id);
     const HttpResponse response = drive_request([&](const std::string &token) {
       return HttpClient().delete_request(url, token);
     });
     if (!response.ok) {
-      set_status(StatusKind::Error, "Drive delete failed.");
+      set_status(StatusKind::Error, "Cloud delete failed.");
       return;
     }
     const std::string folder_name = resolved_drive_folder_name(selected->id);
@@ -604,17 +605,19 @@ void App::perform_scoped_delete(bool delete_local, bool delete_remote) {
   }
 
   if (local_failed) {
-    set_status(StatusKind::Error, remote_requested
-                                      ? "Deleted the Drive copy, but not the card copy."
-                                      : "Could not delete " + display + ".");
+    set_status(StatusKind::Error,
+               remote_requested ? "Deleted the Cloud copy, but not the card copy."
+                                : ui_.compose_status_with_name("Could not delete ", display, "."));
     return;
   }
   if (delete_local && remote_requested) {
-    set_status(StatusKind::Success, "Deleted " + display + " from card and Drive.");
+    set_status(StatusKind::Success,
+               ui_.compose_status_with_name("Deleted ", display, " from Card and Cloud."));
   } else if (remote_requested) {
-    set_status(StatusKind::Success, "Deleted the Drive copy of " + display + ".");
+    set_status(StatusKind::Success,
+               ui_.compose_status_with_name("Deleted ", display, " from the Cloud."));
   } else {
-    set_status(StatusKind::Success, "Deleted " + display + ".");
+    set_status(StatusKind::Success, ui_.compose_status_with_name("Deleted ", display, "."));
   }
 }
 
@@ -650,7 +653,7 @@ void App::handle_restore() {
     delete_confirmation_pending_ = false;
     delete_scope_prompt_pending_ = false;
     restore_confirmation_pending_ = true;
-    set_status(StatusKind::Info, "Restore " + row.display_name() + "?");
+    set_status(StatusKind::Info, ui_.compose_status_with_name("Restore ", row.display_name(), "?"));
     return;
   }
 
@@ -699,7 +702,7 @@ void App::handle_restore() {
     }
     const std::string file_id = remote_file_id_for(row.remote_name);
     if (file_id.empty()) {
-      set_status(StatusKind::Error, "Drive copy not found; refresh and retry.");
+      set_status(StatusKind::Error, "Cloud copy not found; refresh and retry.");
       restore_confirmation_pending_ = false;
       return;
     }
@@ -718,7 +721,7 @@ void App::handle_restore() {
       // A failed stream leaves a partial zip that would list as a real backup on next refresh.
       std::remove(archive_path.c_str());
       restore_confirmation_pending_ = false;
-      set_status(StatusKind::Error, "Drive download failed.");
+      set_status(StatusKind::Error, "Cloud download failed.");
       return;
     }
     refresh_local_backups();
@@ -732,9 +735,9 @@ void App::handle_restore() {
   restore_confirmation_pending_ = false;
   if (result.ok) {
     set_status(StatusKind::Success,
-               (remote_restore ? "Downloaded and restored " + display_backup_name(backup_name)
-                               : "Restored " + display_backup_name(backup_name)) +
-                   ".");
+               ui_.compose_status_with_name(
+                   remote_restore ? "Downloaded and restored " : "Restored ",
+                   display_backup_name(backup_name), "."));
   } else {
     set_status(StatusKind::Error, "Restore failed: " + result.error);
   }
@@ -1025,13 +1028,13 @@ std::string App::find_or_create_drive_folder(const std::string &folder_name,
         create_url, build_drive_folder_metadata_json(folder_name, parent_id), token);
   });
   if (!create_response.ok) {
-    set_status(StatusKind::Error, "Drive folder create failed.");
+    set_status(StatusKind::Error, "Cloud folder create failed.");
     return {};
   }
 
   const DriveFileList created = parse_drive_file_list(create_response.body);
   if (!created.ok || created.files.empty()) {
-    set_status(StatusKind::Error, "Drive folder response invalid.");
+    set_status(StatusKind::Error, "Cloud folder response invalid.");
     return {};
   }
   return created.files[0].id;
@@ -1088,12 +1091,12 @@ bool App::sync_drive_index() {
       return HttpClient().get_json(url, token);
     });
     if (!response.ok) {
-      set_status(StatusKind::Error, "Drive folder listing failed.");
+      set_status(StatusKind::Error, "Cloud folder listing failed.");
       return false;
     }
     const DriveFileList list = parse_drive_file_list(response.body);
     if (!list.ok) {
-      set_status(StatusKind::Error, "Drive folder response invalid.");
+      set_status(StatusKind::Error, "Cloud folder response invalid.");
       return false;
     }
     folders.insert(folders.end(), list.files.begin(), list.files.end());
@@ -1128,12 +1131,12 @@ bool App::sync_drive_index() {
       return HttpClient().get_json(url, token);
     });
     if (!response.ok) {
-      set_status(StatusKind::Error, "Drive backup listing failed.");
+      set_status(StatusKind::Error, "Cloud backup listing failed.");
       return false;
     }
     const DriveFileList list = parse_drive_file_list(response.body);
     if (!list.ok) {
-      set_status(StatusKind::Error, "Drive backup response invalid.");
+      set_status(StatusKind::Error, "Cloud backup response invalid.");
       return false;
     }
     for (const DriveFile &file : list.files) {
@@ -1288,7 +1291,7 @@ void App::handle_transfer_button() {
     }
     const std::string file_id = remote_file_id_for(row.remote_name);
     if (file_id.empty()) {
-      set_status(StatusKind::Error, "Drive copy not found; refresh and retry.");
+      set_status(StatusKind::Error, "Cloud copy not found; refresh and retry.");
       return;
     }
     const std::string archive_path =
@@ -1307,13 +1310,14 @@ void App::handle_transfer_button() {
       // download_file streams to disk, so a failed transfer leaves a partial zip that the next
       // refresh would list as a real backup; remove it.
       std::remove(archive_path.c_str());
-      set_status(StatusKind::Error, "Drive download failed.");
+      set_status(StatusKind::Error, "Cloud download failed.");
       return;
     }
     refresh_local_backups();
     focus_backup_row_by_identity(row.remote_name);
     set_status(StatusKind::Success,
-               "Downloaded " + display_backup_name(row.remote_name) + " to card.");
+               ui_.compose_status_with_name("Downloaded ", display_backup_name(row.remote_name),
+                                            " to the card."));
     return;
   }
 
@@ -1330,7 +1334,7 @@ void App::handle_transfer_button() {
   // duplicates (Drive allows same-name siblings). Unlike the synced-row case the footer did
   // offer Upload here, so the refusal explains itself.
   if (remote_backup_exists(selected->id, backup_name)) {
-    set_status(StatusKind::Info, "This backup is already on Google Drive.");
+    set_status(StatusKind::Info, "This backup is already in the Cloud.");
     return;
   }
 
@@ -1345,7 +1349,9 @@ void App::handle_transfer_button() {
   refresh_remote_backups_view();
   // The rebuild may have shifted the rows; keep the selection on the file this action was about.
   focus_backup_row_by_identity(backup_name);
-  set_status(StatusKind::Success, "Uploaded " + display_backup_name(backup_name) + " to Drive.");
+  set_status(StatusKind::Success,
+             ui_.compose_status_with_name("Uploaded ", display_backup_name(backup_name),
+                                          " to the Cloud."));
 }
 
 // Sends one local archive to its save folder on Drive and slots it into the index. Error status
@@ -1415,7 +1421,7 @@ bool App::upload_local_backup(const SaveRecord &save, const std::string &backup_
         archive_path, token);
   });
   if (!upload_response.ok) {
-    set_status(StatusKind::Error, "Drive upload failed.");
+    set_status(StatusKind::Error, "Cloud upload failed.");
     return false;
   }
 
@@ -1446,7 +1452,7 @@ bool App::rename_remote_backup(const SaveRecord &save, const std::string &remote
   if (file_id.empty()) {
     return false;
   }
-  BusyLabelScope busy("Renaming Drive backup");
+  BusyLabelScope busy("Renaming Cloud backup");
   const std::string rename_url =
       std::string(kDriveFilesEndpoint) + "/" + form_url_encode(file_id) + "?fields=id%2Cname";
   const HttpResponse renamed = drive_request([&](const std::string &token) {
@@ -1543,12 +1549,14 @@ void App::begin_label_edit() {
 
   if (!drive_ok) {
     set_status(StatusKind::Error, row.has_local()
-                                      ? "Renamed on card; the Drive rename failed."
-                                      : "Drive rename failed.");
+                                      ? "Renamed on the card, but the Cloud rename failed."
+                                      : "Cloud rename failed.");
     return;
   }
   set_status(StatusKind::Success,
-             label.empty() ? "Label removed." : "Labeled " + display_backup_name(new_name) + ".");
+             label.empty()
+                 ? std::string("Label removed.")
+                 : ui_.compose_status_with_name("Labeled ", display_backup_name(new_name), "."));
 }
 
 void App::cancel_sync_all_confirmation() {
@@ -1872,11 +1880,11 @@ int App::run() {
         handle_google_button();
       }
     }
-    // Select distinguishes tap from hold: a tap transfers the focused backup (upload or
-    // download, whichever side is missing), a one-second hold
-    // starts the tab-wide backup & upload batch. Only a release within the tap window counts as
-    // a tap - once the hold hint has appeared, releasing early is a no-op, so backing out of the
-    // gesture can never fire an accidental upload.
+    // Select distinguishes tap from hold: a tap transfers the focused backup (upload or download,
+    // whichever side is missing), a one-second hold starts the tab-wide backup & upload batch.
+    // Any release before the batch fires counts as the tap, so a slightly-long press still
+    // uploads instead of falling into a dead zone. Backing out of a batch only costs one skippable
+    // single upload, which the dedup makes harmless.
     if ((buttons & SCE_CTRL_SELECT) != 0) {
       ++select_hold_frames;
       if (!select_hold_consumed && select_hold_frames >= kSelectHoldTriggerFrames) {
@@ -1884,8 +1892,7 @@ int App::run() {
         begin_sync_all();
       }
     } else {
-      if (select_hold_frames > 0 && !select_hold_consumed &&
-          select_hold_frames < kSelectHoldHintFrames) {
+      if (select_hold_frames > 0 && !select_hold_consumed) {
         handle_transfer_button();
       }
       select_hold_frames = 0;
@@ -1912,8 +1919,7 @@ int App::run() {
         }
       }
     } else {
-      if (square_hold_frames > 0 && !square_hold_consumed &&
-          square_hold_frames < kSelectHoldHintFrames) {
+      if (square_hold_frames > 0 && !square_hold_consumed) {
         cycle_sort_mode();
       }
       square_hold_frames = 0;
