@@ -523,12 +523,10 @@ std::string Ui::fit_text(unsigned int size, const std::string &text, int max_wid
   return "...";
 }
 
-std::string Ui::compose_status_with_name(const std::string &prefix, const std::string &name,
-                                         const std::string &suffix) const {
-  // Matches the 380px budget draw_status_line renders with.
-  constexpr int kStatusWidth = 380;
+std::string Ui::fit_quoted_name(const std::string &prefix, const std::string &name,
+                                const std::string &suffix, unsigned int size, int max_width) const {
   std::string candidate = prefix + "\"" + name + "\"" + suffix;
-  if (measure_text(kTextSizeSmall, candidate.c_str()) <= kStatusWidth) {
+  if (measure_text(size, candidate.c_str()) <= max_width) {
     return candidate;
   }
   std::string cut = name;
@@ -539,11 +537,23 @@ std::string Ui::compose_status_with_name(const std::string &prefix, const std::s
     }
     cut.erase(last);
     candidate = prefix + "\"" + cut + "...\"" + suffix;
-    if (measure_text(kTextSizeSmall, candidate.c_str()) <= kStatusWidth) {
+    if (measure_text(size, candidate.c_str()) <= max_width) {
       return candidate;
     }
   }
   return prefix + "\"...\"" + suffix;
+}
+
+std::string Ui::compose_status_with_name(const std::string &prefix, const std::string &name,
+                                         const std::string &suffix) const {
+  // Matches the 380px budget draw_status_line renders with.
+  return fit_quoted_name(prefix, name, suffix, kTextSizeSmall, 380);
+}
+
+std::string Ui::compose_modal_label(const std::string &prefix, const std::string &name,
+                                    const std::string &suffix) const {
+  // draw_busy renders the title at kTextSizeNormal inside the 400px box, text inset 24px a side.
+  return fit_quoted_name(prefix, name, suffix, kTextSizeNormal, 400 - 48);
 }
 
 vita2d_texture *Ui::load_icon_texture(const std::string &path) {

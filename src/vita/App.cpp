@@ -53,11 +53,15 @@ constexpr int kRepeatIntervalFrames = 5;
 constexpr unsigned int kRepeatableButtons = SCE_CTRL_LEFT | SCE_CTRL_RIGHT | SCE_CTRL_UP |
                                             SCE_CTRL_DOWN | SCE_CTRL_LTRIGGER |
                                             SCE_CTRL_RTRIGGER;
-// Holding Select runs the tab-wide backup & upload batch; a tap keeps its single-transfer
-// meaning (upload a card-only snapshot, download a Drive-only one).
-// The hint gauge starts a few frames in so a quick tap never flashes it.
+// Select and Square both split tap from hold: a quick tap does the tap action (Select uploads or
+// downloads, Square cycles the sort), a one-second hold does the hold action (Select's batch,
+// Square's label editor). kSelectHoldTapFrames is the tap window - release within it fires the
+// tap - and also when the hold gauge appears. Releasing after the gauge shows (between the tap
+// window and the trigger) is a deliberate back-out and does nothing, so a mistimed hold never
+// fires the tap action by surprise. ~400 ms is forgiving enough for a normal tap while still
+// leaving room to abort a hold.
 constexpr int kSelectHoldTriggerFrames = 60;
-constexpr int kSelectHoldHintFrames = 12;
+constexpr int kSelectHoldTapFrames = 24;
 
 std::vector<SaveRoot> default_save_roots() {
   return {
@@ -574,7 +578,13 @@ void App::perform_scoped_delete(bool delete_local, bool delete_remote) {
       set_status(StatusKind::Error, "Cloud copy not found; refresh and retry.");
       return;
     }
-    BusyLabelScope busy("Deleting Cloud backup");
+    // A both-sides delete does not distinguish which copy is going first (both are), so the modal
+    // just names the backup; a Cloud-only delete says it is the Cloud copy. Name-only truncation
+    // keeps the "Cloud backup" suffix intact for a long labeled name.
+    const std::string busy_label =
+        delete_local ? ui_.compose_modal_label("Deleting ", display, "")
+                     : ui_.compose_modal_label("Deleting ", display, " Cloud backup");
+    BusyLabelScope busy(busy_label.c_str());
     const std::string url = std::string(kDriveFilesEndpoint) + "/" + form_url_encode(file_id);
     const HttpResponse response = drive_request([&](const std::string &token) {
       return HttpClient().delete_request(url, token);
@@ -619,8 +629,7 @@ void App::perform_scoped_delete(bool delete_local, bool delete_remote) {
     return;
   }
   if (delete_local && remote_requested) {
-    set_status(StatusKind::Success,
-               ui_.compose_status_with_name("Deleted ", display, " from Card and Cloud."));
+    set_status(StatusKind::Success, ui_.compose_status_with_name("Deleted ", display, "."));
   } else if (remote_requested) {
     set_status(StatusKind::Success,
                ui_.compose_status_with_name("Deleted ", display, " from the Cloud."));
@@ -719,7 +728,8 @@ void App::handle_restore() {
       restore_confirmation_pending_ = false;
       return;
     }
-    const std::string busy_label = "Downloading " + display_backup_name(backup_name);
+    const std::string busy_label =
+        ui_.compose_modal_label("Downloading ", display_backup_name(backup_name), "");
     BusyLabelScope busy(busy_label.c_str());
     const std::string download_url = std::string(kDriveFilesEndpoint) + "/" +
                                      form_url_encode(file_id) + "?alt=media";
@@ -1309,7 +1319,8 @@ void App::handle_transfer_button() {
       set_status(StatusKind::Error, "Could not create local backup folder.");
       return;
     }
-    const std::string busy_label = "Downloading " + display_backup_name(row.remote_name);
+    const std::string busy_label =
+        ui_.compose_modal_label("Downloading ", display_backup_name(row.remote_name), "");
     BusyLabelScope busy(busy_label.c_str());
     const std::string download_url =
         std::string(kDriveFilesEndpoint) + "/" + form_url_encode(file_id) + "?alt=media";
@@ -1352,7 +1363,8 @@ void App::handle_transfer_button() {
     return;
   }
 
-  const std::string busy_label = "Uploading " + display_backup_name(backup_name);
+  const std::string busy_label =
+      ui_.compose_modal_label("Uploading ", display_backup_name(backup_name), "");
   BusyLabelScope busy(busy_label.c_str());
   if (!upload_local_backup(*selected, backup_name)) {
     return;
@@ -1904,11 +1916,9 @@ int App::run() {
         handle_google_button();
       }
     }
-    // Select distinguishes tap from hold: a tap transfers the focused backup (upload or download,
-    // whichever side is missing), a one-second hold starts the tab-wide backup & upload batch.
-    // Any release before the batch fires counts as the tap, so a slightly-long press still
-    // uploads instead of falling into a dead zone. Backing out of a batch only costs one skippable
-    // single upload, which the dedup makes harmless.
+    // Select: a tap (release within the tap window) transfers the focused backup (upload or
+    // download, whichever side is missing); a one-second hold starts the tab-wide batch. Releasing
+    // after the gauge appears but before the trigger is a back-out and does nothing.
     if ((buttons & SCE_CTRL_SELECT) != 0) {
       ++select_hold_frames;
       if (!select_hold_consumed && select_hold_frames >= kSelectHoldTriggerFrames) {
@@ -1916,7 +1926,8 @@ int App::run() {
         begin_sync_all();
       }
     } else {
-      if (select_hold_frames > 0 && !select_hold_consumed) {
+      if (select_hold_frames > 0 && !select_hold_consumed &&
+          select_hold_frames < kSelectHoldTapFrames) {
         handle_transfer_button();
       }
       select_hold_frames = 0;
@@ -1943,7 +1954,10 @@ int App::run() {
         }
       }
     } else {
-      if (square_hold_frames > 0 && !square_hold_consumed) {
+      // Same tap window as Select: a quick tap sorts; releasing after the gauge appears is a
+      // back-out and must not change the sort.
+      if (square_hold_frames > 0 && !square_hold_consumed &&
+          square_hold_frames < kSelectHoldTapFrames) {
         cycle_sort_mode();
       }
       square_hold_frames = 0;
@@ -1979,19 +1993,20 @@ int App::run() {
             : 0;
     ui_state.status_message = status_message_;
     ui_state.status_kind = status_kind_;
-    // While Select or Square is held past the tap window, the status line explains what is about
-    // to happen and a gauge fills toward the trigger; this overlays the frame only, without
-    // touching the stored status, so an early release restores whatever was there.
-    if (!select_hold_consumed && select_hold_frames >= kSelectHoldHintFrames) {
-      ui_state.hold_gauge_fraction =
-          std::min(1.0f, static_cast<float>(select_hold_frames) /
-                             static_cast<float>(kSelectHoldTriggerFrames));
+    // Once Select or Square is held past the tap window, the status line explains what is about
+    // to happen and a gauge fills from empty (at the tap window) to full (at the trigger); this
+    // overlays the frame only, without touching the stored status, so a release restores it.
+    const auto gauge_fraction = [](int frames) {
+      return std::min(1.0f, std::max(0.0f, static_cast<float>(frames - kSelectHoldTapFrames) /
+                                               static_cast<float>(kSelectHoldTriggerFrames -
+                                                                  kSelectHoldTapFrames)));
+    };
+    if (!select_hold_consumed && select_hold_frames >= kSelectHoldTapFrames) {
+      ui_state.hold_gauge_fraction = gauge_fraction(select_hold_frames);
       ui_state.status_message = sync_all_hold_message(save_category_label(category_));
       ui_state.status_kind = StatusKind::Info;
-    } else if (!square_hold_consumed && square_hold_frames >= kSelectHoldHintFrames) {
-      ui_state.hold_gauge_fraction =
-          std::min(1.0f, static_cast<float>(square_hold_frames) /
-                             static_cast<float>(kSelectHoldTriggerFrames));
+    } else if (!square_hold_consumed && square_hold_frames >= kSelectHoldTapFrames) {
+      ui_state.hold_gauge_fraction = gauge_fraction(square_hold_frames);
       ui_state.status_message = selected_backup_row() != nullptr
                                     ? "Keep holding to edit this backup's label"
                                     : "Pick a backup first to give it a label";
