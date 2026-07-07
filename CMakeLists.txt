@@ -125,5 +125,6 @@ else()
     FILE sce_sys/resources/cacert.pem sce_sys/resources/cacert.pem
     FILE sce_sys/resources/cloud-synced.png sce_sys/resources/cloud-synced.png
     FILE sce_sys/resources/cloud-drive-only.png sce_sys/resources/cloud-drive-only.png
+    FILE sce_sys/resources/cloud-local-only.png sce_sys/resources/cloud-local-only.png
   )
 endif()

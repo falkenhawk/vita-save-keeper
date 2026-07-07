@@ -434,6 +434,7 @@ bool Ui::initialize() {
 
   cloud_synced_tex_ = vita2d_load_PNG_file("app0:sce_sys/resources/cloud-synced.png");
   cloud_drive_only_tex_ = vita2d_load_PNG_file("app0:sce_sys/resources/cloud-drive-only.png");
+  cloud_local_only_tex_ = vita2d_load_PNG_file("app0:sce_sys/resources/cloud-local-only.png");
 
   return any_font || fonts_.fallback != nullptr;
 }
@@ -446,6 +447,10 @@ void Ui::shutdown() {
   if (cloud_drive_only_tex_) {
     vita2d_free_texture(cloud_drive_only_tex_);
     cloud_drive_only_tex_ = nullptr;
+  }
+  if (cloud_local_only_tex_) {
+    vita2d_free_texture(cloud_local_only_tex_);
+    cloud_local_only_tex_ = nullptr;
   }
   for (auto &entry : icon_cache_) {
     if (entry.second) {
@@ -715,17 +720,23 @@ void Ui::draw_backup_panel(const UiState &state) {
       vita2d_draw_rectangle(528, y, 4, 36, kColorAccent);
     }
 
-    // Only the Drive state is marked, right-aligned in one fixed slot; card-only rows carry no
-    // glyph (a card copy is the normal case). Full color even when unselected - the sky/amber
-    // hue is the signal, so dimming it would cost meaning.
+    // Each snapshot marks its state in one fixed right-aligned slot: synced (card + Drive),
+    // Drive-only (amber down arrow), or card-only (slate up arrow - Select uploads it). Full
+    // color even when unselected: the hue is the signal, so dimming it would cost meaning.
     int max_text_width = 386;
     if (!row.new_backup) {
       max_text_width = 340;
+      vita2d_texture *glyph = nullptr;
       if (row.has_remote()) {
-        vita2d_texture *glyph = row.has_local() ? cloud_synced_tex_ : cloud_drive_only_tex_;
-        if (glyph) {
-          vita2d_draw_texture(glyph, 902, y + 9);
-        } else if (row.has_local()) {
+        glyph = row.has_local() ? cloud_synced_tex_ : cloud_drive_only_tex_;
+      } else if (row.has_local()) {
+        glyph = cloud_local_only_tex_;
+      }
+      if (glyph) {
+        vita2d_draw_texture(glyph, 902, y + 9);
+      } else if (row.has_remote()) {
+        // Primitive fallback if a texture failed to load (there is none for local-only).
+        if (row.has_local()) {
           draw_cloud_synced_glyph(902, y + 9);
         } else {
           draw_cloud_drive_only_glyph(902, y + 9);

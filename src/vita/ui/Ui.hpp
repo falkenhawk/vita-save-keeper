@@ -115,6 +115,7 @@ private:
   // fans, which looked jagged on hardware); null falls back to the primitive-drawn shapes.
   vita2d_texture *cloud_synced_tex_{};
   vita2d_texture *cloud_drive_only_tex_{};
+  vita2d_texture *cloud_local_only_tex_{};
   std::string batch_label_;
   std::size_t batch_done_{};
   std::size_t batch_total_{};
