@@ -1,9 +1,13 @@
 #include "core/SaveSlotMetadata.hpp"
 
+#include <picojson.h>
+
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <cerrno>
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <ctime>
 #include <dirent.h>
@@ -215,277 +219,35 @@ bool is_valid_utf8(const std::string &value) {
   return sanitize_utf8(reinterpret_cast<const unsigned char *>(value.data()), value.size()) == value;
 }
 
-void append_json_string(std::string *out, const std::string &value) {
-  static constexpr char kHex[] = "0123456789abcdef";
-  out->push_back('"');
-  for (const unsigned char byte : value) {
-    switch (byte) {
-    case '"':
-      *out += "\\\"";
-      break;
-    case '\\':
-      *out += "\\\\";
-      break;
-    case '\b':
-      *out += "\\b";
-      break;
-    case '\f':
-      *out += "\\f";
-      break;
-    case '\n':
-      *out += "\\n";
-      break;
-    case '\r':
-      *out += "\\r";
-      break;
-    case '\t':
-      *out += "\\t";
-      break;
-    default:
-      if (byte < 0x20) {
-        *out += "\\u00";
-        out->push_back(kHex[byte >> 4]);
-        out->push_back(kHex[byte & 0x0f]);
-      } else {
-        out->push_back(static_cast<char>(byte));
+bool json_depth_within_limit(const std::string &json) {
+  int depth = 0;
+  bool in_string = false;
+  bool escaped = false;
+  for (const char ch : json) {
+    if (in_string) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch == '\\') {
+        escaped = true;
+      } else if (ch == '"') {
+        in_string = false;
+      }
+      continue;
+    }
+    if (ch == '"') {
+      in_string = true;
+    } else if (ch == '{' || ch == '[') {
+      if (++depth > 32) {
+        return false;
+      }
+    } else if (ch == '}' || ch == ']') {
+      if (--depth < 0) {
+        return false;
       }
     }
   }
-  out->push_back('"');
+  return depth == 0 && !in_string;
 }
-
-void append_utf8_codepoint(std::string *out, std::uint32_t codepoint) {
-  if (codepoint < 0x80) {
-    out->push_back(static_cast<char>(codepoint));
-  } else if (codepoint < 0x800) {
-    out->push_back(static_cast<char>(0xc0 | (codepoint >> 6)));
-    out->push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
-  } else if (codepoint < 0x10000) {
-    out->push_back(static_cast<char>(0xe0 | (codepoint >> 12)));
-    out->push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f)));
-    out->push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
-  } else {
-    out->push_back(static_cast<char>(0xf0 | (codepoint >> 18)));
-    out->push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3f)));
-    out->push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f)));
-    out->push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
-  }
-}
-
-class JsonCursor {
-public:
-  explicit JsonCursor(const std::string &json) : json_(json) {}
-
-  bool at_end() {
-    skip_space();
-    return position_ == json_.size();
-  }
-
-  bool consume(char expected) {
-    skip_space();
-    if (position_ >= json_.size() || json_[position_] != expected) {
-      return false;
-    }
-    ++position_;
-    return true;
-  }
-
-  bool parse_string(std::string *value) {
-    skip_space();
-    if (position_ >= json_.size() || json_[position_++] != '"') {
-      return false;
-    }
-    value->clear();
-    while (position_ < json_.size()) {
-      const unsigned char byte = static_cast<unsigned char>(json_[position_++]);
-      if (byte == '"') {
-        return is_valid_utf8(*value);
-      }
-      if (byte < 0x20) {
-        return false;
-      }
-      if (byte != '\\') {
-        value->push_back(static_cast<char>(byte));
-        continue;
-      }
-      if (position_ >= json_.size()) {
-        return false;
-      }
-      const char escape = json_[position_++];
-      switch (escape) {
-      case '"': value->push_back('"'); break;
-      case '\\': value->push_back('\\'); break;
-      case '/': value->push_back('/'); break;
-      case 'b': value->push_back('\b'); break;
-      case 'f': value->push_back('\f'); break;
-      case 'n': value->push_back('\n'); break;
-      case 'r': value->push_back('\r'); break;
-      case 't': value->push_back('\t'); break;
-      case 'u': {
-        std::uint32_t codepoint = 0;
-        if (!parse_hex4(&codepoint)) {
-          return false;
-        }
-        if (codepoint >= 0xd800 && codepoint <= 0xdbff) {
-          if (position_ + 2 > json_.size() || json_[position_] != '\\' ||
-              json_[position_ + 1] != 'u') {
-            return false;
-          }
-          position_ += 2;
-          std::uint32_t low = 0;
-          if (!parse_hex4(&low) || low < 0xdc00 || low > 0xdfff) {
-            return false;
-          }
-          codepoint = 0x10000 + ((codepoint - 0xd800) << 10) + (low - 0xdc00);
-        } else if (codepoint >= 0xdc00 && codepoint <= 0xdfff) {
-          return false;
-        }
-        append_utf8_codepoint(value, codepoint);
-        break;
-      }
-      default:
-        return false;
-      }
-    }
-    return false;
-  }
-
-  bool parse_unsigned(unsigned int *value) {
-    skip_space();
-    if (position_ >= json_.size() || !std::isdigit(static_cast<unsigned char>(json_[position_]))) {
-      return false;
-    }
-    unsigned long long parsed = 0;
-    while (position_ < json_.size() &&
-           std::isdigit(static_cast<unsigned char>(json_[position_]))) {
-      parsed = parsed * 10 + static_cast<unsigned int>(json_[position_] - '0');
-      if (parsed > 0xffffffffULL) {
-        return false;
-      }
-      ++position_;
-    }
-    *value = static_cast<unsigned int>(parsed);
-    return true;
-  }
-
-  bool parse_bool(bool *value) {
-    skip_space();
-    if (json_.compare(position_, 4, "true") == 0) {
-      position_ += 4;
-      *value = true;
-      return true;
-    }
-    if (json_.compare(position_, 5, "false") == 0) {
-      position_ += 5;
-      *value = false;
-      return true;
-    }
-    return false;
-  }
-
-  bool skip_value(int depth = 0) {
-    if (depth > 32) {
-      return false;
-    }
-    skip_space();
-    if (position_ >= json_.size()) {
-      return false;
-    }
-    if (json_[position_] == '"') {
-      std::string ignored;
-      return parse_string(&ignored);
-    }
-    if (json_[position_] == '{') {
-      ++position_;
-      skip_space();
-      if (consume('}')) {
-        return true;
-      }
-      while (true) {
-        std::string key;
-        if (!parse_string(&key) || !consume(':') || !skip_value(depth + 1)) {
-          return false;
-        }
-        if (consume('}')) {
-          return true;
-        }
-        if (!consume(',')) {
-          return false;
-        }
-      }
-    }
-    if (json_[position_] == '[') {
-      ++position_;
-      skip_space();
-      if (consume(']')) {
-        return true;
-      }
-      while (true) {
-        if (!skip_value(depth + 1)) {
-          return false;
-        }
-        if (consume(']')) {
-          return true;
-        }
-        if (!consume(',')) {
-          return false;
-        }
-      }
-    }
-    const std::size_t start = position_;
-    while (position_ < json_.size() &&
-           std::string(" \t\r\n,]}:").find(json_[position_]) == std::string::npos) {
-      ++position_;
-    }
-    if (position_ == start) {
-      return false;
-    }
-    const std::string token = json_.substr(start, position_ - start);
-    if (token == "true" || token == "false" || token == "null") {
-      return true;
-    }
-    std::size_t i = token[0] == '-' ? 1 : 0;
-    bool digit = false;
-    for (; i < token.size(); ++i) {
-      const char ch = token[i];
-      if (std::isdigit(static_cast<unsigned char>(ch))) {
-        digit = true;
-      } else if (ch != '.' && ch != 'e' && ch != 'E' && ch != '+' && ch != '-') {
-        return false;
-      }
-    }
-    return digit;
-  }
-
-private:
-  void skip_space() {
-    while (position_ < json_.size() &&
-           std::isspace(static_cast<unsigned char>(json_[position_]))) {
-      ++position_;
-    }
-  }
-
-  bool parse_hex4(std::uint32_t *value) {
-    if (position_ + 4 > json_.size()) {
-      return false;
-    }
-    std::uint32_t result = 0;
-    for (int i = 0; i < 4; ++i) {
-      const char ch = json_[position_++];
-      result <<= 4;
-      if (ch >= '0' && ch <= '9') result |= static_cast<std::uint32_t>(ch - '0');
-      else if (ch >= 'a' && ch <= 'f') result |= static_cast<std::uint32_t>(ch - 'a' + 10);
-      else if (ch >= 'A' && ch <= 'F') result |= static_cast<std::uint32_t>(ch - 'A' + 10);
-      else return false;
-    }
-    *value = result;
-    return true;
-  }
-
-  const std::string &json_;
-  std::size_t position_{};
-};
-
 bool parse_datetime_string(const std::string &text, SaveDateTime *value) {
   if (text.size() != 19 || text[4] != '-' || text[7] != '-' || text[10] != 'T' ||
       text[13] != ':' || text[16] != ':') {
@@ -505,39 +267,42 @@ bool parse_datetime_string(const std::string &text, SaveDateTime *value) {
   return valid_datetime(*value);
 }
 
-bool parse_slot_json(JsonCursor *cursor, SaveSlotMetadata *slot) {
-  if (!cursor->consume('{')) return false;
-  bool have_id = false, have_time = false, have_title = false, have_subtitle = false,
-       have_details = false;
-  if (cursor->consume('}')) return false;
-  while (true) {
-    std::string key;
-    if (!cursor->parse_string(&key) || !cursor->consume(':')) return false;
-    if (key == "id") {
-      have_id = cursor->parse_unsigned(&slot->id) && slot->id < kMaxSaveSlots;
-      if (!have_id) return false;
-    } else if (key == "modifiedAt") {
-      std::string text;
-      have_time = cursor->parse_string(&text) && parse_datetime_string(text, &slot->modified_at);
-      if (!have_time) return false;
-    } else if (key == "title" || key == "subtitle" || key == "details") {
-      std::string *target = key == "title" ? &slot->title :
-                            key == "subtitle" ? &slot->subtitle : &slot->details;
-      const std::size_t limit = key == "title" ? kTitleSize :
-                                key == "subtitle" ? kSubtitleSize : kDetailsSize;
-      if (!cursor->parse_string(target) || target->size() > limit) return false;
-      if (key == "title") have_title = true;
-      else if (key == "subtitle") have_subtitle = true;
-      else have_details = true;
-    } else if (!cursor->skip_value(1)) {
-      return false;
-    }
-    if (cursor->consume('}')) break;
-    if (!cursor->consume(',')) return false;
-  }
-  return have_id && have_time && have_title && have_subtitle && have_details;
+const picojson::value *json_member(const picojson::object &object, const char *key) {
+  const auto found = object.find(key);
+  return found == object.end() ? nullptr : &found->second;
 }
 
+bool json_string(const picojson::object &object, const char *key, std::size_t max_size,
+                 std::string *out) {
+  const picojson::value *value = json_member(object, key);
+  if (!value || !value->is<std::string>()) {
+    return false;
+  }
+  *out = value->get<std::string>();
+  return out->size() <= max_size && is_valid_utf8(*out);
+}
+
+bool parse_slot_json(const picojson::value &value, SaveSlotMetadata *slot) {
+  if (!value.is<picojson::object>()) {
+    return false;
+  }
+  const picojson::object &object = value.get<picojson::object>();
+  const picojson::value *id = json_member(object, "id");
+  const picojson::value *modified = json_member(object, "modifiedAt");
+  if (!id || !id->is<double>() || !modified || !modified->is<std::string>()) {
+    return false;
+  }
+  const double number = id->get<double>();
+  if (!std::isfinite(number) || number < 0 || number >= kMaxSaveSlots ||
+      std::floor(number) != number) {
+    return false;
+  }
+  slot->id = static_cast<unsigned int>(number);
+  return parse_datetime_string(modified->get<std::string>(), &slot->modified_at) &&
+         json_string(object, "title", kTitleSize, &slot->title) &&
+         json_string(object, "subtitle", kSubtitleSize, &slot->subtitle) &&
+         json_string(object, "details", kDetailsSize, &slot->details);
+}
 const char *source_text(SaveTimeSource source) {
   switch (source) {
   case SaveTimeSource::VitaSlot: return "vita-slot";
@@ -647,109 +412,92 @@ long long save_datetime_to_local_epoch(const SaveDateTime &value) {
 
 std::string serialize_save_metadata_json(const std::string &identity,
                                          const SaveMetadata &metadata) {
-  std::string json = "{\"version\":1,\"archiveIdentity\":";
-  append_json_string(&json, identity);
-  json += ",\"savedAt\":";
-  append_json_string(&json, format_save_datetime(metadata.saved_at));
-  json += ",\"source\":";
-  append_json_string(&json, source_text(metadata.source));
-  json += std::string(",\"approximate\":") + (metadata.approximate ? "true" : "false") +
-          ",\"slots\":[";
-  for (std::size_t i = 0; i < metadata.slots.size(); ++i) {
-    const SaveSlotMetadata &slot = metadata.slots[i];
-    if (i > 0) json += ',';
-    json += "{\"id\":" + std::to_string(slot.id) + ",\"modifiedAt\":";
-    append_json_string(&json, format_save_datetime(slot.modified_at));
-    json += ",\"title\":";
-    append_json_string(&json, slot.title);
-    json += ",\"subtitle\":";
-    append_json_string(&json, slot.subtitle);
-    json += ",\"details\":";
-    append_json_string(&json, slot.details);
-    json += '}';
+  picojson::object root;
+  root["version"] = picojson::value(1.0);
+  root["archiveIdentity"] = picojson::value(identity);
+  root["savedAt"] = picojson::value(format_save_datetime(metadata.saved_at));
+  root["source"] = picojson::value(source_text(metadata.source));
+  root["approximate"] = picojson::value(metadata.approximate);
+
+  picojson::array slots;
+  slots.reserve(metadata.slots.size());
+  for (const SaveSlotMetadata &slot : metadata.slots) {
+    picojson::object item;
+    item["id"] = picojson::value(static_cast<double>(slot.id));
+    item["modifiedAt"] = picojson::value(format_save_datetime(slot.modified_at));
+    item["title"] = picojson::value(slot.title);
+    item["subtitle"] = picojson::value(slot.subtitle);
+    item["details"] = picojson::value(slot.details);
+    slots.emplace_back(std::move(item));
   }
-  json += "]}";
-  return json;
+  root["slots"] = picojson::value(std::move(slots));
+  return picojson::value(std::move(root)).serialize();
 }
 
 SaveMetadataJsonResult parse_save_metadata_json(const std::string &json) {
   SaveMetadataJsonResult result;
-  if (json.size() > kMaxMetadataJsonSize) {
-    result.error = "metadata is too large";
+  if (json.size() > kMaxMetadataJsonSize || !is_valid_utf8(json) ||
+      !json_depth_within_limit(json)) {
+    result.error = "metadata is invalid or too large";
     return result;
   }
-  JsonCursor cursor(json);
-  if (!cursor.consume('{')) {
-    result.error = "metadata object missing";
+
+  picojson::value document;
+  const std::string parse_error = picojson::parse(document, json);
+  if (!parse_error.empty() || !document.is<picojson::object>()) {
+    result.error = parse_error.empty() ? "metadata object missing" : parse_error;
     return result;
   }
-  bool have_version = false, have_identity = false, have_saved_at = false,
-       have_source = false, have_approximate = false, have_slots = false;
-  if (cursor.consume('}')) {
-    result.error = "metadata fields missing";
+  const picojson::object &root = document.get<picojson::object>();
+  const picojson::value *version = json_member(root, "version");
+  const picojson::value *saved_at = json_member(root, "savedAt");
+  const picojson::value *source = json_member(root, "source");
+  const picojson::value *approximate = json_member(root, "approximate");
+  const picojson::value *slots = json_member(root, "slots");
+  if (!version || !version->is<double>() || version->get<double>() != 1.0 ||
+      !json_string(root, "archiveIdentity", 255, &result.archive_identity) ||
+      result.archive_identity.empty() || !saved_at || !saved_at->is<std::string>() ||
+      !source || !source->is<std::string>() || !approximate || !approximate->is<bool>() ||
+      !slots || !slots->is<picojson::array>()) {
+    result.error = "metadata fields missing or unsupported";
     return result;
   }
-  while (true) {
-    std::string key;
-    if (!cursor.parse_string(&key) || !cursor.consume(':')) {
-      result.error = "metadata field invalid";
+  if (!parse_datetime_string(saved_at->get<std::string>(), &result.metadata.saved_at)) {
+    result.error = "savedAt is invalid";
+    return result;
+  }
+
+  const std::string &source_value = source->get<std::string>();
+  if (source_value == "vita-slot") {
+    result.metadata.source = SaveTimeSource::VitaSlot;
+  } else if (source_value == "filesystem") {
+    result.metadata.source = SaveTimeSource::Filesystem;
+  } else if (source_value == "backup-clock") {
+    result.metadata.source = SaveTimeSource::BackupClock;
+  } else {
+    result.error = "metadata source is unsupported";
+    return result;
+  }
+  result.metadata.approximate = approximate->get<bool>();
+
+  const picojson::array &slot_values = slots->get<picojson::array>();
+  if (slot_values.size() > kMaxSaveSlots) {
+    result.error = "too many save slots";
+    return result;
+  }
+  result.metadata.slots.reserve(slot_values.size());
+  for (const picojson::value &slot_value : slot_values) {
+    SaveSlotMetadata slot;
+    if (!parse_slot_json(slot_value, &slot)) {
+      result.error = "save slot is invalid";
       return result;
     }
-    if (key == "version") {
-      unsigned int version = 0;
-      have_version = cursor.parse_unsigned(&version) && version == 1;
-      if (!have_version) {
-        result.error = "unsupported metadata version";
-        return result;
-      }
-    } else if (key == "archiveIdentity") {
-      have_identity = cursor.parse_string(&result.archive_identity) &&
-                      !result.archive_identity.empty() && result.archive_identity.size() <= 255;
-      if (!have_identity) return result;
-    } else if (key == "savedAt") {
-      std::string text;
-      have_saved_at = cursor.parse_string(&text) &&
-                      parse_datetime_string(text, &result.metadata.saved_at);
-      if (!have_saved_at) return result;
-    } else if (key == "source") {
-      std::string source;
-      if (!cursor.parse_string(&source)) return result;
-      if (source == "vita-slot") result.metadata.source = SaveTimeSource::VitaSlot;
-      else if (source == "filesystem") result.metadata.source = SaveTimeSource::Filesystem;
-      else if (source == "backup-clock") result.metadata.source = SaveTimeSource::BackupClock;
-      else return result;
-      have_source = true;
-    } else if (key == "approximate") {
-      have_approximate = cursor.parse_bool(&result.metadata.approximate);
-      if (!have_approximate) return result;
-    } else if (key == "slots") {
-      if (!cursor.consume('[')) return result;
-      if (!cursor.consume(']')) {
-        while (true) {
-          if (result.metadata.slots.size() >= kMaxSaveSlots) return result;
-          SaveSlotMetadata slot;
-          if (!parse_slot_json(&cursor, &slot)) return result;
-          result.metadata.slots.push_back(std::move(slot));
-          if (cursor.consume(']')) break;
-          if (!cursor.consume(',')) return result;
-        }
-      }
-      have_slots = true;
-    } else if (!cursor.skip_value(1)) {
-      return result;
-    }
-    if (cursor.consume('}')) break;
-    if (!cursor.consume(',')) return result;
+    result.metadata.slots.push_back(std::move(slot));
   }
-  if (!cursor.at_end() || !have_version || !have_identity || !have_saved_at || !have_source ||
-      !have_approximate || !have_slots) {
-    result.error = "metadata fields missing";
-    return result;
-  }
+
   result.ok = true;
   return result;
 }
-
 SaveMetadataJsonResult read_save_metadata_json(const std::string &path) {
   SaveMetadataJsonResult result;
   FILE *file = std::fopen(path.c_str(), "rb");
