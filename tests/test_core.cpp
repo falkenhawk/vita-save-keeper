@@ -408,6 +408,106 @@ void test_save_metadata_resolver_uses_recursive_files_then_backup_clock() {
   std::filesystem::remove_all(base);
 }
 
+void test_save_metadata_json_round_trips_and_ignores_unknown_fields() {
+  vsm::SaveMetadata metadata;
+  metadata.saved_at = {2026, 7, 12, 1, 44, 7};
+  metadata.source = vsm::SaveTimeSource::VitaSlot;
+  metadata.approximate = false;
+  metadata.slots.push_back(
+      {2, {2026, 7, 12, 1, 44, 7}, "WipEout \"2048\"", "Profile\\data",
+       "Campaign\nmedals: 91"});
+
+  std::string json =
+      vsm::serialize_save_metadata_json("2026-07-12 01-44-07", metadata);
+  json.insert(json.size() - 1, ",\"future\":{\"nested\":[true,null,3]}");
+  const vsm::SaveMetadataJsonResult parsed = vsm::parse_save_metadata_json(json);
+
+  EXPECT_TRUE(parsed.ok);
+  EXPECT_EQ(parsed.archive_identity, "2026-07-12 01-44-07");
+  EXPECT_TRUE(parsed.metadata.source == vsm::SaveTimeSource::VitaSlot);
+  EXPECT_TRUE(!parsed.metadata.approximate);
+  EXPECT_EQ(vsm::format_save_datetime(parsed.metadata.saved_at), "2026-07-12T01:44:07");
+  EXPECT_EQ(parsed.metadata.slots.size(), static_cast<std::size_t>(1));
+  EXPECT_EQ(parsed.metadata.slots[0].title, "WipEout \"2048\"");
+  EXPECT_EQ(parsed.metadata.slots[0].subtitle, "Profile\\data");
+  EXPECT_EQ(parsed.metadata.slots[0].details, "Campaign\nmedals: 91");
+}
+
+void test_save_metadata_json_rejects_untrusted_bounds_and_invalid_utf8() {
+  const std::string valid_prefix =
+      "{\"version\":1,\"archiveIdentity\":\"id\","
+      "\"savedAt\":\"2026-07-12T01:44:07\",\"source\":\"vita-slot\","
+      "\"approximate\":false,\"slots\":[]";
+  EXPECT_TRUE(!vsm::parse_save_metadata_json(
+                   "{\"version\":2,\"archiveIdentity\":\"id\"}")
+                   .ok);
+  EXPECT_TRUE(!vsm::parse_save_metadata_json(valid_prefix + ",\"future\":" +
+                                              std::string(33, '[') + "0" +
+                                              std::string(33, ']') + "}")
+                   .ok);
+
+  std::string invalid_utf8 = valid_prefix;
+  invalid_utf8.insert(invalid_utf8.size() - 1, ",\"bad\":\"");
+  invalid_utf8.push_back(static_cast<char>(0xc3));
+  invalid_utf8 += "(\"}";
+  EXPECT_TRUE(!vsm::parse_save_metadata_json(invalid_utf8).ok);
+
+  std::string too_many = valid_prefix.substr(0, valid_prefix.size() - 2) + "[";
+  for (int i = 0; i < 257; ++i) {
+    if (i > 0) {
+      too_many += ",";
+    }
+    too_many +=
+        "{\"id\":0,\"modifiedAt\":\"2026-07-12T01:44:07\",\"title\":\"\","
+        "\"subtitle\":\"\",\"details\":\"\"}";
+  }
+  too_many += "]}";
+  EXPECT_TRUE(!vsm::parse_save_metadata_json(too_many).ok);
+
+  const std::string overlong =
+      valid_prefix.substr(0, valid_prefix.size() - 2) +
+      "[{\"id\":0,\"modifiedAt\":\"2026-07-12T01:44:07\",\"title\":\"\","
+      "\"subtitle\":\"\",\"details\":\"" + std::string(513, 'x') + "\"}]}";
+  EXPECT_TRUE(!vsm::parse_save_metadata_json(overlong).ok);
+}
+
+void test_save_metadata_json_file_write_is_atomic_and_bounded() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-metadata-json-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base);
+  const std::filesystem::path path = base / "snapshot.json";
+
+  vsm::SaveMetadata first;
+  first.saved_at = {2026, 7, 12, 1, 44, 7};
+  first.source = vsm::SaveTimeSource::Filesystem;
+  first.approximate = true;
+  std::string error;
+  EXPECT_TRUE(vsm::write_save_metadata_json_atomic(path.string(), "snapshot", first, &error));
+
+  vsm::SaveMetadata second = first;
+  second.saved_at.second = 8;
+  EXPECT_TRUE(vsm::write_save_metadata_json_atomic(path.string(), "snapshot", second, &error));
+  const vsm::SaveMetadataJsonResult loaded = vsm::read_save_metadata_json(path.string());
+  EXPECT_TRUE(loaded.ok);
+  EXPECT_EQ(vsm::format_save_datetime(loaded.metadata.saved_at), "2026-07-12T01:44:08");
+  EXPECT_TRUE(!std::filesystem::exists(path.string() + ".tmp"));
+
+  std::ofstream(base / "large.json", std::ios::binary)
+      << std::string(vsm::kMaxMetadataJsonSize + 1, 'x');
+  EXPECT_TRUE(!vsm::read_save_metadata_json((base / "large.json").string()).ok);
+
+  std::filesystem::remove_all(base);
+}
+
+void test_backup_metadata_names_follow_archive_identity() {
+  EXPECT_EQ(vsm::backup_metadata_name("2026-07-12 01-44-07 before-boss.zip"),
+            "2026-07-12 01-44-07.json");
+  EXPECT_EQ(vsm::backup_metadata_name("2026-07-12 01-44-07~2 test.zip"),
+            "2026-07-12 01-44-07~2.json");
+  EXPECT_EQ(vsm::backup_metadata_name("my-imported-save.zip"), "my-imported-save.json");
+}
+
 void test_save_scanner_lists_direct_child_save_directories() {
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() / "save-keeper-scanner-test";
@@ -1099,6 +1199,10 @@ int main() {
   test_sdslot_parser_skips_bad_records_but_keeps_valid_siblings();
   test_sdslot_parser_rejects_invalid_magic_truncation_and_unterminated_fields();
   test_save_metadata_resolver_uses_recursive_files_then_backup_clock();
+  test_save_metadata_json_round_trips_and_ignores_unknown_fields();
+  test_save_metadata_json_rejects_untrusted_bounds_and_invalid_utf8();
+  test_save_metadata_json_file_write_is_atomic_and_bounded();
+  test_backup_metadata_names_follow_archive_identity();
   test_save_scanner_lists_direct_child_save_directories();
   test_selection_wraps_and_handles_empty_lists();
   test_grid_window_scrolls_only_when_selection_leaves_view();

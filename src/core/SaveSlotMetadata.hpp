@@ -39,6 +39,14 @@ struct SaveMetadata {
 constexpr std::size_t kSdslotHeaderSize = 0x400;
 constexpr std::size_t kSdslotRecordSize = 0x400;
 constexpr std::size_t kMaxSaveSlots = 256;
+constexpr std::size_t kMaxMetadataJsonSize = 512 * 1024;
+
+struct SaveMetadataJsonResult {
+  bool ok{};
+  std::string archive_identity;
+  SaveMetadata metadata;
+  std::string error;
+};
 
 SaveMetadata parse_sdslot_data(const std::vector<unsigned char> &data);
 SaveMetadata resolve_save_metadata(const std::string &save_path,
@@ -46,5 +54,13 @@ SaveMetadata resolve_save_metadata(const std::string &save_path,
 SaveDateTime current_local_datetime();
 std::string format_save_datetime(const SaveDateTime &value);
 long long save_datetime_to_local_epoch(const SaveDateTime &value);
+std::string serialize_save_metadata_json(const std::string &identity,
+                                         const SaveMetadata &metadata);
+SaveMetadataJsonResult parse_save_metadata_json(const std::string &json);
+SaveMetadataJsonResult read_save_metadata_json(const std::string &path);
+bool write_save_metadata_json_atomic(const std::string &path,
+                                     const std::string &identity,
+                                     const SaveMetadata &metadata,
+                                     std::string *error);
 
 } // namespace vsm

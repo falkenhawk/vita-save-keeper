@@ -35,6 +35,8 @@ bool has_backup_timestamp_prefix(const std::string &file_name);
 // What pairs a local file with its Drive copy across renames: the timestamp prefix when the
 // pattern holds, otherwise the whole stripped name (no accidental merging of foreign files).
 std::string backup_identity(const std::string &file_name);
+// Identity-based optional metadata companion name. Labels never affect it.
+std::string backup_metadata_name(const std::string &file_name);
 // Text after the timestamp prefix, "" when none. The " auto" marker reads as the label "auto".
 std::string backup_label(const std::string &file_name);
 // Rebuilds the file name keeping the identity: "<identity> <label>.zip", or "<identity>.zip"

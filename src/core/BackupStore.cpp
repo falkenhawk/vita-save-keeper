@@ -1,5 +1,6 @@
 #include "core/BackupStore.hpp"
 
+#include "core/BackupName.hpp"
 #include "core/PathUtil.hpp"
 
 #include <algorithm>
@@ -82,6 +83,12 @@ std::vector<std::string> scan_local_backup_names(const std::string &backup_root,
 std::string local_backup_archive_path(const std::string &backup_root, const std::string &save_id,
                                       const std::string &backup_name) {
   return join_path(join_path(backup_root, normalized_save_folder(save_id)), backup_name);
+}
+
+std::string local_backup_metadata_path(const std::string &backup_root, const std::string &save_id,
+                                       const std::string &backup_name) {
+  return join_path(join_path(backup_root, normalized_save_folder(save_id)),
+                   backup_metadata_name(backup_name));
 }
 
 } // namespace vsm

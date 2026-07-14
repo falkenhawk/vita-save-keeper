@@ -31,6 +31,45 @@ bool is_digit_at(const std::string &text, std::size_t index) {
   return std::isdigit(static_cast<unsigned char>(text[index])) != 0;
 }
 
+std::size_t canonical_identity_length(const std::string &plain) {
+  if (plain.size() < kBackupTimestampPrefixLength) {
+    return 0;
+  }
+  for (std::size_t i = 0; i < kBackupTimestampPrefixLength; ++i) {
+    const bool separator_position = i == 4 || i == 7 || i == 10 || i == 13 || i == 16;
+    if (separator_position) {
+      const char expected = i == 10 ? ' ' : '-';
+      if (plain[i] != expected) {
+        return 0;
+      }
+    } else if (!is_digit_at(plain, i)) {
+      return 0;
+    }
+  }
+
+  std::size_t length = kBackupTimestampPrefixLength;
+  if (length < plain.size() && plain[length] == '~') {
+    const std::size_t digits_start = ++length;
+    while (length < plain.size() && is_digit_at(plain, length)) {
+      ++length;
+    }
+    if (length == digits_start) {
+      return 0;
+    }
+    unsigned long counter = 0;
+    for (std::size_t i = digits_start; i < length; ++i) {
+      counter = counter * 10 + static_cast<unsigned long>(plain[i] - '0');
+      if (counter > 999999UL) {
+        return 0;
+      }
+    }
+    if (counter < 2) {
+      return 0;
+    }
+  }
+  return length == plain.size() || plain[length] == ' ' ? length : 0;
+}
+
 } // namespace
 
 std::string make_timestamped_backup_name(const BackupTimestamp &timestamp) {
@@ -59,31 +98,19 @@ std::string display_backup_name(const std::string &file_name) {
 
 bool has_backup_timestamp_prefix(const std::string &file_name) {
   const std::string plain = display_backup_name(file_name);
-  if (plain.size() < kBackupTimestampPrefixLength) {
-    return false;
-  }
-  // "YYYY-MM-DD HH-MM-SS": digits everywhere except the fixed separators.
-  for (std::size_t i = 0; i < kBackupTimestampPrefixLength; ++i) {
-    const bool separator_position = i == 4 || i == 7 || i == 10 || i == 13 || i == 16;
-    if (separator_position) {
-      const char expected = i == 10 ? ' ' : '-';
-      if (plain[i] != expected) {
-        return false;
-      }
-    } else if (!is_digit_at(plain, i)) {
-      return false;
-    }
-  }
-  return plain.size() == kBackupTimestampPrefixLength ||
-         plain[kBackupTimestampPrefixLength] == ' ';
+  return canonical_identity_length(plain) != 0;
 }
 
 std::string backup_identity(const std::string &file_name) {
   const std::string plain = display_backup_name(file_name);
   if (has_backup_timestamp_prefix(file_name)) {
-    return plain.substr(0, kBackupTimestampPrefixLength);
+    return plain.substr(0, canonical_identity_length(plain));
   }
   return plain;
+}
+
+std::string backup_metadata_name(const std::string &file_name) {
+  return backup_identity(file_name) + ".json";
 }
 
 std::string backup_label(const std::string &file_name) {
@@ -91,10 +118,11 @@ std::string backup_label(const std::string &file_name) {
     return {};
   }
   const std::string plain = display_backup_name(file_name);
-  if (plain.size() <= kBackupTimestampPrefixLength + 1) {
+  const std::size_t identity_length = canonical_identity_length(plain);
+  if (plain.size() <= identity_length + 1) {
     return {};
   }
-  return plain.substr(kBackupTimestampPrefixLength + 1);
+  return plain.substr(identity_length + 1);
 }
 
 std::string backup_name_with_label(const std::string &file_name, const std::string &label) {
