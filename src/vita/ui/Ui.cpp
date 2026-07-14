@@ -1,6 +1,7 @@
 #include "vita/ui/Ui.hpp"
 
 #include "core/BackupList.hpp"
+#include "core/BackupName.hpp"
 #include "core/GoogleAuth.hpp"
 #include "core/GridWindow.hpp"
 #include "core/TextUtil.hpp"
@@ -523,6 +524,85 @@ std::string Ui::fit_text(unsigned int size, const std::string &text, int max_wid
   return "...";
 }
 
+std::vector<std::string> Ui::wrap_text(unsigned int size, const std::string &text,
+                                       int max_width) const {
+  std::vector<std::string> lines;
+  std::size_t paragraph_start = 0;
+  while (paragraph_start <= text.size()) {
+    const std::size_t newline = text.find('\n', paragraph_start);
+    const std::size_t paragraph_end = newline == std::string::npos ? text.size() : newline;
+    const std::string paragraph = text.substr(paragraph_start, paragraph_end - paragraph_start);
+    std::string line;
+    std::size_t cursor = 0;
+
+    while (cursor < paragraph.size()) {
+      while (cursor < paragraph.size() &&
+             (paragraph[cursor] == ' ' || paragraph[cursor] == '\t')) {
+        ++cursor;
+      }
+      const std::size_t word_start = cursor;
+      while (cursor < paragraph.size() && paragraph[cursor] != ' ' &&
+             paragraph[cursor] != '\t') {
+        ++cursor;
+      }
+      std::string word = paragraph.substr(word_start, cursor - word_start);
+      if (word.empty()) {
+        continue;
+      }
+
+      const std::string candidate = line.empty() ? word : line + " " + word;
+      if (measure_text(size, candidate.c_str()) <= max_width) {
+        line = candidate;
+        continue;
+      }
+      if (!line.empty()) {
+        lines.push_back(line);
+        line.clear();
+      }
+
+      // A single token may be wider than the pane (URLs and CJK commonly have no ASCII spaces).
+      // Split only at UTF-8 codepoint boundaries so every rendered line remains valid text.
+      while (!word.empty() && measure_text(size, word.c_str()) > max_width) {
+        std::string chunk;
+        std::size_t split = 0;
+        while (split < word.size()) {
+          std::size_t next = split + 1;
+          while (next < word.size() &&
+                 (static_cast<unsigned char>(word[next]) & 0xC0) == 0x80) {
+            ++next;
+          }
+          const std::string grown = word.substr(0, next);
+          if (!chunk.empty() && measure_text(size, grown.c_str()) > max_width) {
+            break;
+          }
+          chunk = grown;
+          split = next;
+        }
+        if (split == 0) {
+          split = 1;
+          while (split < word.size() &&
+                 (static_cast<unsigned char>(word[split]) & 0xC0) == 0x80) {
+            ++split;
+          }
+          chunk = word.substr(0, split);
+        }
+        lines.push_back(chunk);
+        word.erase(0, split);
+      }
+      line = word;
+    }
+
+    if (!line.empty() || paragraph.empty()) {
+      lines.push_back(line);
+    }
+    if (newline == std::string::npos) {
+      break;
+    }
+    paragraph_start = newline + 1;
+  }
+  return lines;
+}
+
 std::string Ui::fit_quoted_name(const std::string &prefix, const std::string &name,
                                 const std::string &suffix, unsigned int size, int max_width,
                                 bool quote) const {
@@ -580,13 +660,171 @@ void Ui::draw(const UiState &state) {
   vita2d_start_drawing();
   vita2d_clear_screen();
 
-  draw_header(state);
-  draw_title_grid(state);
-  draw_backup_panel(state);
-  draw_footer(state);
+  if (state.slot_details && state.slot_details->open) {
+    draw_slot_details(*state.slot_details, state.enter_is_cross);
+  } else {
+    draw_header(state);
+    draw_title_grid(state);
+    draw_backup_panel(state);
+    draw_footer(state);
+  }
 
   vita2d_end_drawing();
   vita2d_swap_buffers();
+}
+
+int Ui::details_max_scroll(const SlotDetailsState &state) const {
+  if (state.metadata.slots.empty()) {
+    return 0;
+  }
+  const std::size_t selected =
+      std::min(state.selected_slot, state.metadata.slots.size() - 1);
+  const std::string details = state.metadata.slots[selected].details.empty()
+                                  ? "No description provided."
+                                  : state.metadata.slots[selected].details;
+  constexpr int kVisibleDetailLines = 9;
+  const std::vector<std::string> lines = wrap_text(kTextSizeSmall, details, 590);
+  return std::max(0, static_cast<int>(lines.size()) - kVisibleDetailLines);
+}
+
+void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross) {
+  // This screen owns the full body so the backup list cannot distract from the currently
+  // inspected snapshot. All values were loaded by App before this draw call.
+  vita2d_draw_rectangle(0, 0, 960, 52, kColorHeader);
+  vita2d_draw_line(0, 52, 960, 52, RGBA8(255, 255, 255, 20));
+  draw_text(fonts_, 18, 34, kColorText, kTextSizeTitle, "Slot Details");
+  const std::string context = fit_text(
+      kTextSizeSmall, state.game_title + "  /  " + display_backup_name(state.snapshot_name),
+      680);
+  draw_text(fonts_, 942 - measure_text(kTextSizeSmall, context.c_str()), 32, kColorMuted,
+            kTextSizeSmall, context.c_str());
+
+  vita2d_draw_rectangle(0, 52, 292, 456, kColorPanel);
+  vita2d_draw_rectangle(292, 52, 668, 456, RGBA8(15, 23, 42, 255));
+  vita2d_draw_line(292, 52, 292, 508, RGBA8(255, 255, 255, 20));
+
+  std::string saved_display = "Unknown";
+  if (state.metadata.saved_at.year > 0) {
+    saved_display = format_save_datetime(state.metadata.saved_at);
+    if (saved_display.size() > 10) {
+      saved_display[10] = ' ';
+    }
+  }
+  const char *source = state.metadata.source == SaveTimeSource::VitaSlot
+                           ? "Latest Vita slot"
+                       : state.metadata.source == SaveTimeSource::Filesystem
+                           ? "Estimated from save files"
+                           : "Estimated from backup time";
+  vita2d_draw_rectangle(18, 72, 256, 82, kColorPanelAlt);
+  draw_text(fonts_, 34, 94, kColorMuted, kTextSizeTiny, "SNAPSHOT SAVE TIME");
+  draw_text(fonts_, 34, 120, kColorText, kTextSizeNormal, saved_display.c_str());
+  draw_text(fonts_, 34, 143, state.metadata.approximate ? kColorPendingDot : kColorAccent,
+            kTextSizeTiny, source);
+
+  draw_text(fonts_, 18, 178, kColorMuted, kTextSizeTiny, "SLOTS");
+  if (state.metadata.slots.empty()) {
+    draw_text(fonts_, 34, 212, kColorMuted, kTextSizeSmall, "No Vita slots found");
+  } else {
+    constexpr std::size_t kVisibleSlots = 7;
+    const std::size_t selected =
+        std::min(state.selected_slot, state.metadata.slots.size() - 1);
+    const std::size_t top = selected >= kVisibleSlots ? selected - kVisibleSlots + 1 : 0;
+    const std::size_t count =
+        std::min(kVisibleSlots, state.metadata.slots.size() - top);
+    for (std::size_t i = 0; i < count; ++i) {
+      const SaveSlotMetadata &slot = state.metadata.slots[top + i];
+      const bool focused = top + i == selected;
+      const int y = 190 + static_cast<int>(i) * 42;
+      vita2d_draw_rectangle(18, y, 256, 36,
+                            focused ? kColorAccentSoft : RGBA8(255, 255, 255, 10));
+      if (focused) {
+        vita2d_draw_rectangle(18, y, 4, 36, kColorAccent);
+      }
+      char slot_label[16];
+      std::snprintf(slot_label, sizeof(slot_label), "Slot %03u", slot.id);
+      draw_text(fonts_, 32, y + 24, focused ? kColorText : kColorMuted, kTextSizeSmall,
+                slot_label);
+      std::string slot_date = format_save_datetime(slot.modified_at);
+      if (slot_date.size() >= 16) {
+        slot_date = slot_date.substr(5, 11);
+        slot_date[5] = ' ';
+      }
+      draw_text(fonts_, 260 - measure_text(kTextSizeTiny, slot_date.c_str()), y + 23,
+                focused ? kColorText : kColorIdleDot, kTextSizeTiny, slot_date.c_str());
+    }
+  }
+
+  if (state.metadata.slots.empty()) {
+    const std::string heading = state.unavailable_message.empty()
+                                    ? "No Vita slot metadata"
+                                    : state.unavailable_message;
+    draw_text(fonts_, 324, 116, kColorText, kTextSizeTitle, heading.c_str());
+    std::string explanation = state.warning_message;
+    if (explanation.empty()) {
+      explanation = state.metadata.source == SaveTimeSource::Filesystem
+                        ? "The snapshot time was estimated from files in the save."
+                        : "This snapshot does not contain per-slot details.";
+    }
+    const std::vector<std::string> lines = wrap_text(kTextSizeSmall, explanation, 590);
+    for (std::size_t i = 0; i < lines.size() && i < 6; ++i) {
+      draw_text(fonts_, 324, 156 + static_cast<int>(i) * 24, kColorMuted, kTextSizeSmall,
+                lines[i].c_str());
+    }
+  } else {
+    const std::size_t selected =
+        std::min(state.selected_slot, state.metadata.slots.size() - 1);
+    const SaveSlotMetadata &slot = state.metadata.slots[selected];
+    std::string modified = format_save_datetime(slot.modified_at);
+    if (modified.size() > 10) {
+      modified[10] = ' ';
+    }
+    draw_text(fonts_, 324, 84, kColorMuted, kTextSizeTiny, "SAVED");
+    draw_text(fonts_, 324, 110, kColorAccent, kTextSizeNormal, modified.c_str());
+    draw_text(fonts_, 324, 144, kColorMuted, kTextSizeTiny, "TITLE");
+    draw_text(fonts_, 324, 170, kColorText, kTextSizeNormal,
+              fit_text(kTextSizeNormal, slot.title.empty() ? "Untitled" : slot.title, 596)
+                  .c_str());
+    draw_text(fonts_, 324, 204, kColorMuted, kTextSizeTiny, "SUBTITLE");
+    draw_text(fonts_, 324, 230, kColorText, kTextSizeSmall,
+              fit_text(kTextSizeSmall, slot.subtitle.empty() ? "—" : slot.subtitle, 596)
+                  .c_str());
+    draw_text(fonts_, 324, 264, kColorMuted, kTextSizeTiny, "DETAILS");
+
+    const std::string details =
+        slot.details.empty() ? "No description provided." : slot.details;
+    const std::vector<std::string> lines = wrap_text(kTextSizeSmall, details, 590);
+    constexpr int kVisibleDetailLines = 9;
+    const int max_scroll = std::max(0, static_cast<int>(lines.size()) - kVisibleDetailLines);
+    const int scroll = std::min(std::max(0, state.details_scroll), max_scroll);
+    vita2d_enable_clipping();
+    vita2d_set_clip_rectangle(324, 276, 926, 486);
+    for (int i = 0; i < kVisibleDetailLines && scroll + i < static_cast<int>(lines.size()); ++i) {
+      draw_text(fonts_, 324, 296 + i * 22, kColorText, kTextSizeSmall,
+                lines[static_cast<std::size_t>(scroll + i)].c_str());
+    }
+    vita2d_disable_clipping();
+    if (max_scroll > 0) {
+      constexpr int kTrackY = 280;
+      constexpr int kTrackH = 198;
+      vita2d_draw_rectangle(942, kTrackY, 3, kTrackH, RGBA8(255, 255, 255, 24));
+      const int thumb_h = std::max(24, kTrackH * kVisibleDetailLines /
+                                          static_cast<int>(lines.size()));
+      const int thumb_y = kTrackY + (kTrackH - thumb_h) * scroll / max_scroll;
+      vita2d_draw_rectangle(942, thumb_y, 3, thumb_h, kColorAccent);
+    }
+  }
+
+  vita2d_draw_rectangle(0, 508, 960, 36, RGBA8(3, 7, 18, 230));
+  const ButtonSymbol cancel = enter_is_cross ? ButtonSymbol::Circle : ButtonSymbol::Cross;
+  std::vector<HintSpec> hints;
+  if (state.metadata.slots.size() > 1) {
+    hints.push_back({ButtonSymbol::Label, "Up/Down  Slot"});
+  }
+  if (details_max_scroll(state) > 0) {
+    hints.push_back({ButtonSymbol::Label, "R-stick  Scroll"});
+  }
+  hints.push_back({cancel, "Back"});
+  draw_hints_right_aligned(fonts_, hints.data(), static_cast<int>(hints.size()));
 }
 
 void Ui::draw_header(const UiState &state) {
@@ -979,7 +1217,7 @@ void Ui::draw_footer(const UiState &state) {
   hints.push_back({ButtonSymbol::Square, sort_label.c_str(), nullptr,
                    focused_row ? "(hold: Label)" : nullptr});
   hints.push_back({ButtonSymbol::Triangle, state.google_connected ? "Refresh" : "Google",
-                   nullptr, nullptr});
+                   nullptr, focused_row ? "(hold: Details)" : nullptr});
   hints.push_back({ButtonSymbol::Start, "Delete", nullptr, nullptr});
   // Select moves the focused snapshot across: Upload from a card-only row, Download to the card
   // from a Drive-only row. A synced row has no tap action left, so the slot disappears rather

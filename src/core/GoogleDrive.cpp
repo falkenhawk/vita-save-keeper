@@ -111,6 +111,7 @@ std::string build_drive_upload_metadata_json(const std::string &file_name,
 std::string build_drive_sidecar_upload_metadata_json(const std::string &file_name,
                                                      const std::string &parent_id,
                                                      const std::string &archive_file_id) {
+  // appProperties is private to Save Keeper and survives renaming either Drive file.
   return "{\"name\":\"" + json_escape(file_name) + "\",\"parents\":[\"" +
          json_escape(parent_id) + "\"],\"appProperties\":{\"archiveFileId\":\"" +
          json_escape(archive_file_id) + "\"}}";

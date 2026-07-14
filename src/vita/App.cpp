@@ -237,6 +237,8 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
                                                const std::string &suffix,
                                                bool report_progress) {
   LocalSnapshotResult snapshot;
+  // Resolve once so the ZIP name and JSON describe the same moment, even if creating the archive
+  // takes long enough for the wall clock to tick over.
   const SaveMetadata metadata = resolve_save_metadata(save.path, current_local_datetime());
 
   bool entries_ok = false;
@@ -268,6 +270,8 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
   snapshot.archive_name = plan.archive_name;
   snapshot.reused = plan.reuse_existing;
 
+  // Matching content at this exact save-time identity is already safely backed up. Reuse it;
+  // otherwise create the pre-allocated name exclusively so a collision can never overwrite it.
   if (!plan.reuse_existing) {
     BackupRequest request;
     request.source_path = save.path;
@@ -293,6 +297,8 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
       local_backup_metadata_path(kBackupRoot, save.id, plan.archive_name);
   if (!write_save_metadata_json_atomic(metadata_path, backup_identity(plan.archive_name),
                                        metadata, &metadata_error)) {
+    // The archive remains a valid whole-save backup. Details can be recovered from it later when
+    // sdslot.dat is present, so report a warning rather than deleting the ZIP.
     snapshot.metadata_warning = true;
     snapshot.error = metadata_error;
   }
@@ -1459,6 +1465,8 @@ SaveMetadataJsonResult App::ensure_local_backup_metadata(const SaveRecord &save,
     return metadata;
   }
 
+  // Old Save Keeper versions wrote ZIPs only. Read the one small slot file directly from the
+  // archive; never restore or unpack the save merely to show its details.
   const std::string archive_path =
       local_backup_archive_path(kBackupRoot, save.id, backup_name);
   const ArchiveReadResult embedded =
@@ -1493,9 +1501,11 @@ DriveFile App::find_remote_sidecar(const std::string &folder_id,
     return files.ok && !files.files.empty() ? files.files[0] : DriveFile{};
   };
 
+  // File IDs survive user renames on Drive, making the private property the reliable link.
   DriveFile sidecar = find_first(
       build_drive_find_sidecar_by_archive_query(folder_id, archive_file_id));
   if (sidecar.id.empty()) {
+    // Name lookup supports companions created before the property was introduced.
     sidecar = find_first(
         build_drive_find_child_by_name_query(folder_id, backup_metadata_name(archive_name)));
   }
@@ -1526,6 +1536,8 @@ SaveMetadataJsonResult App::download_remote_backup_metadata(
     return {false, {}, {}, "could not create metadata folder"};
   }
 
+  // Download beside the cache and validate first. A broken response must not replace a healthy
+  // companion left by an earlier run.
   const std::string temporary_path = metadata_path + ".download";
   const std::string url = std::string(kDriveFilesEndpoint) + "/" +
                           form_url_encode(sidecar.id) + "?alt=media";
@@ -1546,6 +1558,82 @@ SaveMetadataJsonResult App::download_remote_backup_metadata(
     return metadata;
   }
   return metadata;
+}
+
+void App::repair_remote_backup_metadata(const SaveRecord &save, const BackupRow &row) {
+  if (!row.has_remote() || !google_connected_ || !network_connected_) {
+    return;
+  }
+  const std::string archive_file_id = remote_file_id_for(row.remote_name);
+  const std::string folder_name = resolved_drive_folder_name(save.id);
+  const auto folder = drive_folder_ids_.find(folder_name);
+  if (archive_file_id.empty() || folder == drive_folder_ids_.end() ||
+      !ensure_google_access_token()) {
+    return;
+  }
+
+  // Do not create duplicate companions if Drive already has either the stable property link or
+  // an older canonical-name companion. Repair is opportunistic; the details screen never waits
+  // for it and never reports it as a ZIP failure.
+  if (!find_remote_sidecar(folder->second, archive_file_id, row.remote_name).id.empty()) {
+    return;
+  }
+  const std::string metadata_path =
+      local_backup_metadata_path(kBackupRoot, save.id, row.primary_name());
+  drive_request([&](const std::string &token) {
+    return HttpClient().post_multipart_file(
+        kDriveUploadEndpoint,
+        build_drive_sidecar_upload_metadata_json(
+            backup_metadata_name(row.remote_name), folder->second, archive_file_id),
+        metadata_path, token);
+  });
+}
+
+void App::open_slot_details() {
+  const SaveRecord *selected = selected_save_record();
+  const BackupRow *selected_row = selected_backup_row();
+  if (!selected || !selected_row) {
+    return;
+  }
+  const SaveRecord save = *selected;
+  const BackupRow row = *selected_row;
+  ui_.draw_busy("Loading slot details", 0, -1);
+
+  slot_details_ = {};
+  slot_details_.game_title = save.display_name;
+  slot_details_.snapshot_name = row.primary_name();
+  SaveMetadataJsonResult metadata;
+
+  if (row.has_local()) {
+    const std::string metadata_path =
+        local_backup_metadata_path(kBackupRoot, save.id, row.local_name);
+    const bool already_cached = read_save_metadata_json(metadata_path).ok;
+    metadata = ensure_local_backup_metadata(save, row.local_name);
+    if (metadata.ok && !already_cached && row.has_remote()) {
+      repair_remote_backup_metadata(save, row);
+    }
+  }
+
+  // A missing local companion may still exist on Drive. Fetch only this one small JSON file when
+  // the user asks for details; the startup index remains ZIP-only and fast.
+  if (!metadata.ok && row.has_remote() && network_connected_ && ensure_google_access_token()) {
+    metadata = download_remote_backup_metadata(save, row.remote_name,
+                                                remote_file_id_for(row.remote_name));
+  }
+
+  if (metadata.ok) {
+    slot_details_.metadata = std::move(metadata.metadata);
+  } else {
+    slot_details_.unavailable_message = "Slot details unavailable";
+    if (!row.has_local()) {
+      slot_details_.warning_message =
+          "Download this backup to inspect its embedded metadata.";
+    } else {
+      slot_details_.warning_message =
+          "This backup has no readable Vita slot metadata.";
+    }
+  }
+  slot_details_.open = true;
 }
 
 // Sends one local archive to its save folder on Drive and slots it into the index. Error status
@@ -1635,6 +1723,7 @@ BackupUploadResult App::upload_local_backup(const SaveRecord &save,
     sync_drive_index();
   }
 
+  // From this point the actual backup is safe on Drive. Any companion problem is only a warning.
   result.ok = true;
   const SaveMetadataJsonResult metadata =
       ensure_local_backup_metadata(save, backup_name);
@@ -2042,6 +2131,8 @@ int App::run() {
   bool select_hold_consumed = false;
   int square_hold_frames = 0;
   bool square_hold_consumed = false;
+  int triangle_hold_frames = 0;
+  bool triangle_hold_consumed = false;
   int network_poll_delay_frames = 0;
   while (running) {
     if (network_poll_delay_frames <= 0) {
@@ -2055,6 +2146,63 @@ int App::run() {
     const unsigned int buttons = buttons_with_left_analog(pad);
     const unsigned int pressed =
         apply_hold_repeat(buttons, previous_buttons, &repeat_held_buttons, &repeat_frames);
+
+    // Details is deliberately isolated from the normal action map. Only slot navigation,
+    // description scrolling, and Back are accepted, so an accidental press cannot restore,
+    // delete, upload, or create a backup behind this screen.
+    if (slot_details_.open) {
+      if ((pressed & cancel_button) != 0) {
+        slot_details_.open = false;
+        previous_buttons = buttons;
+        sceKernelDelayThread(kFrameDelayUs);
+        continue;
+      }
+      if (!slot_details_.metadata.slots.empty()) {
+        if ((pressed & SCE_CTRL_UP) != 0) {
+          slot_details_.selected_slot =
+              slot_details_.selected_slot == 0
+                  ? slot_details_.metadata.slots.size() - 1
+                  : slot_details_.selected_slot - 1;
+          slot_details_.details_scroll = 0;
+        }
+        if ((pressed & SCE_CTRL_DOWN) != 0) {
+          slot_details_.selected_slot =
+              (slot_details_.selected_slot + 1) % slot_details_.metadata.slots.size();
+          slot_details_.details_scroll = 0;
+        }
+      }
+
+      int details_scroll_direction = 0;
+      if (pad.ry < kAnalogCenter - kAnalogDeadZone) {
+        details_scroll_direction = -1;
+      } else if (pad.ry > kAnalogCenter + kAnalogDeadZone) {
+        details_scroll_direction = 1;
+      }
+      bool move_details_scroll = false;
+      if (details_scroll_direction != rstick_direction_prev) {
+        rstick_frames = 0;
+        move_details_scroll = details_scroll_direction != 0;
+      } else if (details_scroll_direction != 0) {
+        ++rstick_frames;
+        move_details_scroll =
+            rstick_frames >= kRepeatInitialDelayFrames &&
+            ((rstick_frames - kRepeatInitialDelayFrames) % kRepeatIntervalFrames) == 0;
+      }
+      rstick_direction_prev = details_scroll_direction;
+      if (move_details_scroll) {
+        slot_details_.details_scroll = std::min(
+            ui_.details_max_scroll(slot_details_),
+            std::max(0, slot_details_.details_scroll + details_scroll_direction));
+      }
+
+      UiState details_ui;
+      details_ui.enter_is_cross = enter_is_cross_;
+      details_ui.slot_details = &slot_details_;
+      ui_.draw(details_ui);
+      previous_buttons = buttons;
+      sceKernelDelayThread(kFrameDelayUs);
+      continue;
+    }
 
     if ((pressed & SCE_CTRL_LEFT) != 0) {
       move_selected_save(-1);
@@ -2105,13 +2253,28 @@ int App::run() {
       cancel_duplicate_backup_confirmation();
       cancel_google_auth();
     }
-    if ((pressed & SCE_CTRL_TRIANGLE) != 0) {
-      if (delete_scope_prompt_pending_) {
+    // Triangle now mirrors the other tap/hold gestures: tap keeps the Google action, while a
+    // deliberate hold opens metadata for the focused snapshot. Delete-scope remains immediate.
+    if ((buttons & SCE_CTRL_TRIANGLE) != 0) {
+      if ((pressed & SCE_CTRL_TRIANGLE) != 0 && delete_scope_prompt_pending_) {
         delete_scope_prompt_pending_ = false;
         perform_scoped_delete(false, true);
-      } else {
+        triangle_hold_consumed = true;
+      } else if (!delete_scope_prompt_pending_) {
+        ++triangle_hold_frames;
+        if (!triangle_hold_consumed &&
+            triangle_hold_frames >= kSelectHoldTriggerFrames) {
+          triangle_hold_consumed = true;
+          open_slot_details();
+        }
+      }
+    } else {
+      if (triangle_hold_frames > 0 && !triangle_hold_consumed &&
+          triangle_hold_frames < kSelectHoldTapFrames) {
         handle_google_button();
       }
+      triangle_hold_frames = 0;
+      triangle_hold_consumed = false;
     }
     // Select: a tap (release within the tap window) transfers the focused backup (upload or
     // download, whichever side is missing); a one-second hold starts the tab-wide batch. Releasing
@@ -2178,6 +2341,7 @@ int App::run() {
     ui_state.sync_all_confirmation_pending = sync_all_confirmation_pending_;
     ui_state.duplicate_backup_confirmation_pending = duplicate_backup_confirmation_pending_;
     ui_state.enter_is_cross = enter_is_cross_;
+    ui_state.slot_details = &slot_details_;
     ui_state.google_connected = google_connected_;
     ui_state.drive_synced = drive_synced_;
     ui_state.network_connected = network_connected_;
@@ -2207,6 +2371,13 @@ int App::run() {
       ui_state.status_message = selected_backup_row() != nullptr
                                     ? "Keep holding to edit this backup's label"
                                     : "Pick a backup first to give it a label";
+      ui_state.status_kind = StatusKind::Info;
+    } else if (!triangle_hold_consumed &&
+               triangle_hold_frames >= kSelectHoldTapFrames) {
+      ui_state.hold_gauge_fraction = gauge_fraction(triangle_hold_frames);
+      ui_state.status_message = selected_backup_row() != nullptr
+                                    ? "Keep holding to view slot details"
+                                    : "Pick a backup first to view slot details";
       ui_state.status_kind = StatusKind::Info;
     }
     ui_.draw(ui_state);

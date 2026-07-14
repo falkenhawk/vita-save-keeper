@@ -4,6 +4,7 @@
 #include "core/SaveCategory.hpp"
 #include "core/SaveRecord.hpp"
 #include "core/SaveScanner.hpp"
+#include "core/SaveSlotMetadata.hpp"
 
 #include <array>
 #include <cstddef>
@@ -18,6 +19,17 @@ struct vita2d_texture;
 namespace vsm::vita {
 
 enum class StatusKind { Info, Success, Error };
+
+struct SlotDetailsState {
+  bool open{};
+  std::string game_title;
+  std::string snapshot_name;
+  SaveMetadata metadata;
+  std::size_t selected_slot{};
+  int details_scroll{};
+  std::string unavailable_message;
+  std::string warning_message;
+};
 
 // Grid width of the save panel; D-pad up/down moves by one full row, so the input handler in App
 // must use the same value the renderer lays tiles out with.
@@ -53,6 +65,7 @@ struct UiState {
   // Which physical button the system treats as "enter"; western consoles use Cross, Japanese
   // consoles use Circle. Primary/cancel symbols in the footer follow it.
   bool enter_is_cross{true};
+  const SlotDetailsState *slot_details{};
   std::string google_verification_url;
   std::string google_user_code;
   int auth_seconds_left{};
@@ -77,6 +90,7 @@ public:
   bool initialize();
   void shutdown();
   void draw(const UiState &state);
+  int details_max_scroll(const SlotDetailsState &state) const;
   // Blocking system-keyboard prompt rendered over a dimmed snapshot of the last frame, following
   // the draw_busy precedent. Waits for pad release before returning so the closing press cannot
   // leak into the main loop as a fresh button edge.
@@ -112,8 +126,11 @@ private:
   void draw_google_auth_panel(const UiState &state);
   void draw_status_line(const UiState &state);
   void draw_footer(const UiState &state);
+  void draw_slot_details(const SlotDetailsState &state, bool enter_is_cross);
   int measure_text(unsigned int size, const char *text) const;
   std::string fit_text(unsigned int size, const std::string &text, int max_width) const;
+  std::vector<std::string> wrap_text(unsigned int size, const std::string &text,
+                                     int max_width) const;
   std::string fit_quoted_name(const std::string &prefix, const std::string &name,
                               const std::string &suffix, unsigned int size, int max_width,
                               bool quote = true) const;

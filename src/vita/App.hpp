@@ -28,6 +28,8 @@ struct RemoteBackup {
 };
 
 struct LocalSnapshotResult {
+  // A snapshot may succeed even when its optional JSON companion does not. Callers use this
+  // warning to tell the user without pretending the ZIP backup failed.
   bool ok{};
   bool reused{};
   bool metadata_warning{};
@@ -36,6 +38,7 @@ struct LocalSnapshotResult {
 };
 
 struct BackupUploadResult {
+  // Drive follows the same rule: the ZIP is the backup; metadata is helpful but optional.
   bool ok{};
   bool metadata_warning{};
 };
@@ -97,14 +100,18 @@ private:
   void handle_transfer_button();
   BackupUploadResult upload_local_backup(const SaveRecord &save,
                                          const std::string &backup_name);
+  // Read a healthy local JSON companion, or rebuild it from sdslot.dat inside an older ZIP.
   SaveMetadataJsonResult ensure_local_backup_metadata(const SaveRecord &save,
                                                        const std::string &backup_name);
+  // Prefer the stable ZIP file-id link. The name lookup keeps early/hand-made companions usable.
   DriveFile find_remote_sidecar(const std::string &folder_id,
                                 const std::string &archive_file_id,
                                 const std::string &archive_name);
   SaveMetadataJsonResult download_remote_backup_metadata(const SaveRecord &save,
                                                           const std::string &archive_name,
                                                           const std::string &archive_file_id);
+  void open_slot_details();
+  void repair_remote_backup_metadata(const SaveRecord &save, const BackupRow &row);
   bool remote_backup_exists(const std::string &save_id, const std::string &backup_name) const;
   void begin_sync_all();
   void run_sync_all();
@@ -158,6 +165,8 @@ private:
   // Set when sign-in completes so the first Drive listing runs one frame later, after the
   // "connected" state has been drawn, instead of freezing the sign-in screen.
   bool pending_remote_refresh_{};
+  // Details is a separate input/rendering mode. Keeping its state here lets Ui stay I/O-free.
+  SlotDetailsState slot_details_;
   bool enter_is_cross_{true};
   // Device-flow state: while a device code is active the main loop polls Google automatically at
   // the server-provided interval, so connecting only takes one Triangle press plus phone approval.
