@@ -10,12 +10,15 @@
 #include "core/PathUtil.hpp"
 #include "core/SaveCategory.hpp"
 #include "core/SaveScanner.hpp"
+#include "core/SaveSlotMetadata.hpp"
 #include "core/Selection.hpp"
 #include "core/SfoParser.hpp"
 #include "core/SyncPlan.hpp"
 #include "core/TextUtil.hpp"
 
+#include <algorithm>
 #include <cstdint>
+#include <ctime>
 #include <cstdlib>
 #include <cstdio>
 #include <filesystem>
@@ -23,6 +26,7 @@
 #include <iostream>
 #include <iterator>
 #include <string>
+#include <utime.h>
 #include <utility>
 #include <vector>
 
@@ -77,6 +81,58 @@ void append_le32(std::vector<unsigned char> *data, std::uint32_t value) {
   data->push_back(static_cast<unsigned char>((value >> 8) & 0xff));
   data->push_back(static_cast<unsigned char>((value >> 16) & 0xff));
   data->push_back(static_cast<unsigned char>((value >> 24) & 0xff));
+}
+
+void write_le16_at(std::vector<unsigned char> *data, std::size_t offset,
+                   std::uint16_t value) {
+  (*data)[offset] = static_cast<unsigned char>(value & 0xff);
+  (*data)[offset + 1] = static_cast<unsigned char>((value >> 8) & 0xff);
+}
+
+void write_le32_at(std::vector<unsigned char> *data, std::size_t offset,
+                   std::uint32_t value) {
+  (*data)[offset] = static_cast<unsigned char>(value & 0xff);
+  (*data)[offset + 1] = static_cast<unsigned char>((value >> 8) & 0xff);
+  (*data)[offset + 2] = static_cast<unsigned char>((value >> 16) & 0xff);
+  (*data)[offset + 3] = static_cast<unsigned char>((value >> 24) & 0xff);
+}
+
+struct SdslotFixtureSlot {
+  unsigned int id{};
+  vsm::SaveDateTime modified_at;
+  std::string title;
+  std::string subtitle;
+  std::string details;
+};
+
+void write_fixed_c_string(std::vector<unsigned char> *data, std::size_t offset,
+                          std::size_t capacity, const std::string &value) {
+  const std::size_t count = std::min(value.size(), capacity - 1);
+  std::copy(value.begin(), value.begin() + static_cast<long>(count), data->begin() + offset);
+  (*data)[offset + count] = 0;
+}
+
+std::vector<unsigned char> build_sdslot(const std::vector<SdslotFixtureSlot> &slots) {
+  constexpr std::size_t kHeaderSize = 0x400;
+  constexpr std::size_t kRecordSize = 0x400;
+  std::vector<unsigned char> data(kHeaderSize + 256 * kRecordSize, 0);
+  write_le32_at(&data, 0, 0x4c534453);
+  write_le32_at(&data, 8, 0x00000100);
+  for (const SdslotFixtureSlot &slot : slots) {
+    EXPECT_TRUE(slot.id < 256);
+    data[0x200 + slot.id] = 1;
+    const std::size_t record = kHeaderSize + slot.id * kRecordSize;
+    write_fixed_c_string(&data, record + 0x04, 0x40, slot.title);
+    write_fixed_c_string(&data, record + 0x44, 0x80, slot.subtitle);
+    write_fixed_c_string(&data, record + 0xc4, 0x200, slot.details);
+    write_le16_at(&data, record + 0x30c, static_cast<std::uint16_t>(slot.modified_at.year));
+    write_le16_at(&data, record + 0x30e, static_cast<std::uint16_t>(slot.modified_at.month));
+    write_le16_at(&data, record + 0x310, static_cast<std::uint16_t>(slot.modified_at.day));
+    write_le16_at(&data, record + 0x312, static_cast<std::uint16_t>(slot.modified_at.hour));
+    write_le16_at(&data, record + 0x314, static_cast<std::uint16_t>(slot.modified_at.minute));
+    write_le16_at(&data, record + 0x316, static_cast<std::uint16_t>(slot.modified_at.second));
+  }
+  return data;
 }
 
 std::size_t align4(std::size_t value) {
@@ -257,6 +313,99 @@ void test_sfo_parser_reads_title_strings() {
   EXPECT_TRUE(metadata.ok);
   EXPECT_EQ(metadata.strings.at("TITLE"), "Persona 4 Golden");
   EXPECT_EQ(vsm::title_from_sfo_metadata(metadata), "Persona 4 Golden");
+}
+
+void test_sdslot_parser_reads_noncontiguous_slots_and_selects_newest() {
+  const std::vector<unsigned char> data = build_sdslot({
+      {2, {2026, 7, 11, 23, 59, 58}, "WipEout 2048", "Profile data",
+       "Campaign gold medals: 90"},
+      {9, {2026, 7, 12, 1, 44, 7}, "WipEout 2048", "Ghost ship data",
+       "Campaign gold medals: 91"},
+  });
+
+  const vsm::SaveMetadata metadata = vsm::parse_sdslot_data(data);
+
+  EXPECT_TRUE(metadata.source == vsm::SaveTimeSource::VitaSlot);
+  EXPECT_TRUE(!metadata.approximate);
+  EXPECT_EQ(metadata.slots.size(), static_cast<std::size_t>(2));
+  EXPECT_EQ(static_cast<std::size_t>(metadata.slots[0].id), static_cast<std::size_t>(2));
+  EXPECT_EQ(static_cast<std::size_t>(metadata.slots[1].id), static_cast<std::size_t>(9));
+  EXPECT_EQ(metadata.slots[1].subtitle, "Ghost ship data");
+  EXPECT_EQ(vsm::format_save_datetime(metadata.saved_at), "2026-07-12T01:44:07");
+}
+
+void test_sdslot_parser_skips_bad_records_but_keeps_valid_siblings() {
+  std::vector<unsigned char> data = build_sdslot({
+      {3, {2024, 2, 29, 12, 0, 0}, "Valid \xE3\x82\xBB\xE3\x83\xBC\xE3\x83\x96", "Slot", "Details"},
+      {7, {2026, 2, 29, 12, 0, 0}, "Invalid date", "Slot", "Details"},
+  });
+  const std::size_t invalid_utf8_record = 0x400 + 3 * 0x400;
+  data[invalid_utf8_record + 0xc4] = 0xc3;
+  data[invalid_utf8_record + 0xc5] = '(';
+  data[invalid_utf8_record + 0xc6] = 0;
+
+  const vsm::SaveMetadata metadata = vsm::parse_sdslot_data(data);
+
+  EXPECT_EQ(metadata.slots.size(), static_cast<std::size_t>(1));
+  EXPECT_EQ(metadata.slots[0].title,
+            "Valid \xE3\x82\xBB\xE3\x83\xBC\xE3\x83\x96");
+  EXPECT_EQ(metadata.slots[0].details, "\xEF\xBF\xBD(");
+  EXPECT_EQ(vsm::format_save_datetime(metadata.saved_at), "2024-02-29T12:00:00");
+}
+
+void test_sdslot_parser_rejects_invalid_magic_truncation_and_unterminated_fields() {
+  std::vector<unsigned char> invalid_magic = build_sdslot({
+      {0, {2026, 1, 1, 0, 0, 0}, "Title", "Subtitle", "Details"},
+  });
+  invalid_magic[0] = 0;
+  EXPECT_TRUE(vsm::parse_sdslot_data(invalid_magic).slots.empty());
+
+  std::vector<unsigned char> truncated = build_sdslot({
+      {5, {2026, 1, 1, 0, 0, 0}, "Title", "Subtitle", "Details"},
+  });
+  truncated.resize(0x400 + 5 * 0x400 + 100);
+  EXPECT_TRUE(vsm::parse_sdslot_data(truncated).slots.empty());
+
+  std::vector<unsigned char> unterminated = build_sdslot({
+      {1, {2026, 1, 1, 0, 0, 0}, "Title", "Subtitle", "Details"},
+  });
+  const std::size_t record = 0x400 + 0x400;
+  std::fill(unterminated.begin() + static_cast<long>(record + 0x04),
+            unterminated.begin() + static_cast<long>(record + 0x44), 'x');
+  EXPECT_TRUE(vsm::parse_sdslot_data(unterminated).slots.empty());
+}
+
+void test_save_metadata_resolver_uses_recursive_files_then_backup_clock() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-metadata-time-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "save" / "nested");
+  std::ofstream(base / "save" / "older.bin", std::ios::binary) << "old";
+  std::ofstream(base / "save" / "nested" / "newest.bin", std::ios::binary) << "new";
+
+  const std::time_t older = 1700000000;
+  const std::time_t newest = 1700001234;
+  const utimbuf older_times{older, older};
+  const utimbuf newest_times{newest, newest};
+  EXPECT_TRUE(utime((base / "save" / "older.bin").string().c_str(), &older_times) == 0);
+  EXPECT_TRUE(utime((base / "save" / "nested" / "newest.bin").string().c_str(),
+                    &newest_times) == 0);
+
+  const vsm::SaveMetadata filesystem =
+      vsm::resolve_save_metadata((base / "save").string(), {2001, 2, 3, 4, 5, 6});
+  EXPECT_TRUE(filesystem.source == vsm::SaveTimeSource::Filesystem);
+  EXPECT_TRUE(filesystem.approximate);
+  EXPECT_EQ(static_cast<std::size_t>(vsm::save_datetime_to_local_epoch(filesystem.saved_at)),
+            static_cast<std::size_t>(newest));
+
+  std::filesystem::create_directories(base / "empty");
+  const vsm::SaveMetadata clock =
+      vsm::resolve_save_metadata((base / "empty").string(), {2001, 2, 3, 4, 5, 6});
+  EXPECT_TRUE(clock.source == vsm::SaveTimeSource::BackupClock);
+  EXPECT_TRUE(clock.approximate);
+  EXPECT_EQ(vsm::format_save_datetime(clock.saved_at), "2001-02-03T04:05:06");
+
+  std::filesystem::remove_all(base);
 }
 
 void test_save_scanner_lists_direct_child_save_directories() {
@@ -946,6 +1095,10 @@ int main() {
   test_backup_label_sanitizer_and_auto_conflict();
   test_path_component_normalization_replaces_unsafe_characters();
   test_sfo_parser_reads_title_strings();
+  test_sdslot_parser_reads_noncontiguous_slots_and_selects_newest();
+  test_sdslot_parser_skips_bad_records_but_keeps_valid_siblings();
+  test_sdslot_parser_rejects_invalid_magic_truncation_and_unterminated_fields();
+  test_save_metadata_resolver_uses_recursive_files_then_backup_clock();
   test_save_scanner_lists_direct_child_save_directories();
   test_selection_wraps_and_handles_empty_lists();
   test_grid_window_scrolls_only_when_selection_leaves_view();

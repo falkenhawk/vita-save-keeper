@@ -1,6 +1,7 @@
 #include "core/SaveScanner.hpp"
 
 #include "core/PathUtil.hpp"
+#include "core/SaveSlotMetadata.hpp"
 #include "core/SfoParser.hpp"
 
 #include <algorithm>
@@ -41,36 +42,6 @@ bool is_regular_file(const std::string &path) {
     return false;
   }
   return S_ISREG(info.st_mode);
-}
-
-long long path_mtime(const std::string &path) {
-  struct stat info {};
-  if (stat(path.c_str(), &info) != 0) {
-    return 0;
-  }
-  return static_cast<long long>(info.st_mtime);
-}
-
-// Some games rewrite save files in place, which does not bump the folder's own timestamp, so the
-// newest direct child is checked as well. One level is enough for a "last played" ordering and
-// keeps the startup scan cheap.
-long long newest_shallow_mtime(const std::string &path) {
-  long long newest = path_mtime(path);
-  DIR *dir = opendir(path.c_str());
-  if (!dir) {
-    return newest;
-  }
-  while (dirent *entry = readdir(dir)) {
-    if (is_dot_entry(entry->d_name)) {
-      continue;
-    }
-    const long long child = path_mtime(join_path(path, entry->d_name));
-    if (child > newest) {
-      newest = child;
-    }
-  }
-  closedir(dir);
-  return newest;
 }
 
 std::string first_existing_file(const std::vector<std::string> &paths) {
@@ -267,7 +238,8 @@ std::vector<SaveRecord> scan_save_roots(const std::vector<SaveRoot> &roots) {
       save.id = child;
       save.display_name = child;
       save.path = join_path(root.path, child);
-      save.saved_at_epoch = newest_shallow_mtime(save.path);
+      const SaveMetadata metadata = resolve_save_metadata(save.path, current_local_datetime());
+      save.saved_at_epoch = save_datetime_to_local_epoch(metadata.saved_at);
       apply_sfo_metadata(&save);
 
       // Only direct children are treated as saves. Descending into save payloads would turn internal
