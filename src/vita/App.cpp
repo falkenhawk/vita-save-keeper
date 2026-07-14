@@ -71,21 +71,8 @@ std::vector<SaveRoot> default_save_roots() {
   };
 }
 
-BackupTimestamp current_backup_timestamp() {
-  const std::time_t now = std::time(nullptr);
-  const std::tm *local = std::localtime(&now);
-  if (!local) {
-    return {1980, 1, 1, 0, 0, 0};
-  }
-
-  return {
-      local->tm_year + 1900,
-      local->tm_mon + 1,
-      local->tm_mday,
-      local->tm_hour,
-      local->tm_min,
-      local->tm_sec,
-  };
+BackupTimestamp backup_timestamp_from(const SaveDateTime &value) {
+  return {value.year, value.month, value.day, value.hour, value.minute, value.second};
 }
 
 long long current_epoch_seconds() {
@@ -224,11 +211,6 @@ std::string matching_backup_name(const std::vector<ArchiveEntryInfo> &entries,
   return {};
 }
 
-std::string archive_file_name(const std::string &archive_path) {
-  const std::size_t slash = archive_path.find_last_of('/');
-  return slash == std::string::npos ? archive_path : archive_path.substr(slash + 1);
-}
-
 std::string drive_folder_name_for(const std::string &save_id) {
   std::string folder_name = normalize_path_component(save_id);
   if (folder_name.empty()) {
@@ -247,6 +229,73 @@ void App::set_status(StatusKind kind, std::string message) {
 void App::clear_status() {
   status_kind_ = StatusKind::Info;
   status_message_.clear();
+}
+
+LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
+                                               const std::string &suffix,
+                                               bool report_progress) {
+  LocalSnapshotResult snapshot;
+  const SaveMetadata metadata = resolve_save_metadata(save.path, current_local_datetime());
+
+  bool entries_ok = false;
+  const std::vector<ArchiveEntryInfo> entries = compute_folder_entries(save.path, &entries_ok);
+  if (!entries_ok) {
+    snapshot.error = "could not read the save folder";
+    return snapshot;
+  }
+  if (entries.empty()) {
+    snapshot.error = "save folder is empty";
+    return snapshot;
+  }
+
+  const std::vector<std::string> local_names = scan_local_backup_names(kBackupRoot, save.id);
+  std::vector<std::string> remote_names;
+  const std::string folder_name = resolved_drive_folder_name(save.id);
+  const auto indexed = drive_index_.find(folder_name);
+  if (indexed != drive_index_.end()) {
+    remote_names.reserve(indexed->second.size());
+    for (const RemoteBackup &remote : indexed->second) {
+      remote_names.push_back(remote.name);
+    }
+  }
+
+  const BackupTimestamp timestamp = backup_timestamp_from(metadata.saved_at);
+  const BackupCreationPlan plan =
+      plan_backup_creation(timestamp, suffix, entries, kBackupRoot, save.id, local_names,
+                           remote_names);
+  snapshot.archive_name = plan.archive_name;
+  snapshot.reused = plan.reuse_existing;
+
+  if (!plan.reuse_existing) {
+    BackupRequest request;
+    request.source_path = save.path;
+    request.backup_root = kBackupRoot;
+    request.save_id = save.id;
+    request.timestamp = timestamp;
+    request.archive_name = plan.archive_name;
+    if (report_progress) {
+      request.progress = [this](std::uint64_t done, std::uint64_t total) {
+        ui_.draw_busy("Creating backup", static_cast<long long>(done),
+                      static_cast<long long>(total));
+      };
+    }
+    const BackupResult backup = create_backup_archive(request);
+    if (!backup.ok) {
+      snapshot.error = backup.error;
+      return snapshot;
+    }
+  }
+
+  std::string metadata_error;
+  const std::string metadata_path =
+      local_backup_metadata_path(kBackupRoot, save.id, plan.archive_name);
+  if (!write_save_metadata_json_atomic(metadata_path, backup_identity(plan.archive_name),
+                                       metadata, &metadata_error)) {
+    snapshot.metadata_warning = true;
+    snapshot.error = metadata_error;
+  }
+  snapshot.ok = true;
+  return snapshot;
 }
 
 void App::load_settings() {
@@ -479,23 +528,21 @@ void App::create_new_backup() {
 
   // One busy frame before the blocking ZIP work, so the screen does not look frozen.
   ui_.draw_busy("Creating backup", 0, -1);
-  BackupRequest request;
-  request.source_path = save.path;
-  request.backup_root = kBackupRoot;
-  request.save_id = save.id;
-  request.timestamp = current_backup_timestamp();
-  // Animate the bar as the archive is written - meaningful for a large save. Only the single
-  // backup path sets this; the batch leaves it unset so its per-file percent stays upload-only.
-  request.progress = [this](std::uint64_t done, std::uint64_t total) {
-    ui_.draw_busy("Creating backup", static_cast<long long>(done),
-                  static_cast<long long>(total));
-  };
-  const BackupResult result = create_backup_archive(request);
+  const LocalSnapshotResult result = create_local_snapshot(save, "", true);
   if (result.ok) {
     refresh_local_backups();
-    // Focus the fresh snapshot so an immediate Select-to-upload needs no scrolling.
-    const std::string file_name = archive_file_name(result.archive_path);
+    // Focus the fresh (or safely reused) snapshot so an immediate Select-to-upload needs no
+    // scrolling.
+    const std::string &file_name = result.archive_name;
     focus_backup_row_by_identity(file_name);
+    if (result.metadata_warning) {
+      set_status(StatusKind::Info, "Backup created, but slot details could not be saved.");
+      return;
+    }
+    if (result.reused) {
+      set_status(StatusKind::Info, "Existing save-time snapshot selected.");
+      return;
+    }
     // With Drive available, nudge the natural next step. The fresh snapshot is focused, so the
     // timestamp name would only repeat what the highlighted row already shows - and without it
     // the nudge always fits the status line untruncated.
@@ -618,6 +665,14 @@ void App::perform_scoped_delete(bool delete_local, bool delete_remote) {
     local_failed = std::remove(archive_path.c_str()) != 0;
     refresh_local_backups();
   }
+  const bool local_remains = row.has_local() && (!delete_local || local_failed);
+  const bool remote_remains = row.has_remote() && !remote_requested;
+  if (!local_remains && !remote_remains) {
+    const std::string metadata_name = row.has_local() ? row.local_name : row.remote_name;
+    const std::string metadata_path =
+        local_backup_metadata_path(kBackupRoot, selected->id, metadata_name);
+    std::remove(metadata_path.c_str());
+  }
   if (selected_backup_ > backup_count()) {
     selected_backup_ = backup_count();
   }
@@ -692,13 +747,7 @@ void App::handle_restore() {
         !matching_backup_name(current_entries, save.id, local_backups_).empty();
     if (!already_backed_up) {
       ui_.draw_busy("Backing up current save", 0, -1);
-      BackupRequest auto_request;
-      auto_request.source_path = save.path;
-      auto_request.backup_root = kBackupRoot;
-      auto_request.save_id = save.id;
-      auto_request.timestamp = current_backup_timestamp();
-      auto_request.name_suffix = " auto";
-      const BackupResult auto_result = create_backup_archive(auto_request);
+      const LocalSnapshotResult auto_result = create_local_snapshot(save, " auto", false);
       if (!auto_result.ok) {
         // Losing the current save is the one outcome this feature exists to prevent; a restore
         // does not proceed over a failed safety snapshot.
@@ -1691,19 +1740,16 @@ void App::run_sync_all() {
     if (plan.create_backup) {
       ui_.set_batch_progress("Backing up", save.display_name, i, total, enter_is_cross_);
       ui_.draw_busy("", 0, -1);
-      const BackupResult result = create_backup_archive({
-          save.path,
-          kBackupRoot,
-          save.id,
-          current_backup_timestamp(),
-      });
+      const LocalSnapshotResult result = create_local_snapshot(save, "", false);
       if (!result.ok) {
         // The planned upload was this archive; there is nothing to send for this game.
         ++run.failed;
         continue;
       }
-      ++run.backed_up;
-      upload_name = archive_file_name(result.archive_path);
+      if (!result.reused) {
+        ++run.backed_up;
+      }
+      upload_name = result.archive_name;
     }
 
     if (!plan.will_upload || upload_name.empty()) {

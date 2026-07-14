@@ -6,6 +6,7 @@
 #include "core/SaveCategory.hpp"
 #include "core/SaveRecord.hpp"
 #include "core/SaveScanner.hpp"
+#include "core/SaveSlotMetadata.hpp"
 #include "core/SyncPlan.hpp"
 #include "vita/net/HttpClient.hpp"
 #include "vita/ui/Ui.hpp"
@@ -23,6 +24,14 @@ namespace vsm::vita {
 struct RemoteBackup {
   std::string name;
   std::string file_id;
+};
+
+struct LocalSnapshotResult {
+  bool ok{};
+  bool reused{};
+  bool metadata_warning{};
+  std::string archive_name;
+  std::string error;
 };
 
 class App {
@@ -46,6 +55,8 @@ private:
   void cancel_delete_confirmation();
   void handle_action_button();
   void create_new_backup();
+  LocalSnapshotResult create_local_snapshot(const SaveRecord &save, const std::string &suffix,
+                                            bool report_progress);
   void handle_restore();
   void handle_delete_button();
   void load_google_token_cache();
