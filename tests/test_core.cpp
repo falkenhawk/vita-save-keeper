@@ -276,6 +276,25 @@ void test_backup_name_identity_label_and_rename_helpers() {
             "2026-05-21 16-14-09.zip");
 }
 
+void test_backup_counter_identity_and_allocation() {
+  const vsm::BackupTimestamp timestamp{2026, 7, 12, 1, 44, 7};
+  EXPECT_TRUE(vsm::has_backup_timestamp_prefix("2026-07-12 01-44-07~2.zip"));
+  EXPECT_TRUE(vsm::has_backup_timestamp_prefix("2026-07-12 01-44-07~17 boss.zip"));
+  EXPECT_TRUE(!vsm::has_backup_timestamp_prefix("2026-07-12 01-44-07~.zip"));
+  EXPECT_TRUE(!vsm::has_backup_timestamp_prefix("2026-07-12 01-44-07~1.zip"));
+  EXPECT_TRUE(!vsm::has_backup_timestamp_prefix("2026-07-12 01-44-07~2boss.zip"));
+  EXPECT_EQ(vsm::backup_identity("2026-07-12 01-44-07~17 boss.zip"),
+            "2026-07-12 01-44-07~17");
+  EXPECT_EQ(vsm::backup_label("2026-07-12 01-44-07~17 boss.zip"), "boss");
+  EXPECT_EQ(vsm::make_timestamped_backup_name(timestamp, 2), "2026-07-12 01-44-07~2.zip");
+  EXPECT_EQ(vsm::allocate_backup_name(
+                timestamp, "", {"2026-07-12 01-44-07.zip"},
+                {"2026-07-12 01-44-07~2 cloud.zip"}),
+            "2026-07-12 01-44-07~3.zip");
+  EXPECT_EQ(vsm::allocate_backup_name(timestamp, " auto", {}, {}),
+            "2026-07-12 01-44-07 auto.zip");
+}
+
 void test_backup_label_sanitizer_and_auto_conflict() {
   EXPECT_EQ(vsm::sanitize_backup_label("  before   the/boss?  "), "before the_boss_");
   EXPECT_EQ(vsm::sanitize_backup_label("tab\tand\nnewline"), "tabandnewline");
@@ -1192,6 +1211,7 @@ int main() {
   test_backup_rows_merge_local_and_remote_by_timestamp_identity();
   test_backup_rows_do_not_merge_foreign_names_sharing_a_prefix();
   test_backup_name_identity_label_and_rename_helpers();
+  test_backup_counter_identity_and_allocation();
   test_backup_label_sanitizer_and_auto_conflict();
   test_path_component_normalization_replaces_unsafe_characters();
   test_sfo_parser_reads_title_strings();

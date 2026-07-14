@@ -23,7 +23,9 @@ constexpr std::size_t kBackupTimestampPrefixLength = 19;
 // so a multi-byte (CJK) label is never silently cut below what the keyboard let the user enter.
 constexpr std::size_t kMaxBackupLabelLength = 60;
 
-std::string make_timestamped_backup_name(const BackupTimestamp &timestamp);
+// counter is 0 for the bare identity or >=2 for a same-second sibling.
+std::string make_timestamped_backup_name(const BackupTimestamp &timestamp,
+                                         unsigned int counter = 0);
 // UI form of a backup file name: the ".zip" extension is an on-disk detail every backup shares,
 // so lists and status messages drop it.
 std::string display_backup_name(const std::string &file_name);

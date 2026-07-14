@@ -91,4 +91,27 @@ std::string local_backup_metadata_path(const std::string &backup_root, const std
                    backup_metadata_name(backup_name));
 }
 
+std::string allocate_backup_name(const BackupTimestamp &timestamp, const std::string &suffix,
+                                 const std::vector<std::string> &local_names,
+                                 const std::vector<std::string> &remote_names) {
+  for (unsigned int counter = 0;; counter = counter == 0 ? 2 : counter + 1) {
+    std::string candidate = make_timestamped_backup_name(timestamp, counter);
+    if (!suffix.empty()) {
+      candidate.insert(candidate.size() - 4, suffix);
+    }
+    const std::string identity = backup_identity(candidate);
+    const auto occupied = [&](const std::vector<std::string> &names) {
+      for (const std::string &name : names) {
+        if (backup_identity(name) == identity) {
+          return true;
+        }
+      }
+      return false;
+    };
+    if (!occupied(local_names) && !occupied(remote_names)) {
+      return candidate;
+    }
+  }
+}
+
 } // namespace vsm

@@ -72,7 +72,8 @@ std::size_t canonical_identity_length(const std::string &plain) {
 
 } // namespace
 
-std::string make_timestamped_backup_name(const BackupTimestamp &timestamp) {
+std::string make_timestamped_backup_name(const BackupTimestamp &timestamp,
+                                         unsigned int counter) {
   // Use JKSV-style snapshot names rather than a single mutable "latest" file. The timestamp is
   // readable on-device, sorts chronologically when zero-padded, and lets Drive hold multiple
   // restore points without inventing a conflict resolver. Seconds are included so several
@@ -81,7 +82,11 @@ std::string make_timestamped_backup_name(const BackupTimestamp &timestamp) {
   out << std::setfill('0') << std::setw(4) << timestamp.year << "-" << std::setw(2)
       << timestamp.month << "-" << std::setw(2) << timestamp.day << " " << std::setw(2)
       << timestamp.hour << "-" << std::setw(2) << timestamp.minute << "-" << std::setw(2)
-      << timestamp.second << ".zip";
+      << timestamp.second;
+  if (counter >= 2) {
+    out << "~" << counter;
+  }
+  out << ".zip";
   return out.str();
 }
 
