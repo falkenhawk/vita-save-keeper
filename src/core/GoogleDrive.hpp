@@ -31,8 +31,15 @@ std::string build_drive_folder_metadata_json(const std::string &folder_name,
                                              const std::string &parent_id);
 std::string build_drive_upload_metadata_json(const std::string &file_name,
                                              const std::string &parent_id);
+std::string build_drive_sidecar_upload_metadata_json(const std::string &file_name,
+                                                     const std::string &parent_id,
+                                                     const std::string &archive_file_id);
 std::string build_drive_find_folder_query(const std::string &folder_name,
                                           const std::string &parent_id);
+std::string build_drive_find_sidecar_by_archive_query(const std::string &parent_id,
+                                                       const std::string &archive_file_id);
+std::string build_drive_find_child_by_name_query(const std::string &parent_id,
+                                                  const std::string &name);
 std::string build_drive_list_children_query(const std::string &parent_id);
 // Whole-account listings used by the startup index sync: every folder and every non-folder file
 // the app can see (drive.file scope limits both to files this app created), with parents included

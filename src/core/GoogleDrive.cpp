@@ -108,6 +108,14 @@ std::string build_drive_upload_metadata_json(const std::string &file_name,
          json_escape(parent_id) + "\"]}";
 }
 
+std::string build_drive_sidecar_upload_metadata_json(const std::string &file_name,
+                                                     const std::string &parent_id,
+                                                     const std::string &archive_file_id) {
+  return "{\"name\":\"" + json_escape(file_name) + "\",\"parents\":[\"" +
+         json_escape(parent_id) + "\"],\"appProperties\":{\"archiveFileId\":\"" +
+         json_escape(archive_file_id) + "\"}}";
+}
+
 std::string build_drive_find_folder_query(const std::string &folder_name,
                                           const std::string &parent_id) {
   // Drive's query language has its own string escaping, then the whole q value is URL-encoded for
@@ -116,6 +124,23 @@ std::string build_drive_find_folder_query(const std::string &folder_name,
   const std::string query = "mimeType='application/vnd.google-apps.folder' and name='" +
                             drive_query_escape(folder_name) + "' and '" +
                             drive_query_escape(parent_id) + "' in parents and trashed=false";
+  return "q=" + form_url_encode(query) + "&fields=files%28id%2Cname%29";
+}
+
+std::string build_drive_find_sidecar_by_archive_query(const std::string &parent_id,
+                                                       const std::string &archive_file_id) {
+  const std::string query = "'" + drive_query_escape(parent_id) +
+                            "' in parents and appProperties has { key='archiveFileId' and "
+                            "value='" +
+                            drive_query_escape(archive_file_id) + "' } and trashed=false";
+  return "q=" + form_url_encode(query) + "&fields=files%28id%2Cname%29";
+}
+
+std::string build_drive_find_child_by_name_query(const std::string &parent_id,
+                                                  const std::string &name) {
+  const std::string query = "name='" + drive_query_escape(name) + "' and '" +
+                            drive_query_escape(parent_id) +
+                            "' in parents and trashed=false";
   return "q=" + form_url_encode(query) + "&fields=files%28id%2Cname%29";
 }
 
@@ -146,10 +171,11 @@ std::string build_drive_list_all_folders_query(const std::string &page_token) {
 }
 
 std::string build_drive_list_all_files_query(const std::string &page_token) {
-  // Everything that is not a folder: backups are matched by their .zip name afterwards, which is
-  // more reliable than trusting the mime type Drive assigned at upload time.
+  // Narrow the server response to ZIP-like names, then retain the strict client-side suffix
+  // check. Drive has no ends-with query operator, so "contains" is only a bandwidth filter.
   return build_paged_listing_query(
-      "mimeType!='application/vnd.google-apps.folder' and trashed=false", page_token);
+      "mimeType!='application/vnd.google-apps.folder' and name contains '.zip' and trashed=false",
+      page_token);
 }
 
 namespace {

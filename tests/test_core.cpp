@@ -944,6 +944,25 @@ void test_google_drive_parses_first_file_id() {
 void test_google_drive_builds_upload_metadata_json() {
   EXPECT_EQ(vsm::build_drive_upload_metadata_json("2026-05-21 16-14.zip", "folder-id"),
             "{\"name\":\"2026-05-21 16-14.zip\",\"parents\":[\"folder-id\"]}");
+  EXPECT_EQ(vsm::build_drive_sidecar_upload_metadata_json(
+                "2026-07-12 01-44-07.json", "folder-id", "zip-id"),
+            "{\"name\":\"2026-07-12 01-44-07.json\",\"parents\":[\"folder-id\"],"
+            "\"appProperties\":{\"archiveFileId\":\"zip-id\"}}");
+}
+
+void test_google_drive_builds_sidecar_lookup_queries() {
+  EXPECT_EQ(vsm::build_drive_find_sidecar_by_archive_query("folder-id", "zip-id"),
+            "q=%27folder-id%27%20in%20parents%20and%20appProperties%20has%20%7B%20key%3D%27"
+            "archiveFileId%27%20and%20value%3D%27zip-id%27%20%7D%20and%20trashed%3Dfalse&"
+            "fields=files%28id%2Cname%29");
+  EXPECT_EQ(vsm::build_drive_find_child_by_name_query("folder-id", "snapshot.json"),
+            "q=name%3D%27snapshot.json%27%20and%20%27folder-id%27%20in%20parents%20and%20"
+            "trashed%3Dfalse&fields=files%28id%2Cname%29");
+
+  const std::string escaped =
+      vsm::build_drive_find_child_by_name_query("fold'er\\id", "boss's\\save.json");
+  EXPECT_TRUE(escaped.find("fold%5C%27er%5C%5Cid") != std::string::npos);
+  EXPECT_TRUE(escaped.find("boss%5C%27s%5C%5Csave.json") != std::string::npos);
 }
 
 void test_google_drive_builds_list_children_query() {
@@ -957,7 +976,8 @@ void test_google_drive_builds_paged_index_queries() {
             "q=mimeType%3D%27application%2Fvnd.google-apps.folder%27%20and%20trashed%3Dfalse"
             "&fields=nextPageToken%2Cfiles%28id%2Cname%2Cparents%29&pageSize=1000");
   EXPECT_EQ(vsm::build_drive_list_all_files_query("token-1"),
-            "q=mimeType%21%3D%27application%2Fvnd.google-apps.folder%27%20and%20trashed%3Dfalse"
+            "q=mimeType%21%3D%27application%2Fvnd.google-apps.folder%27%20and%20name%20contains"
+            "%20%27.zip%27%20and%20trashed%3Dfalse"
             "&fields=nextPageToken%2Cfiles%28id%2Cname%2Cparents%29&pageSize=1000"
             "&pageToken=token-1");
 }
@@ -1351,6 +1371,7 @@ int main() {
   test_google_drive_builds_find_folder_query();
   test_google_drive_parses_first_file_id();
   test_google_drive_builds_upload_metadata_json();
+  test_google_drive_builds_sidecar_lookup_queries();
   test_google_drive_builds_list_children_query();
   test_google_drive_builds_paged_index_queries();
   test_google_drive_parses_parents_and_page_token();

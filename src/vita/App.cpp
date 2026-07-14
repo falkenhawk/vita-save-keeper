@@ -62,6 +62,8 @@ constexpr unsigned int kRepeatableButtons = SCE_CTRL_LEFT | SCE_CTRL_RIGHT | SCE
 // leaving room to abort a hold.
 constexpr int kSelectHoldTriggerFrames = 60;
 constexpr int kSelectHoldTapFrames = 24;
+constexpr std::size_t kMaxSdslotFileSize =
+    kSdslotHeaderSize + kMaxSaveSlots * kSdslotRecordSize;
 
 std::vector<SaveRoot> default_save_roots() {
   return {
@@ -625,6 +627,9 @@ void App::perform_scoped_delete(bool delete_local, bool delete_remote) {
       set_status(StatusKind::Error, "Cloud copy not found; refresh and retry.");
       return;
     }
+    const std::string folder_name = resolved_drive_folder_name(selected->id);
+    const auto folder = drive_folder_ids_.find(folder_name);
+    const std::string folder_id = folder == drive_folder_ids_.end() ? "" : folder->second;
     // A both-sides delete does not distinguish which copy is going first (both are), so the modal
     // just names the backup; a Cloud-only delete says it is the Cloud copy. Name-only truncation
     // keeps the "Cloud backup" suffix intact for a long labeled name.
@@ -640,7 +645,6 @@ void App::perform_scoped_delete(bool delete_local, bool delete_remote) {
       set_status(StatusKind::Error, "Cloud delete failed.");
       return;
     }
-    const std::string folder_name = resolved_drive_folder_name(selected->id);
     const auto indexed = drive_index_.find(folder_name);
     if (indexed != drive_index_.end()) {
       std::vector<RemoteBackup> &list = indexed->second;
@@ -652,8 +656,22 @@ void App::perform_scoped_delete(bool delete_local, bool delete_remote) {
       }
       if (list.empty()) {
         drive_index_.erase(indexed);
-        remove_drive_folder_if_empty(folder_name);
       }
+    }
+    // The ZIP is authoritative: once its delete succeeds, companion lookup/deletion is
+    // best-effort and cannot turn the operation into a failure.
+    if (!folder_id.empty()) {
+      const DriveFile sidecar = find_remote_sidecar(folder_id, file_id, row.remote_name);
+      if (!sidecar.id.empty()) {
+        const std::string sidecar_url =
+            std::string(kDriveFilesEndpoint) + "/" + form_url_encode(sidecar.id);
+        drive_request([&](const std::string &token) {
+          return HttpClient().delete_request(sidecar_url, token);
+        });
+      }
+    }
+    if (drive_index_.find(folder_name) == drive_index_.end()) {
+      remove_drive_folder_if_empty(folder_name);
     }
     refresh_remote_backups_view();
   }
@@ -1415,27 +1433,133 @@ void App::handle_transfer_button() {
   const std::string busy_label =
       ui_.compose_modal_label("Uploading ", display_backup_name(backup_name), "");
   BusyLabelScope busy(busy_label.c_str());
-  if (!upload_local_backup(*selected, backup_name)) {
+  const BackupUploadResult uploaded = upload_local_backup(*selected, backup_name);
+  if (!uploaded.ok) {
     return;
   }
   refresh_remote_backups_view();
   // The rebuild may have shifted the rows; keep the selection on the file this action was about.
   focus_backup_row_by_identity(backup_name);
-  set_status(StatusKind::Success,
-             ui_.compose_status_with_name("Uploaded ", display_backup_name(backup_name),
-                                          " to the Cloud."));
+  if (uploaded.metadata_warning) {
+    set_status(StatusKind::Info, "Backup uploaded, but slot details were not synced.");
+  } else {
+    set_status(StatusKind::Success,
+               ui_.compose_status_with_name("Uploaded ", display_backup_name(backup_name),
+                                            " to the Cloud."));
+  }
+}
+
+SaveMetadataJsonResult App::ensure_local_backup_metadata(const SaveRecord &save,
+                                                         const std::string &backup_name) {
+  const std::string identity = backup_identity(backup_name);
+  const std::string metadata_path =
+      local_backup_metadata_path(kBackupRoot, save.id, backup_name);
+  SaveMetadataJsonResult metadata = read_save_metadata_json(metadata_path);
+  if (metadata.ok && metadata.archive_identity == identity) {
+    return metadata;
+  }
+
+  const std::string archive_path =
+      local_backup_archive_path(kBackupRoot, save.id, backup_name);
+  const ArchiveReadResult embedded =
+      read_stored_backup_entry(archive_path, "sce_sys/sdslot.dat", kMaxSdslotFileSize);
+  if (!embedded.ok) {
+    return {false, {}, {}, "slot details unavailable"};
+  }
+
+  SaveMetadata recovered = parse_sdslot_data(embedded.data);
+  if (recovered.slots.empty()) {
+    return {false, {}, {}, "slot details unavailable"};
+  }
+  std::string write_error;
+  if (!write_save_metadata_json_atomic(metadata_path, identity, recovered, &write_error)) {
+    return {false, {}, {}, write_error};
+  }
+  return {true, identity, std::move(recovered), {}};
+}
+
+DriveFile App::find_remote_sidecar(const std::string &folder_id,
+                                   const std::string &archive_file_id,
+                                   const std::string &archive_name) {
+  const auto find_first = [&](const std::string &query) {
+    const std::string url = std::string(kDriveFilesEndpoint) + "?" + query;
+    const HttpResponse response = drive_request([&](const std::string &token) {
+      return HttpClient().get_json(url, token);
+    });
+    if (!response.ok) {
+      return DriveFile{};
+    }
+    const DriveFileList files = parse_drive_file_list(response.body);
+    return files.ok && !files.files.empty() ? files.files[0] : DriveFile{};
+  };
+
+  DriveFile sidecar = find_first(
+      build_drive_find_sidecar_by_archive_query(folder_id, archive_file_id));
+  if (sidecar.id.empty()) {
+    sidecar = find_first(
+        build_drive_find_child_by_name_query(folder_id, backup_metadata_name(archive_name)));
+  }
+  return sidecar;
+}
+
+SaveMetadataJsonResult App::download_remote_backup_metadata(
+    const SaveRecord &save, const std::string &archive_name,
+    const std::string &archive_file_id) {
+  const std::string metadata_path =
+      local_backup_metadata_path(kBackupRoot, save.id, archive_name);
+  const SaveMetadataJsonResult cached = read_save_metadata_json(metadata_path);
+  if (cached.ok) {
+    return cached;
+  }
+
+  const std::string folder_name = resolved_drive_folder_name(save.id);
+  const auto folder = drive_folder_ids_.find(folder_name);
+  if (folder == drive_folder_ids_.end()) {
+    return {false, {}, {}, "Cloud save folder unavailable"};
+  }
+  const DriveFile sidecar =
+      find_remote_sidecar(folder->second, archive_file_id, archive_name);
+  if (sidecar.id.empty()) {
+    return {false, {}, {}, "slot details unavailable"};
+  }
+  if (!ensure_parent_directory(metadata_path)) {
+    return {false, {}, {}, "could not create metadata folder"};
+  }
+
+  const std::string temporary_path = metadata_path + ".download";
+  const std::string url = std::string(kDriveFilesEndpoint) + "/" +
+                          form_url_encode(sidecar.id) + "?alt=media";
+  const HttpResponse downloaded = drive_request([&](const std::string &token) {
+    return HttpClient().download_file(url, temporary_path, token);
+  });
+  if (!downloaded.ok) {
+    std::remove(temporary_path.c_str());
+    return {false, {}, {}, "slot details download failed"};
+  }
+  SaveMetadataJsonResult metadata = read_save_metadata_json(temporary_path);
+  if (!metadata.ok || std::rename(temporary_path.c_str(), metadata_path.c_str()) != 0) {
+    std::remove(temporary_path.c_str());
+    if (metadata.ok) {
+      metadata.ok = false;
+      metadata.error = "could not cache slot details";
+    }
+    return metadata;
+  }
+  return metadata;
 }
 
 // Sends one local archive to its save folder on Drive and slots it into the index. Error status
 // is set here so both the single upload and the batch report the same failures.
-bool App::upload_local_backup(const SaveRecord &save, const std::string &backup_name) {
+BackupUploadResult App::upload_local_backup(const SaveRecord &save,
+                                            const std::string &backup_name) {
+  BackupUploadResult result;
   const std::string save_key = drive_folder_name_for(save.id);
   const std::string desired_name = drive_save_folder_name(save_key, save.display_name);
 
   if (drive_root_folder_id_.empty()) {
     drive_root_folder_id_ = find_or_create_drive_folder(kGoogleDriveRootFolderName, "root");
     if (drive_root_folder_id_.empty()) {
-      return false;
+      return result;
     }
   }
 
@@ -1457,7 +1581,7 @@ bool App::upload_local_backup(const SaveRecord &save, const std::string &backup_
     } else {
       folder_id = find_or_create_drive_folder(desired_name, drive_root_folder_id_);
       if (folder_id.empty()) {
-        return false;
+        return result;
       }
       folder_name = desired_name;
     }
@@ -1494,13 +1618,15 @@ bool App::upload_local_backup(const SaveRecord &save, const std::string &backup_
   });
   if (!upload_response.ok) {
     set_status(StatusKind::Error, "Cloud upload failed.");
-    return false;
+    return result;
   }
 
   // The upload response carries the new file's id; slotting it into the index directly keeps the
   // Drive list current without another full sync.
   const DriveFileList uploaded = parse_drive_file_list(upload_response.body);
+  std::string archive_file_id;
   if (uploaded.ok && !uploaded.files.empty()) {
+    archive_file_id = uploaded.files[0].id;
     std::vector<RemoteBackup> &list = drive_index_[folder_name];
     list.push_back({uploaded.files[0].name, uploaded.files[0].id});
     std::sort(list.begin(), list.end(),
@@ -1508,7 +1634,25 @@ bool App::upload_local_backup(const SaveRecord &save, const std::string &backup_
   } else {
     sync_drive_index();
   }
-  return true;
+
+  result.ok = true;
+  const SaveMetadataJsonResult metadata =
+      ensure_local_backup_metadata(save, backup_name);
+  if (!metadata.ok || archive_file_id.empty()) {
+    result.metadata_warning = true;
+    return result;
+  }
+  const std::string metadata_path =
+      local_backup_metadata_path(kBackupRoot, save.id, backup_name);
+  const HttpResponse sidecar_upload = drive_request([&](const std::string &token) {
+    return HttpClient().post_multipart_file(
+        kDriveUploadEndpoint,
+        build_drive_sidecar_upload_metadata_json(backup_metadata_name(backup_name), folder_id,
+                                                 archive_file_id),
+        metadata_path, token);
+  });
+  result.metadata_warning = !sidecar_upload.ok;
+  return result;
 }
 
 // PATCHes the Drive file's name and updates the cached index, mirroring the folder-rename block
@@ -1692,6 +1836,7 @@ void App::run_sync_all() {
   const std::vector<std::size_t> targets = visible_saves_;
   const std::size_t total = targets.size();
   SyncRunCounts run;
+  std::size_t metadata_warnings = 0;
   bool auth_lost = false;
   const bool drive_online = google_connected_ && HttpClient::network_reachable();
   batch_running_ = true;
@@ -1771,8 +1916,12 @@ void App::run_sync_all() {
     // so the transfer-progress callback reports the per-file upload percent.
     const std::string upload_label = "Uploading " + save.display_name;
     BusyLabelScope busy(upload_label.c_str());
-    if (upload_local_backup(save, upload_name)) {
+    const BackupUploadResult uploaded = upload_local_backup(save, upload_name);
+    if (uploaded.ok) {
       ++run.uploaded;
+      if (uploaded.metadata_warning) {
+        ++metadata_warnings;
+      }
     } else if (batch_cancel_requested_) {
       // The failure was our own abort, not a network error; the game stays "left", its backup
       // (already counted) is safe locally and the next run will upload it.
@@ -1795,6 +1944,9 @@ void App::run_sync_all() {
   std::string summary = sync_run_summary(run);
   if (auth_lost) {
     summary += " Google session expired.";
+  }
+  if (metadata_warnings > 0) {
+    summary += " Some slot details were not synced.";
   }
   set_status(run.failed > 0 ? StatusKind::Error : StatusKind::Success, std::move(summary));
 }

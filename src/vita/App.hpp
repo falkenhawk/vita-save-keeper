@@ -3,6 +3,7 @@
 #include "core/BackupList.hpp"
 #include "core/GoogleAuth.hpp"
 #include "core/GoogleConfig.hpp"
+#include "core/GoogleDrive.hpp"
 #include "core/SaveCategory.hpp"
 #include "core/SaveRecord.hpp"
 #include "core/SaveScanner.hpp"
@@ -32,6 +33,11 @@ struct LocalSnapshotResult {
   bool metadata_warning{};
   std::string archive_name;
   std::string error;
+};
+
+struct BackupUploadResult {
+  bool ok{};
+  bool metadata_warning{};
 };
 
 class App {
@@ -89,7 +95,16 @@ private:
   bool rename_remote_backup(const SaveRecord &save, const std::string &remote_name,
                             const std::string &new_name);
   void handle_transfer_button();
-  bool upload_local_backup(const SaveRecord &save, const std::string &backup_name);
+  BackupUploadResult upload_local_backup(const SaveRecord &save,
+                                         const std::string &backup_name);
+  SaveMetadataJsonResult ensure_local_backup_metadata(const SaveRecord &save,
+                                                       const std::string &backup_name);
+  DriveFile find_remote_sidecar(const std::string &folder_id,
+                                const std::string &archive_file_id,
+                                const std::string &archive_name);
+  SaveMetadataJsonResult download_remote_backup_metadata(const SaveRecord &save,
+                                                          const std::string &archive_name,
+                                                          const std::string &archive_file_id);
   bool remote_backup_exists(const std::string &save_id, const std::string &backup_name) const;
   void begin_sync_all();
   void run_sync_all();
