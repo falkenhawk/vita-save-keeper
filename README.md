@@ -23,6 +23,10 @@ Made for people with more than one Vita (or a PS TV) who want their saves to fol
 - signs in to Google by scanning a QR code with your phone - no typing on the Vita, and you
   stay signed in until you disconnect
 - keeps multiple snapshots per game, so you can go back to an older save at any time
+- names new snapshots from the latest real Vita save-slot time when the game provides it, instead
+  of the time Save Keeper happened to run
+- shows the title, subtitle, description, and date of every Vita slot in a snapshot: focus a
+  backup and hold Triangle. Backups and restores still operate on the whole save, not one slot
 - before a restore overwrites anything, the current save is snapshotted automatically
   (shown as `[AUTO]`), unless an identical backup already exists
 
@@ -70,7 +74,7 @@ The app can only see files it created itself. It cannot read anything else in yo
 | Select | upload a card-only backup, or download a Drive-only one; hold to back up & upload the whole tab |
 | Start | delete the selected backup - for one that is on both sides, choose card, Drive, or both |
 | Square | change sorting (by name, last saved, or last synced); hold to label the selected backup |
-| Triangle | connect Google Drive, or re-sync the remote backup list |
+| Triangle | connect/re-sync Google Drive; hold on a backup to view its save-slot details |
 | Circle | cancel a pending confirmation or the Google sign-in |
 
 On Japanese-region consoles Cross and Circle swap automatically, following the system setting.
@@ -92,11 +96,17 @@ Deleting the last Drive backup of a game also removes its (empty) folder from Dr
 Restoring never destroys the save you had: if the current save is not already covered by one of
 the local backups (compared by content, not by dates), an `[AUTO]` snapshot is created first.
 
+Slot details are stored in a small optional JSON companion next to each ZIP, locally and on
+Drive. The ZIP is always authoritative: a missing or damaged JSON file never hides a backup and
+never prevents upload, download, restore, labeling, or deletion. Save Keeper reads details lazily
+when you hold Triangle, and can recover them from `sce_sys/sdslot.dat` inside older local ZIPs
+without rewriting those ZIPs. Existing 1.0 backups keep their original names and work unchanged.
+
 ## Where things are stored
 
 | Path | Contents |
 | --- | --- |
-| `ux0:data/save-keeper/backups/` | local snapshots, one folder per game |
+| `ux0:data/save-keeper/backups/` | local ZIP snapshots and optional JSON details, one folder per game |
 | `ux0:data/save-keeper/google-client.json` | your OAuth client credentials |
 | `ux0:data/save-keeper/google-token.json` | your sign-in; treat it like a password |
 | `ux0:data/save-keeper/settings.txt` | app settings (sort mode) |
@@ -136,6 +146,8 @@ or VitaShell fails promotion with error `0x8010113D`.
 - [JKSV](https://github.com/J-D-K/JKSV) for the backup model inspiration
 - `third_party/qrcodegen`: [QR Code generator](https://github.com/nayuki/QR-Code-generator)
   by Project Nayuki, MIT License
+- `third_party/picojson`: [picojson](https://github.com/kazuho/picojson) by Kazuho Oku,
+  BSD 2-Clause License, used for bounded metadata companions
 - `third_party/vitasqlite`: [SQLite R/W override](https://github.com/VitaSmith/libsqlite) by
   VitaSmith, GPLv3 - the same approach VitaShell and Apollo Save Tool use to read the system
   app database

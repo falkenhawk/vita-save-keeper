@@ -644,6 +644,49 @@ void test_backup_archive_reads_bounded_sdslot_entry_without_restoring() {
   std::filesystem::remove_all(base);
 }
 
+void test_legacy_zip_metadata_can_be_recovered_without_rewriting_the_archive() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-legacy-metadata-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source" / "sce_sys");
+  const std::vector<unsigned char> sdslot = build_sdslot({
+      {2, {2026, 7, 12, 1, 44, 7}, "WipEout 2048", "Ghost ship", "Campaign medals: 91"},
+  });
+  write_binary_file(base / "source" / "sce_sys" / "sdslot.dat", sdslot);
+  std::ofstream(base / "source" / "data.bin", std::ios::binary) << "legacy-save";
+  const vsm::BackupResult backup = vsm::create_backup_archive({
+      (base / "source").string(), (base / "backups").string(), "PCSF00007",
+      {2024, 1, 2, 3, 4, 5},
+  });
+  EXPECT_TRUE(backup.ok);
+
+  const auto archive_size = std::filesystem::file_size(backup.archive_path);
+  const auto archive_time = std::filesystem::last_write_time(backup.archive_path);
+  const std::filesystem::path json_path =
+      base / "backups" / "PCSF00007" / "2024-01-02 03-04-05.json";
+  std::ofstream(json_path, std::ios::binary) << "{broken";
+  EXPECT_TRUE(!vsm::read_save_metadata_json(json_path.string()).ok);
+
+  const vsm::ArchiveReadResult embedded = vsm::read_stored_backup_entry(
+      backup.archive_path, "sce_sys/sdslot.dat", vsm::kSdslotHeaderSize +
+                                                     vsm::kMaxSaveSlots *
+                                                         vsm::kSdslotRecordSize);
+  EXPECT_TRUE(embedded.ok);
+  const vsm::SaveMetadata recovered = vsm::parse_sdslot_data(embedded.data);
+  EXPECT_EQ(recovered.slots.size(), static_cast<std::size_t>(1));
+  std::string error;
+  EXPECT_TRUE(vsm::write_save_metadata_json_atomic(
+      json_path.string(), "2024-01-02 03-04-05", recovered, &error));
+  EXPECT_TRUE(vsm::read_save_metadata_json(json_path.string()).ok);
+
+  // Lazy recovery creates only the companion. The old ZIP remains byte-for-byte sized and keeps
+  // its original filesystem timestamp, so upgrading cannot mutate a user's restore point.
+  EXPECT_EQ(static_cast<std::size_t>(std::filesystem::file_size(backup.archive_path)),
+            static_cast<std::size_t>(archive_size));
+  EXPECT_TRUE(std::filesystem::last_write_time(backup.archive_path) == archive_time);
+  std::filesystem::remove_all(base);
+}
+
 void test_backup_archive_explicit_name_never_overwrites() {
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() / "save-keeper-exclusive-archive-test";
@@ -799,6 +842,8 @@ void test_backup_store_lists_local_zip_backups_newest_first() {
   {
     std::ofstream(base / "PCSE00120_ Persona_4" / "2026-05-20 22-31.zip") << "old";
     std::ofstream(base / "PCSE00120_ Persona_4" / "2026-05-21 16-14.zip") << "new";
+    std::ofstream(base / "PCSE00120_ Persona_4" / "2026-05-21 16-14.json") << "metadata";
+    std::ofstream(base / "PCSE00120_ Persona_4" / "orphan.json") << "orphan";
     std::ofstream(base / "PCSE00120_ Persona_4" / "not-a-backup.txt") << "ignore";
   }
 
@@ -1350,6 +1395,7 @@ int main() {
   test_grid_window_scrolls_only_when_selection_leaves_view();
   test_backup_archive_creates_timestamped_zip_snapshot();
   test_backup_archive_reads_bounded_sdslot_entry_without_restoring();
+  test_legacy_zip_metadata_can_be_recovered_without_rewriting_the_archive();
   test_backup_archive_explicit_name_never_overwrites();
   test_backup_creation_plan_reuses_matching_content_and_counts_collisions();
   test_backup_archive_restores_snapshot_and_removes_stale_files();
