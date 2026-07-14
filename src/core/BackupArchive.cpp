@@ -1,3 +1,7 @@
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "core/BackupArchive.hpp"
 
 #include "core/PathUtil.hpp"
@@ -9,6 +13,8 @@
 #include <cstdint>
 #include <cstring>
 #include <dirent.h>
+#include <fcntl.h>
+#include <stdio.h>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -68,6 +74,12 @@ bool is_directory(const std::string &path) {
 bool is_regular_file(const std::string &path) {
   struct stat info {};
   return stat_path(path, &info) && S_ISREG(info.st_mode);
+}
+
+bool is_safe_archive_name(const std::string &name) {
+  return name.size() > 4 && name.compare(name.size() - 4, 4, ".zip") == 0 &&
+         name.find('/') == std::string::npos && name.find('\\') == std::string::npos &&
+         name.find(':') == std::string::npos && name != ".zip";
 }
 
 BackupResult error_result(std::string archive_path, std::string error) {
@@ -531,8 +543,13 @@ BackupResult create_backup_archive(const BackupRequest &request) {
   }
 
   const std::string backup_directory = join_path(request.backup_root, save_folder);
-  std::string archive_name = make_timestamped_backup_name(request.timestamp);
-  if (!request.name_suffix.empty()) {
+  std::string archive_name = request.archive_name.empty()
+                                 ? make_timestamped_backup_name(request.timestamp)
+                                 : request.archive_name;
+  if (!request.archive_name.empty() && !is_safe_archive_name(request.archive_name)) {
+    return error_result({}, "archive name is unsafe");
+  }
+  if (request.archive_name.empty() && !request.name_suffix.empty()) {
     archive_name.insert(archive_name.size() - 4, request.name_suffix);
   }
   const std::string archive_path = join_path(backup_directory, archive_name);
@@ -560,9 +577,16 @@ BackupResult create_backup_archive(const BackupRequest &request) {
     }
   }
 
-  FILE *zip = std::fopen(archive_path.c_str(), "wb");
+  const int descriptor = open(archive_path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0666);
+  if (descriptor < 0) {
+    return error_result(archive_path, errno == EEXIST ? "archive already exists"
+                                                      : "could not create archive file");
+  }
+  FILE *zip = fdopen(descriptor, "wb");
   if (!zip) {
-    return error_result(archive_path, "could not create archive file");
+    close(descriptor);
+    std::remove(archive_path.c_str());
+    return error_result(archive_path, "could not create archive stream");
   }
 
   // Sizes are known now (measure_file above), so the write can report determinate byte progress
@@ -745,6 +769,69 @@ bool entries_match_backup_archive(const std::vector<ArchiveEntryInfo> &folder_en
     }
   }
   return true;
+}
+
+ArchiveReadResult read_stored_backup_entry(const std::string &archive_path,
+                                           const std::string &entry_path,
+                                           std::size_t max_size) {
+  ArchiveReadResult result;
+  if (!is_safe_zip_entry_path(entry_path)) {
+    result.error = "entry path is unsafe";
+    return result;
+  }
+  FILE *zip = std::fopen(archive_path.c_str(), "rb");
+  if (!zip) {
+    result.error = "could not open archive";
+    return result;
+  }
+  while (true) {
+    std::uint32_t signature = 0;
+    if (!read_u32(zip, &signature)) {
+      result.error = "could not read archive";
+      break;
+    }
+    if (signature == 0x02014b50 || signature == 0x06054b50) {
+      result.error = "entry not found";
+      break;
+    }
+    if (signature != 0x04034b50) {
+      result.error = "archive header is invalid";
+      break;
+    }
+    LocalZipHeader header;
+    if (!read_local_header_after_signature(zip, &header) || (header.flags & 0x0008U) != 0 ||
+        header.method != 0 || header.compressed_size != header.uncompressed_size ||
+        !is_safe_zip_entry_path(header.name)) {
+      result.error = "archive entry is unsupported";
+      break;
+    }
+    if (header.name != entry_path) {
+      if (!skip_bytes(zip, header.compressed_size)) {
+        result.error = "archive entry is truncated";
+        break;
+      }
+      continue;
+    }
+    if (header.uncompressed_size > max_size) {
+      result.error = "archive entry is too large";
+      break;
+    }
+    result.data.resize(header.uncompressed_size);
+    if (!result.data.empty() && !read_bytes(zip, result.data.data(), result.data.size())) {
+      result.data.clear();
+      result.error = "archive entry is truncated";
+      break;
+    }
+    if (update_crc32(0, result.data.data(), result.data.size()) != header.crc32) {
+      result.data.clear();
+      result.error = "archive entry checksum failed";
+      break;
+    }
+    result.ok = true;
+    break;
+  }
+  std::fclose(zip);
+  return result;
 }
 
 RestoreResult restore_backup_archive(const RestoreRequest &request) {

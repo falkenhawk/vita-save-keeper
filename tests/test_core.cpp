@@ -616,6 +616,63 @@ void test_backup_archive_creates_timestamped_zip_snapshot() {
   std::filesystem::remove_all(base);
 }
 
+void test_backup_archive_reads_bounded_sdslot_entry_without_restoring() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-archive-entry-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source" / "sce_sys");
+  const std::vector<unsigned char> sdslot = build_sdslot({
+      {4, {2026, 7, 12, 1, 44, 7}, "Title", "Subtitle", "Details"},
+  });
+  write_binary_file(base / "source" / "sce_sys" / "sdslot.dat", sdslot);
+  const vsm::BackupResult backup = vsm::create_backup_archive({
+      (base / "source").string(), (base / "backups").string(), "PCSE00001",
+      {2026, 7, 12, 2, 0, 0},
+  });
+  EXPECT_TRUE(backup.ok);
+
+  const vsm::ArchiveReadResult read = vsm::read_stored_backup_entry(
+      backup.archive_path, "sce_sys/sdslot.dat", sdslot.size());
+  EXPECT_TRUE(read.ok);
+  EXPECT_EQ(read.data.size(), sdslot.size());
+  EXPECT_EQ(vsm::parse_sdslot_data(read.data).slots.size(), static_cast<std::size_t>(1));
+  EXPECT_TRUE(!vsm::read_stored_backup_entry(backup.archive_path, "missing.dat", sdslot.size()).ok);
+  EXPECT_TRUE(!vsm::read_stored_backup_entry(backup.archive_path, "sce_sys/sdslot.dat",
+                                             sdslot.size() - 1).ok);
+  EXPECT_TRUE(!std::filesystem::exists(base / "source.restore-tmp"));
+
+  std::filesystem::remove_all(base);
+}
+
+void test_backup_archive_explicit_name_never_overwrites() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-exclusive-archive-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source");
+  std::ofstream(base / "source" / "data.bin", std::ios::binary) << "first";
+
+  vsm::BackupRequest request;
+  request.source_path = (base / "source").string();
+  request.backup_root = (base / "backups").string();
+  request.save_id = "PCSE00001";
+  request.timestamp = {2026, 7, 12, 1, 44, 7};
+  request.archive_name = "2026-07-12 01-44-07.zip";
+  const vsm::BackupResult first = vsm::create_backup_archive(request);
+  EXPECT_TRUE(first.ok);
+
+  std::ofstream(base / "source" / "data.bin", std::ios::binary | std::ios::trunc) << "second";
+  const vsm::BackupResult second = vsm::create_backup_archive(request);
+  EXPECT_TRUE(!second.ok);
+  EXPECT_TRUE(second.error.find("exists") != std::string::npos);
+  bool entries_ok = false;
+  const std::vector<vsm::ArchiveEntryInfo> changed =
+      vsm::compute_folder_entries((base / "source").string(), &entries_ok);
+  EXPECT_TRUE(entries_ok);
+  EXPECT_TRUE(!vsm::entries_match_backup_archive(changed, first.archive_path));
+
+  std::filesystem::remove_all(base);
+}
+
 void test_backup_archive_restores_snapshot_and_removes_stale_files() {
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() / "save-keeper-restore-test";
@@ -1227,6 +1284,8 @@ int main() {
   test_selection_wraps_and_handles_empty_lists();
   test_grid_window_scrolls_only_when_selection_leaves_view();
   test_backup_archive_creates_timestamped_zip_snapshot();
+  test_backup_archive_reads_bounded_sdslot_entry_without_restoring();
+  test_backup_archive_explicit_name_never_overwrites();
   test_backup_archive_restores_snapshot_and_removes_stale_files();
   test_backup_archive_missing_file_does_not_clear_destination();
   test_backup_store_lists_local_zip_backups_newest_first();

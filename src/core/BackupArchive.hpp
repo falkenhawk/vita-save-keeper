@@ -17,6 +17,8 @@ struct BackupRequest {
   // Appended to the timestamp in the file name (before ".zip"); automatic pre-restore snapshots
   // use " auto" so they are recognizable and sort next to their timestamp.
   std::string name_suffix;
+  // Exact collision-safe basename allocated by the caller. Empty retains timestamp/suffix naming.
+  std::string archive_name;
   // Optional: called with (bytes written, total bytes) as the archive is written, throttled, so a
   // caller can animate a progress bar for a large save. Empty by default (the batch leaves it
   // unset, so only the single "Creating backup" modal fills).
@@ -45,6 +47,12 @@ struct ArchiveEntryInfo {
   std::uint32_t size{};
 };
 
+struct ArchiveReadResult {
+  bool ok{};
+  std::vector<unsigned char> data;
+  std::string error;
+};
+
 BackupResult create_backup_archive(const BackupRequest &request);
 RestoreResult restore_backup_archive(const RestoreRequest &request);
 // Content signature of a live save folder: relative path, CRC32, and size per file, the same
@@ -53,5 +61,8 @@ std::vector<ArchiveEntryInfo> compute_folder_entries(const std::string &folder_p
 // True when the archive's central directory lists exactly the given entries.
 bool entries_match_backup_archive(const std::vector<ArchiveEntryInfo> &folder_entries,
                                   const std::string &archive_path);
+ArchiveReadResult read_stored_backup_entry(const std::string &archive_path,
+                                           const std::string &entry_path,
+                                           std::size_t max_size);
 
 } // namespace vsm
