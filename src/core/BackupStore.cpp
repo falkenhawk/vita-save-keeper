@@ -41,6 +41,21 @@ bool has_zip_extension(const std::string &name) {
                       kZipExtension) == 0;
 }
 
+std::string candidate_name(const BackupTimestamp &timestamp, const std::string &suffix,
+                           unsigned int counter) {
+  std::string candidate = make_timestamped_backup_name(timestamp, counter);
+  if (!suffix.empty()) {
+    candidate.insert(candidate.size() - 4, suffix);
+  }
+  return candidate;
+}
+
+bool contains_identity(const std::vector<std::string> &names, const std::string &identity) {
+  return std::any_of(names.begin(), names.end(), [&](const std::string &name) {
+    return backup_identity(name) == identity;
+  });
+}
+
 std::string normalized_save_folder(const std::string &save_id) {
   std::string save_folder = normalize_path_component(save_id);
   if (save_folder.empty()) {
@@ -95,21 +110,38 @@ std::string allocate_backup_name(const BackupTimestamp &timestamp, const std::st
                                  const std::vector<std::string> &local_names,
                                  const std::vector<std::string> &remote_names) {
   for (unsigned int counter = 0;; counter = counter == 0 ? 2 : counter + 1) {
-    std::string candidate = make_timestamped_backup_name(timestamp, counter);
-    if (!suffix.empty()) {
-      candidate.insert(candidate.size() - 4, suffix);
-    }
+    const std::string candidate = candidate_name(timestamp, suffix, counter);
     const std::string identity = backup_identity(candidate);
-    const auto occupied = [&](const std::vector<std::string> &names) {
-      for (const std::string &name : names) {
-        if (backup_identity(name) == identity) {
-          return true;
-        }
-      }
-      return false;
-    };
-    if (!occupied(local_names) && !occupied(remote_names)) {
+    if (!contains_identity(local_names, identity) && !contains_identity(remote_names, identity)) {
       return candidate;
+    }
+  }
+}
+
+BackupCreationPlan plan_backup_creation(const BackupTimestamp &timestamp,
+                                        const std::string &suffix,
+                                        const std::vector<ArchiveEntryInfo> &current_entries,
+                                        const std::string &backup_root,
+                                        const std::string &save_id,
+                                        const std::vector<std::string> &local_names,
+                                        const std::vector<std::string> &remote_names) {
+  for (unsigned int counter = 0;; counter = counter == 0 ? 2 : counter + 1) {
+    const std::string candidate = candidate_name(timestamp, suffix, counter);
+    const std::string identity = backup_identity(candidate);
+
+    for (const std::string &local_name : local_names) {
+      if (backup_identity(local_name) != identity) {
+        continue;
+      }
+      if (entries_match_backup_archive(
+              current_entries,
+              local_backup_archive_path(backup_root, save_id, local_name))) {
+        return {local_name, true};
+      }
+    }
+
+    if (!contains_identity(local_names, identity) && !contains_identity(remote_names, identity)) {
+      return {candidate, false};
     }
   }
 }

@@ -673,6 +673,51 @@ void test_backup_archive_explicit_name_never_overwrites() {
   std::filesystem::remove_all(base);
 }
 
+void test_backup_creation_plan_reuses_matching_content_and_counts_collisions() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-creation-plan-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source");
+  std::ofstream(base / "source" / "data.bin", std::ios::binary) << "first";
+
+  const vsm::BackupTimestamp timestamp{2026, 7, 12, 1, 44, 7};
+  vsm::BackupRequest request;
+  request.source_path = (base / "source").string();
+  request.backup_root = (base / "backups").string();
+  request.save_id = "PCSE00001";
+  request.timestamp = timestamp;
+  request.archive_name = "2026-07-12 01-44-07 before-boss.zip";
+  const vsm::BackupResult first = vsm::create_backup_archive(request);
+  EXPECT_TRUE(first.ok);
+
+  bool entries_ok = false;
+  std::vector<vsm::ArchiveEntryInfo> entries =
+      vsm::compute_folder_entries((base / "source").string(), &entries_ok);
+  EXPECT_TRUE(entries_ok);
+  vsm::BackupCreationPlan plan = vsm::plan_backup_creation(
+      timestamp, "", entries, (base / "backups").string(), "PCSE00001",
+      {"2026-07-12 01-44-07 before-boss.zip"}, {});
+  EXPECT_TRUE(plan.reuse_existing);
+  EXPECT_EQ(plan.archive_name, "2026-07-12 01-44-07 before-boss.zip");
+
+  std::ofstream(base / "source" / "data.bin", std::ios::binary | std::ios::trunc) << "second";
+  entries = vsm::compute_folder_entries((base / "source").string(), &entries_ok);
+  EXPECT_TRUE(entries_ok);
+  plan = vsm::plan_backup_creation(
+      timestamp, "", entries, (base / "backups").string(), "PCSE00001",
+      {"2026-07-12 01-44-07 before-boss.zip"}, {"2026-07-12 01-44-07~2.zip"});
+  EXPECT_TRUE(!plan.reuse_existing);
+  EXPECT_EQ(plan.archive_name, "2026-07-12 01-44-07~3.zip");
+
+  plan = vsm::plan_backup_creation(timestamp, " auto", entries,
+                                   (base / "backups").string(), "PCSE00001", {},
+                                   {"2026-07-12 01-44-07.zip"});
+  EXPECT_TRUE(!plan.reuse_existing);
+  EXPECT_EQ(plan.archive_name, "2026-07-12 01-44-07~2 auto.zip");
+
+  std::filesystem::remove_all(base);
+}
+
 void test_backup_archive_restores_snapshot_and_removes_stale_files() {
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() / "save-keeper-restore-test";
@@ -1286,6 +1331,7 @@ int main() {
   test_backup_archive_creates_timestamped_zip_snapshot();
   test_backup_archive_reads_bounded_sdslot_entry_without_restoring();
   test_backup_archive_explicit_name_never_overwrites();
+  test_backup_creation_plan_reuses_matching_content_and_counts_collisions();
   test_backup_archive_restores_snapshot_and_removes_stale_files();
   test_backup_archive_missing_file_does_not_clear_destination();
   test_backup_store_lists_local_zip_backups_newest_first();

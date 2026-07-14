@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/BackupArchive.hpp"
 #include "core/BackupName.hpp"
 
 #include <string>
@@ -16,5 +17,18 @@ std::string local_backup_metadata_path(const std::string &backup_root, const std
 std::string allocate_backup_name(const BackupTimestamp &timestamp, const std::string &suffix,
                                  const std::vector<std::string> &local_names,
                                  const std::vector<std::string> &remote_names);
+
+struct BackupCreationPlan {
+  std::string archive_name;
+  bool reuse_existing{};
+};
+
+BackupCreationPlan plan_backup_creation(const BackupTimestamp &timestamp,
+                                        const std::string &suffix,
+                                        const std::vector<ArchiveEntryInfo> &current_entries,
+                                        const std::string &backup_root,
+                                        const std::string &save_id,
+                                        const std::vector<std::string> &local_names,
+                                        const std::vector<std::string> &remote_names);
 
 } // namespace vsm
