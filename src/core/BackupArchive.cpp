@@ -12,12 +12,14 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <dirent.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <utime.h>
 #include <utility>
 #include <vector>
 
@@ -34,6 +36,7 @@ struct ZipTimestamp {
 struct ZipEntry {
   std::string source_path;
   std::string zip_path;
+  ZipTimestamp modified_at;
   std::uint32_t crc32{};
   std::uint32_t size{};
   std::uint32_t local_header_offset{};
@@ -42,6 +45,7 @@ struct ZipEntry {
 struct LocalZipHeader {
   std::uint16_t flags{};
   std::uint16_t method{};
+  ZipTimestamp modified_at;
   std::uint32_t crc32{};
   std::uint32_t compressed_size{};
   std::uint32_t uncompressed_size{};
@@ -346,10 +350,49 @@ bool current_offset(FILE *file, std::uint32_t *offset) {
 ZipTimestamp to_zip_timestamp(const BackupTimestamp &timestamp) {
   const int year = std::max(1980, std::min(timestamp.year, 2107));
   ZipTimestamp zip_time;
-  zip_time.time = static_cast<std::uint16_t>((timestamp.hour << 11U) | (timestamp.minute << 5U));
+  zip_time.time = static_cast<std::uint16_t>((timestamp.hour << 11U) |
+                                             (timestamp.minute << 5U) |
+                                             (timestamp.second / 2));
   zip_time.date =
       static_cast<std::uint16_t>(((year - 1980) << 9U) | (timestamp.month << 5U) | timestamp.day);
   return zip_time;
+}
+
+bool read_file_zip_timestamp(const std::string &path, ZipTimestamp *timestamp) {
+  struct stat info {};
+  std::tm local {};
+  if (stat(path.c_str(), &info) != 0 || !localtime_r(&info.st_mtime, &local)) {
+    return false;
+  }
+  *timestamp = to_zip_timestamp({local.tm_year + 1900, local.tm_mon + 1, local.tm_mday,
+                                 local.tm_hour, local.tm_min, local.tm_sec});
+  return true;
+}
+
+bool restore_file_zip_timestamp(const std::string &path, const ZipTimestamp &timestamp) {
+  const int month = (timestamp.date >> 5U) & 0x0f;
+  const int day = timestamp.date & 0x1f;
+  const int hour = (timestamp.time >> 11U) & 0x1f;
+  const int minute = (timestamp.time >> 5U) & 0x3f;
+  const int second = (timestamp.time & 0x1f) * 2;
+  if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 ||
+      second > 59) {
+    return false;
+  }
+  std::tm local {};
+  local.tm_year = ((timestamp.date >> 9U) & 0x7f) + 80;
+  local.tm_mon = month - 1;
+  local.tm_mday = day;
+  local.tm_hour = hour;
+  local.tm_min = minute;
+  local.tm_sec = second;
+  local.tm_isdst = -1;
+  const std::time_t modified_at = std::mktime(&local);
+  if (modified_at == static_cast<std::time_t>(-1)) {
+    return false;
+  }
+  const utimbuf times{modified_at, modified_at};
+  return utime(path.c_str(), &times) == 0;
 }
 
 bool write_local_header(FILE *zip, ZipEntry *entry, const ZipTimestamp &timestamp) {
@@ -423,13 +466,11 @@ bool read_string(FILE *input, std::uint16_t size, std::string *value) {
 
 bool read_local_header_after_signature(FILE *zip, LocalZipHeader *header) {
   std::uint16_t version = 0;
-  std::uint16_t modified_time = 0;
-  std::uint16_t modified_date = 0;
   std::uint16_t name_length = 0;
   std::uint16_t extra_length = 0;
   return read_u16(zip, &version) && read_u16(zip, &header->flags) &&
-         read_u16(zip, &header->method) && read_u16(zip, &modified_time) &&
-         read_u16(zip, &modified_date) && read_u32(zip, &header->crc32) &&
+         read_u16(zip, &header->method) && read_u16(zip, &header->modified_at.time) &&
+         read_u16(zip, &header->modified_at.date) && read_u32(zip, &header->crc32) &&
          read_u32(zip, &header->compressed_size) && read_u32(zip, &header->uncompressed_size) &&
          read_u16(zip, &name_length) && read_u16(zip, &extra_length) &&
          read_string(zip, name_length, &header->name) && skip_bytes(zip, extra_length);
@@ -497,17 +538,28 @@ bool extract_stored_file(FILE *zip, const LocalZipHeader &header,
   if (std::fclose(output) != 0) {
     return false;
   }
-  return crc == header.crc32;
+  return crc == header.crc32 && restore_file_zip_timestamp(destination_path, header.modified_at);
 }
 
-bool extract_archive_to_directory(FILE *zip, const std::string &destination_path) {
+bool extract_archive_to_directory(FILE *zip, const std::string &destination_path,
+                                  std::uint64_t max_total_bytes,
+                                  bool *file_timestamps_uniform = nullptr) {
+  std::uint64_t total_bytes = 0;
+  std::size_t entry_count = 0;
+  ZipTimestamp first_timestamp;
+  bool timestamps_uniform = true;
   while (true) {
     std::uint32_t signature = 0;
     if (!read_u32(zip, &signature)) {
-      return std::feof(zip) != 0;
+      // A valid ZIP must reach its central-directory or end record. EOF after local entries is a
+      // truncated download, not a successfully extracted archive.
+      return false;
     }
 
     if (signature == 0x02014b50 || signature == 0x06054b50) {
+      if (file_timestamps_uniform) {
+        *file_timestamps_uniform = entry_count > 0 && timestamps_uniform;
+      }
       return true;
     }
     if (signature != 0x04034b50) {
@@ -526,6 +578,20 @@ bool extract_archive_to_directory(FILE *zip, const std::string &destination_path
         header.compressed_size != header.uncompressed_size ||
         !is_safe_zip_entry_path(header.name)) {
       return false;
+    }
+
+    // Inspection accepts cloud-provided ZIPs, so cap both archive expansion and header churn
+    // before creating the next file. Save Keeper's own writer is already limited to ZIP32.
+    if (++entry_count > 0xffffU || header.uncompressed_size > max_total_bytes - total_bytes) {
+      return false;
+    }
+    total_bytes += header.uncompressed_size;
+
+    if (entry_count == 1) {
+      first_timestamp = header.modified_at;
+    } else if (header.modified_at.time != first_timestamp.time ||
+               header.modified_at.date != first_timestamp.date) {
+      timestamps_uniform = false;
     }
 
     if (!extract_stored_file(zip, header, join_path(destination_path, header.name))) {
@@ -572,7 +638,7 @@ BackupResult create_backup_archive(const BackupRequest &request) {
     if (entry.zip_path.size() > 0xffffU) {
       return error_result(archive_path, "file path is too long for simple ZIP archive");
     }
-    if (!measure_file(&entry)) {
+    if (!measure_file(&entry) || !read_file_zip_timestamp(entry.source_path, &entry.modified_at)) {
       return error_result(archive_path, "could not read source file");
     }
   }
@@ -611,10 +677,9 @@ BackupResult create_backup_archive(const BackupRequest &request) {
     request.progress(0, total_bytes);
   }
 
-  const ZipTimestamp zip_timestamp = to_zip_timestamp(request.timestamp);
   bool ok = true;
   for (ZipEntry &entry : entries) {
-    ok = write_local_header(zip, &entry, zip_timestamp) &&
+    ok = write_local_header(zip, &entry, entry.modified_at) &&
          write_file_data(zip, entry.source_path, on_bytes);
     if (!ok) {
       break;
@@ -625,7 +690,7 @@ BackupResult create_backup_archive(const BackupRequest &request) {
   std::uint32_t central_directory_end = 0;
   if (ok && current_offset(zip, &central_directory_offset)) {
     for (const ZipEntry &entry : entries) {
-      ok = write_central_directory_entry(zip, entry, zip_timestamp);
+      ok = write_central_directory_entry(zip, entry, entry.modified_at);
       if (!ok) {
         break;
       }
@@ -846,7 +911,8 @@ RestoreResult restore_backup_archive(const RestoreRequest &request) {
 
   const std::string staging_path = request.destination_path + ".restore-tmp";
   remove_tree(staging_path);
-  const bool ok = ensure_directory(staging_path) && extract_archive_to_directory(zip, staging_path);
+  const bool ok = ensure_directory(staging_path) &&
+                  extract_archive_to_directory(zip, staging_path, UINT64_MAX);
   std::fclose(zip);
   if (!ok) {
     remove_tree(staging_path);
@@ -865,6 +931,42 @@ RestoreResult restore_backup_archive(const RestoreRequest &request) {
   RestoreResult result;
   result.ok = true;
   return result;
+}
+
+RestoreResult extract_backup_archive_for_inspection(const std::string &archive_path,
+                                                     const std::string &destination_path,
+                                                     std::uint64_t max_total_bytes) {
+  struct stat info {};
+  if (destination_path.empty() || destination_path == "/" ||
+      stat(destination_path.c_str(), &info) == 0) {
+    return restore_error("inspection destination is unsafe or already exists");
+  }
+  FILE *zip = std::fopen(archive_path.c_str(), "rb");
+  if (!zip) {
+    return restore_error("could not open archive");
+  }
+  bool timestamps_uniform = false;
+  const bool extracted = ensure_directory(destination_path) &&
+                         extract_archive_to_directory(zip, destination_path, max_total_bytes,
+                                                      &timestamps_uniform);
+  std::fclose(zip);
+  const RestoreResult result = extracted ? RestoreResult{true, {}, timestamps_uniform}
+                                         : restore_error("could not inspect archive");
+  if (!result.ok) {
+    remove_tree(destination_path);
+  }
+  return result;
+}
+
+bool remove_backup_inspection_directory(const std::string &path) {
+  if (path.empty() || path == "/") {
+    return false;
+  }
+  struct stat info {};
+  if (stat(path.c_str(), &info) != 0) {
+    return errno == ENOENT;
+  }
+  return remove_tree(path);
 }
 
 } // namespace vsm

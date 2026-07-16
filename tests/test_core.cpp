@@ -7,6 +7,7 @@
 #include "core/GoogleConfig.hpp"
 #include "core/GoogleDrive.hpp"
 #include "core/GridWindow.hpp"
+#include "core/InputGesture.hpp"
 #include "core/PathUtil.hpp"
 #include "core/SaveCategory.hpp"
 #include "core/SaveScanner.hpp"
@@ -26,11 +27,38 @@
 #include <iostream>
 #include <iterator>
 #include <string>
+#include <sys/stat.h>
 #include <utime.h>
 #include <utility>
 #include <vector>
 
 namespace {
+
+class ScopedTimezone {
+public:
+  explicit ScopedTimezone(const char *timezone) {
+    const char *current = std::getenv("TZ");
+    if (current) {
+      previous_ = current;
+      had_previous_ = true;
+    }
+    setenv("TZ", timezone, 1);
+    tzset();
+  }
+
+  ~ScopedTimezone() {
+    if (had_previous_) {
+      setenv("TZ", previous_.c_str(), 1);
+    } else {
+      unsetenv("TZ");
+    }
+    tzset();
+  }
+
+private:
+  std::string previous_;
+  bool had_previous_{};
+};
 
 void expect_true(bool value, const char *expression, int line) {
   if (!value) {
@@ -253,6 +281,18 @@ void test_backup_rows_do_not_merge_foreign_names_sharing_a_prefix() {
   EXPECT_TRUE(!rows[2].has_remote() || !rows[2].has_local());
 }
 
+void test_backup_details_offer_download_only_for_uninspected_drive_copy() {
+  vsm::BackupRow drive_only;
+  drive_only.remote_name = "2026-07-12 01-44-07.zip";
+  EXPECT_TRUE(vsm::backup_details_download_available(drive_only, false));
+  EXPECT_TRUE(!vsm::backup_details_download_available(drive_only, true));
+
+  vsm::BackupRow downloaded = drive_only;
+  downloaded.local_name = drive_only.remote_name;
+  EXPECT_TRUE(!vsm::backup_details_download_available(downloaded, false));
+  EXPECT_TRUE(!vsm::backup_details_download_available(vsm::BackupRow::new_backup_row(), false));
+}
+
 void test_backup_name_identity_label_and_rename_helpers() {
   EXPECT_TRUE(vsm::has_backup_timestamp_prefix("2026-05-21 16-14-09.zip"));
   EXPECT_TRUE(vsm::has_backup_timestamp_prefix("2026-05-21 16-14-09 before boss.zip"));
@@ -274,6 +314,16 @@ void test_backup_name_identity_label_and_rename_helpers() {
             "2026-05-21 16-14-09 after boss.zip");
   EXPECT_EQ(vsm::backup_name_with_label("2026-05-21 16-14-09 auto.zip", ""),
             "2026-05-21 16-14-09.zip");
+}
+
+void test_backup_timestamp_parser_reads_legacy_names_defensively() {
+  vsm::BackupTimestamp timestamp;
+  EXPECT_TRUE(vsm::parse_backup_timestamp("2026-07-12 01-44-07~2 before boss.zip", &timestamp));
+  EXPECT_TRUE(timestamp.year == 2026 && timestamp.month == 7 && timestamp.day == 12);
+  EXPECT_TRUE(timestamp.hour == 1 && timestamp.minute == 44 && timestamp.second == 7);
+  EXPECT_TRUE(!vsm::parse_backup_timestamp("2026-02-30 01-44-07.zip", &timestamp));
+  EXPECT_TRUE(!vsm::parse_backup_timestamp("my-imported-save.zip", &timestamp));
+  EXPECT_TRUE(!vsm::parse_backup_timestamp("2026-07-12 01-44-07oops.zip", &timestamp));
 }
 
 void test_backup_counter_identity_and_allocation() {
@@ -335,6 +385,7 @@ void test_sfo_parser_reads_title_strings() {
 }
 
 void test_sdslot_parser_reads_noncontiguous_slots_and_selects_newest() {
+  ScopedTimezone timezone("UTC0");
   const std::vector<unsigned char> data = build_sdslot({
       {2, {2026, 7, 11, 23, 59, 58}, "WipEout 2048", "Profile data",
        "Campaign gold medals: 90"},
@@ -353,7 +404,21 @@ void test_sdslot_parser_reads_noncontiguous_slots_and_selects_newest() {
   EXPECT_EQ(vsm::format_save_datetime(metadata.saved_at), "2026-07-12T01:44:07");
 }
 
+void test_sdslot_parser_converts_utc_slot_time_to_device_local_time() {
+  ScopedTimezone timezone("Europe/Warsaw");
+  const std::vector<unsigned char> data = build_sdslot({
+      {0, {2019, 7, 24, 1, 49, 14}, "3/4 Home", "Save", "Details"},
+  });
+
+  const vsm::SaveMetadata metadata = vsm::parse_sdslot_data(data);
+
+  EXPECT_EQ(vsm::format_save_datetime(metadata.saved_at), "2019-07-24T03:49:14");
+  EXPECT_EQ(vsm::format_save_datetime(metadata.slots[0].modified_at),
+            "2019-07-24T03:49:14");
+}
+
 void test_sdslot_parser_skips_bad_records_but_keeps_valid_siblings() {
+  ScopedTimezone timezone("UTC0");
   std::vector<unsigned char> data = build_sdslot({
       {3, {2024, 2, 29, 12, 0, 0}, "Valid \xE3\x82\xBB\xE3\x83\xBC\xE3\x83\x96", "Slot", "Details"},
       {7, {2026, 2, 29, 12, 0, 0}, "Invalid date", "Slot", "Details"},
@@ -373,6 +438,7 @@ void test_sdslot_parser_skips_bad_records_but_keeps_valid_siblings() {
 }
 
 void test_sdslot_parser_rejects_invalid_magic_truncation_and_unterminated_fields() {
+  ScopedTimezone timezone("UTC0");
   std::vector<unsigned char> invalid_magic = build_sdslot({
       {0, {2026, 1, 1, 0, 0, 0}, "Title", "Subtitle", "Details"},
   });
@@ -427,6 +493,24 @@ void test_save_metadata_resolver_uses_recursive_files_then_backup_clock() {
   std::filesystem::remove_all(base);
 }
 
+void test_pfs_mount_policy_requires_existing_metadata_directory() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-pfs-policy-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "save");
+  std::ofstream(base / "save" / "plain.bin", std::ios::binary) << "plain save";
+
+  EXPECT_TRUE(!vsm::save_directory_has_pfs_metadata((base / "save").string()));
+
+  std::ofstream(base / "save" / "sce_pfs", std::ios::binary) << "not a directory";
+  EXPECT_TRUE(!vsm::save_directory_has_pfs_metadata((base / "save").string()));
+  std::filesystem::remove(base / "save" / "sce_pfs");
+  std::filesystem::create_directory(base / "save" / "sce_pfs");
+  EXPECT_TRUE(vsm::save_directory_has_pfs_metadata((base / "save").string()));
+
+  std::filesystem::remove_all(base);
+}
+
 void test_save_metadata_json_round_trips_and_ignores_unknown_fields() {
   vsm::SaveMetadata metadata;
   metadata.saved_at = {2026, 7, 12, 1, 44, 7};
@@ -438,6 +522,7 @@ void test_save_metadata_json_round_trips_and_ignores_unknown_fields() {
 
   std::string json =
       vsm::serialize_save_metadata_json("2026-07-12 01-44-07", metadata);
+  EXPECT_TRUE(json.find("\"version\":2") != std::string::npos);
   json.insert(json.size() - 1, ",\"future\":{\"nested\":[true,null,3]}");
   const vsm::SaveMetadataJsonResult parsed = vsm::parse_save_metadata_json(json);
 
@@ -450,6 +535,53 @@ void test_save_metadata_json_round_trips_and_ignores_unknown_fields() {
   EXPECT_EQ(parsed.metadata.slots[0].title, "WipEout \"2048\"");
   EXPECT_EQ(parsed.metadata.slots[0].subtitle, "Profile\\data");
   EXPECT_EQ(parsed.metadata.slots[0].details, "Campaign\nmedals: 91");
+}
+
+void test_legacy_vita_slot_json_is_upgraded_from_utc_to_local_time() {
+  ScopedTimezone timezone("Europe/Warsaw");
+  const std::string legacy =
+      "{\"version\":1,\"archiveIdentity\":\"2019-07-24 03-49-14\","
+      "\"savedAt\":\"2019-07-24T01:49:14\",\"source\":\"vita-slot\","
+      "\"approximate\":false,\"slots\":[{\"id\":0,"
+      "\"modifiedAt\":\"2019-07-24T01:49:14\",\"title\":\"3/4 Home\","
+      "\"subtitle\":\"Save\",\"details\":\"Details\"}]}";
+
+  const vsm::SaveMetadataJsonResult parsed = vsm::parse_save_metadata_json(legacy);
+
+  EXPECT_TRUE(parsed.ok);
+  EXPECT_EQ(vsm::format_save_datetime(parsed.metadata.saved_at), "2019-07-24T03:49:14");
+  EXPECT_EQ(vsm::format_save_datetime(parsed.metadata.slots[0].modified_at),
+            "2019-07-24T03:49:14");
+}
+
+void test_backup_metadata_is_usable_only_for_matching_trustworthy_identity() {
+  vsm::SaveMetadataJsonResult metadata;
+  metadata.ok = true;
+  metadata.archive_identity = "2026-07-12 01-44-07";
+  metadata.metadata.source = vsm::SaveTimeSource::Filesystem;
+
+  EXPECT_TRUE(vsm::save_metadata_is_usable(metadata, "2026-07-12 01-44-07"));
+  EXPECT_TRUE(!vsm::save_metadata_is_usable(metadata, "2026-07-12 01-44-08"));
+
+  metadata.metadata.source = vsm::SaveTimeSource::BackupClock;
+  EXPECT_TRUE(!vsm::save_metadata_is_usable(metadata, "2026-07-12 01-44-07"));
+  metadata.ok = false;
+  metadata.metadata.source = vsm::SaveTimeSource::VitaSlot;
+  EXPECT_TRUE(!vsm::save_metadata_is_usable(metadata, "2026-07-12 01-44-07"));
+}
+
+void test_observed_save_metadata_accepts_slots_and_files_but_not_backup_clock() {
+  vsm::SaveMetadata metadata;
+  metadata.source = vsm::SaveTimeSource::Filesystem;
+  EXPECT_TRUE(vsm::save_metadata_has_observed_time(metadata));
+
+  metadata.source = vsm::SaveTimeSource::VitaSlot;
+  EXPECT_TRUE(!vsm::save_metadata_has_observed_time(metadata));
+  metadata.slots.push_back({});
+  EXPECT_TRUE(vsm::save_metadata_has_observed_time(metadata));
+
+  metadata.source = vsm::SaveTimeSource::BackupClock;
+  EXPECT_TRUE(!vsm::save_metadata_has_observed_time(metadata));
 }
 
 void test_save_metadata_json_rejects_untrusted_bounds_and_invalid_utf8() {
@@ -528,47 +660,139 @@ void test_backup_metadata_names_follow_archive_identity() {
 }
 
 void test_save_scanner_lists_direct_child_save_directories() {
+  ScopedTimezone timezone("UTC0");
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() / "save-keeper-scanner-test";
   std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "vita" / "BHBB00001");
   std::filesystem::create_directories(base / "vita" / "PCSE00120");
+  std::filesystem::create_directories(base / "vita" / "PCSE88888" / "sce_sys");
+  std::filesystem::create_directories(base / "vita" / "PCSE88888" / "sce_pfs");
   std::filesystem::create_directories(base / "vita" / "PCSE99999");
   std::filesystem::create_directories(base / "vita" / "PCSE00120" / "sce_sys");
   std::filesystem::create_directories(base / "psp" / "ULUS12345");
+  std::ofstream(base / "vita" / "BHBB00001" / "data.bin", std::ios::binary)
+      << "homebrew save";
   write_binary_file(base / "vita" / "PCSE00120" / "sce_sys" / "param.sfo",
                     build_sfo_with_strings({{"TITLE", "Persona 4 Golden"},
                                             {"TITLE_ID", "PCSE00120"}}));
   std::ofstream(base / "vita" / "PCSE00120" / "sce_sys" / "icon0.png", std::ios::binary)
       << "png";
+  write_binary_file(base / "vita" / "PCSE88888" / "sce_sys" / "param.sfo",
+                    build_sfo_with_strings({{"TITLE", "Encrypted Save"},
+                                            {"TITLE_ID", "PCSE88888"}}));
+  std::ofstream(base / "vita" / "PCSE88888" / "sce_pfs" / "files.db", std::ios::binary)
+      << "newer bookkeeping time";
   write_binary_file(base / "psp" / "ULUS12345" / "PARAM.SFO",
                     build_sfo_with_strings({{"TITLE", "PSP Save"}}));
   std::ofstream(base / "psp" / "ULUS12345" / "ICON0.PNG", std::ios::binary) << "png";
+  const std::time_t vita_saved_at = 1700001234;
+  const std::time_t homebrew_saved_at = 1700002345;
+  const std::time_t psp_saved_at = 1700003456;
+  const std::time_t pfs_bookkeeping_at = 1800000000;
+  const utimbuf vita_times{vita_saved_at, vita_saved_at};
+  const utimbuf homebrew_times{homebrew_saved_at, homebrew_saved_at};
+  const utimbuf psp_times{psp_saved_at, psp_saved_at};
+  const utimbuf pfs_times{pfs_bookkeeping_at, pfs_bookkeeping_at};
+  EXPECT_TRUE(utime((base / "vita" / "PCSE00120" / "sce_sys" / "param.sfo").string().c_str(),
+                    &vita_times) == 0);
+  EXPECT_TRUE(utime((base / "vita" / "PCSE00120" / "sce_sys" / "icon0.png").string().c_str(),
+                    &vita_times) == 0);
+  EXPECT_TRUE(utime((base / "vita" / "BHBB00001" / "data.bin").string().c_str(),
+                    &homebrew_times) == 0);
+  EXPECT_TRUE(utime((base / "psp" / "ULUS12345" / "PARAM.SFO").string().c_str(),
+                    &psp_times) == 0);
+  EXPECT_TRUE(utime((base / "psp" / "ULUS12345" / "ICON0.PNG").string().c_str(),
+                    &psp_times) == 0);
+  EXPECT_TRUE(utime((base / "vita" / "PCSE88888" / "sce_pfs" / "files.db").string().c_str(),
+                    &pfs_times) == 0);
 
   FILE *ignored_file = std::fopen((base / "vita" / "not-a-save.txt").string().c_str(), "w");
   EXPECT_TRUE(ignored_file != nullptr);
   std::fclose(ignored_file);
 
-  const std::vector<vsm::SaveRecord> saves = vsm::scan_save_roots({
-      {vsm::SavePlatform::Vita, (base / "vita").string()},
-      {vsm::SavePlatform::Psp, (base / "psp").string()},
-      {vsm::SavePlatform::GameCard, (base / "missing").string()},
-  });
+  std::vector<std::string> resolved_paths;
+  const auto resolver = [&](const std::string &path, const vsm::SaveDateTime &clock) {
+    resolved_paths.push_back(path);
+    return vsm::resolve_save_metadata(path, clock);
+  };
+  std::size_t scan_progress = 0;
+  const std::vector<vsm::SaveRecord> saves = vsm::scan_save_roots(
+      {
+          {vsm::SavePlatform::Vita, (base / "vita").string()},
+          {vsm::SavePlatform::Psp, (base / "psp").string()},
+          {vsm::SavePlatform::GameCard, (base / "missing").string()},
+      },
+      [&] { ++scan_progress; }, resolver);
 
-  EXPECT_EQ(saves.size(), static_cast<std::size_t>(3));
+  EXPECT_EQ(saves.size(), static_cast<std::size_t>(5));
   EXPECT_TRUE(saves[0].platform == vsm::SavePlatform::Vita);
-  EXPECT_EQ(saves[0].id, "PCSE00120");
-  EXPECT_EQ(saves[0].display_name, "Persona 4 Golden");
-  EXPECT_EQ(saves[0].title_id, "PCSE00120");
-  EXPECT_EQ(saves[0].path, (base / "vita" / "PCSE00120").string());
-  EXPECT_EQ(saves[0].icon_path, (base / "vita" / "PCSE00120" / "sce_sys" / "icon0.png").string());
-  EXPECT_EQ(saves[1].id, "PCSE99999");
-  EXPECT_EQ(saves[1].display_name, "PCSE99999");
-  EXPECT_TRUE(saves[2].platform == vsm::SavePlatform::Psp);
-  EXPECT_EQ(saves[2].id, "ULUS12345");
-  EXPECT_EQ(saves[2].display_name, "PSP Save");
-  EXPECT_EQ(saves[2].icon_path, (base / "psp" / "ULUS12345" / "ICON0.PNG").string());
+  EXPECT_EQ(saves[0].id, "BHBB00001");
+  EXPECT_TRUE(saves[0].save_time_known);
+  EXPECT_EQ(static_cast<std::size_t>(saves[0].saved_at_epoch),
+            static_cast<std::size_t>(homebrew_saved_at));
+  EXPECT_EQ(vsm::format_save_datetime(saves[0].saved_at), "2023-11-14T22:52:25");
+
+  EXPECT_EQ(saves[1].id, "PCSE00120");
+  EXPECT_EQ(saves[1].display_name, "Persona 4 Golden");
+  EXPECT_EQ(saves[1].title_id, "PCSE00120");
+  EXPECT_EQ(saves[1].path, (base / "vita" / "PCSE00120").string());
+  EXPECT_EQ(saves[1].icon_path,
+            (base / "vita" / "PCSE00120" / "sce_sys" / "icon0.png").string());
+  EXPECT_TRUE(saves[1].save_time_known);
+  EXPECT_EQ(static_cast<std::size_t>(saves[1].saved_at_epoch),
+            static_cast<std::size_t>(vita_saved_at));
+  EXPECT_EQ(vsm::format_save_datetime(saves[1].saved_at), "2023-11-14T22:33:54");
+
+  EXPECT_EQ(saves[2].id, "PCSE88888");
+  EXPECT_TRUE(!saves[2].save_time_known);
+  EXPECT_TRUE(saves[2].save_time_requires_mount);
+  EXPECT_EQ(static_cast<std::size_t>(saves[2].saved_at.year), static_cast<std::size_t>(0));
+  EXPECT_EQ(static_cast<std::size_t>(saves[2].saved_at_epoch), static_cast<std::size_t>(0));
+
+  EXPECT_EQ(saves[3].id, "PCSE99999");
+  EXPECT_EQ(saves[3].display_name, "PCSE99999");
+  EXPECT_TRUE(!saves[3].save_time_known);
+
+  EXPECT_TRUE(saves[4].platform == vsm::SavePlatform::Psp);
+  EXPECT_EQ(saves[4].id, "ULUS12345");
+  EXPECT_EQ(saves[4].display_name, "PSP Save");
+  EXPECT_EQ(saves[4].icon_path, (base / "psp" / "ULUS12345" / "ICON0.PNG").string());
+  EXPECT_TRUE(saves[4].save_time_known);
+  EXPECT_EQ(static_cast<std::size_t>(saves[4].saved_at_epoch),
+            static_cast<std::size_t>(psp_saved_at));
+  EXPECT_EQ(vsm::format_save_datetime(saves[4].saved_at), "2023-11-14T23:10:56");
+
+  EXPECT_EQ(resolved_paths.size(), static_cast<std::size_t>(4));
+  EXPECT_TRUE(std::find(resolved_paths.begin(), resolved_paths.end(), saves[2].path) ==
+              resolved_paths.end());
+  EXPECT_EQ(scan_progress, saves.size());
 
   std::filesystem::remove_all(base);
+}
+
+void test_mounted_slot_time_replaces_untrusted_pfs_file_time() {
+  vsm::SaveRecord save;
+  save.saved_at_epoch = 999;
+  save.save_time_requires_mount = true;
+
+  vsm::SaveMetadata raw_files;
+  raw_files.saved_at = {2026, 7, 15, 12, 0, 0};
+  raw_files.source = vsm::SaveTimeSource::Filesystem;
+  EXPECT_TRUE(!vsm::apply_mounted_save_time(&save, raw_files));
+  EXPECT_TRUE(!save.save_time_known);
+  EXPECT_TRUE(!save.save_time_requires_mount);
+  EXPECT_EQ(static_cast<std::size_t>(save.saved_at_epoch), static_cast<std::size_t>(999));
+
+  save.save_time_requires_mount = true;
+  vsm::SaveMetadata slots;
+  slots.saved_at = {2019, 7, 24, 1, 49, 14};
+  slots.source = vsm::SaveTimeSource::VitaSlot;
+  slots.slots.push_back({0, slots.saved_at, {}, {}, {}});
+  EXPECT_TRUE(vsm::apply_mounted_save_time(&save, slots));
+  EXPECT_TRUE(save.save_time_known);
+  EXPECT_TRUE(!save.save_time_requires_mount);
+  EXPECT_EQ(vsm::format_save_datetime(save.saved_at), "2019-07-24T01:49:14");
 }
 
 void test_selection_wraps_and_handles_empty_lists() {
@@ -636,7 +860,10 @@ void test_backup_archive_reads_bounded_sdslot_entry_without_restoring() {
   EXPECT_TRUE(read.ok);
   EXPECT_EQ(read.data.size(), sdslot.size());
   EXPECT_EQ(vsm::parse_sdslot_data(read.data).slots.size(), static_cast<std::size_t>(1));
-  EXPECT_TRUE(!vsm::read_stored_backup_entry(backup.archive_path, "missing.dat", sdslot.size()).ok);
+  const vsm::ArchiveReadResult missing =
+      vsm::read_stored_backup_entry(backup.archive_path, "missing.dat", sdslot.size());
+  EXPECT_TRUE(!missing.ok);
+  EXPECT_TRUE(missing.entry_missing());
   EXPECT_TRUE(!vsm::read_stored_backup_entry(backup.archive_path, "sce_sys/sdslot.dat",
                                              sdslot.size() - 1).ok);
   EXPECT_TRUE(!std::filesystem::exists(base / "source.restore-tmp"));
@@ -684,6 +911,87 @@ void test_legacy_zip_metadata_can_be_recovered_without_rewriting_the_archive() {
   EXPECT_EQ(static_cast<std::size_t>(std::filesystem::file_size(backup.archive_path)),
             static_cast<std::size_t>(archive_size));
   EXPECT_TRUE(std::filesystem::last_write_time(backup.archive_path) == archive_time);
+  std::filesystem::remove_all(base);
+}
+
+void test_backup_archive_extracts_to_isolated_inspection_directory_and_cleans_up() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-inspection-extract-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source" / "sce_sys");
+  std::ofstream(base / "source" / "data.bin", std::ios::binary) << "save-data";
+  std::ofstream(base / "source" / "sce_sys" / "sdslot.dat", std::ios::binary)
+      << "slot-data";
+  const std::time_t original_file_time = 1700001234;
+  const utimbuf original_times{original_file_time, original_file_time};
+  EXPECT_TRUE(utime((base / "source" / "data.bin").string().c_str(), &original_times) == 0);
+
+  const vsm::BackupResult backup = vsm::create_backup_archive({
+      (base / "source").string(), (base / "backups").string(), "PCSE00001",
+      {2026, 7, 15, 12, 0, 0},
+  });
+  EXPECT_TRUE(backup.ok);
+  const auto archive_size = std::filesystem::file_size(backup.archive_path);
+  const std::filesystem::path inspection = base / "inspection";
+
+  const vsm::RestoreResult extracted =
+      vsm::extract_backup_archive_for_inspection(backup.archive_path, inspection.string());
+  EXPECT_TRUE(extracted.ok);
+  EXPECT_TRUE(!extracted.file_timestamps_uniform);
+  EXPECT_TRUE(std::filesystem::exists(inspection / "data.bin"));
+  EXPECT_TRUE(std::filesystem::exists(inspection / "sce_sys" / "sdslot.dat"));
+  struct stat extracted_info {};
+  EXPECT_TRUE(stat((inspection / "data.bin").string().c_str(), &extracted_info) == 0);
+  // DOS timestamps have two-second precision; the file's archived time must survive inspection
+  // rather than becoming the current extraction time.
+  EXPECT_EQ(static_cast<std::size_t>(extracted_info.st_mtime),
+            static_cast<std::size_t>(original_file_time & ~1));
+  EXPECT_EQ(static_cast<std::size_t>(std::filesystem::file_size(backup.archive_path)),
+            static_cast<std::size_t>(archive_size));
+
+  EXPECT_TRUE(vsm::remove_backup_inspection_directory(inspection.string()));
+  EXPECT_TRUE(!std::filesystem::exists(inspection));
+  EXPECT_TRUE(std::filesystem::exists(backup.archive_path));
+
+  const std::filesystem::path uniform_source = base / "uniform-source";
+  std::filesystem::create_directories(uniform_source);
+  std::ofstream(uniform_source / "one.bin", std::ios::binary) << "one";
+  std::ofstream(uniform_source / "two.bin", std::ios::binary) << "two";
+  EXPECT_TRUE(utime((uniform_source / "one.bin").string().c_str(), &original_times) == 0);
+  EXPECT_TRUE(utime((uniform_source / "two.bin").string().c_str(), &original_times) == 0);
+  const vsm::BackupResult uniform_backup = vsm::create_backup_archive({
+      uniform_source.string(), (base / "backups").string(), "PSP-LEGACY",
+      {2026, 7, 15, 12, 0, 0},
+  });
+  EXPECT_TRUE(uniform_backup.ok);
+  const std::filesystem::path uniform_inspection = base / "uniform-inspection";
+  const vsm::RestoreResult uniform_extracted = vsm::extract_backup_archive_for_inspection(
+      uniform_backup.archive_path, uniform_inspection.string());
+  EXPECT_TRUE(uniform_extracted.ok);
+  EXPECT_TRUE(uniform_extracted.file_timestamps_uniform);
+  EXPECT_TRUE(vsm::remove_backup_inspection_directory(uniform_inspection.string()));
+
+  // Local entries alone are not a complete ZIP. Rejecting this interruption also prevents a
+  // uniform legacy archive from bypassing the synthetic-timestamp guard through the EOF path.
+  std::ifstream complete_zip(uniform_backup.archive_path, std::ios::binary);
+  const std::vector<unsigned char> zip_bytes((std::istreambuf_iterator<char>(complete_zip)),
+                                              std::istreambuf_iterator<char>());
+  EXPECT_TRUE(zip_bytes.size() >= 22);
+  const std::uint32_t central_offset = read_le32(zip_bytes, zip_bytes.size() - 6);
+  const std::filesystem::path truncated_archive = base / "truncated.zip";
+  std::filesystem::copy_file(uniform_backup.archive_path, truncated_archive);
+  std::filesystem::resize_file(truncated_archive, central_offset);
+  const std::filesystem::path truncated_inspection = base / "truncated-inspection";
+  const vsm::RestoreResult truncated = vsm::extract_backup_archive_for_inspection(
+      truncated_archive.string(), truncated_inspection.string());
+  EXPECT_TRUE(!truncated.ok);
+  EXPECT_TRUE(!std::filesystem::exists(truncated_inspection));
+
+  const std::filesystem::path oversized = base / "oversized-inspection";
+  const vsm::RestoreResult rejected = vsm::extract_backup_archive_for_inspection(
+      backup.archive_path, oversized.string(), 4);
+  EXPECT_TRUE(!rejected.ok);
+  EXPECT_TRUE(!std::filesystem::exists(oversized));
   std::filesystem::remove_all(base);
 }
 
@@ -742,6 +1050,12 @@ void test_backup_creation_plan_reuses_matching_content_and_counts_collisions() {
       {"2026-07-12 01-44-07 before-boss.zip"}, {});
   EXPECT_TRUE(plan.reuse_existing);
   EXPECT_EQ(plan.archive_name, "2026-07-12 01-44-07 before-boss.zip");
+
+  plan = vsm::plan_backup_creation(
+      timestamp, "", entries, (base / "backups").string(), "PCSE00001",
+      {"2026-07-12 01-44-07 before-boss.zip"}, {}, false);
+  EXPECT_TRUE(!plan.reuse_existing);
+  EXPECT_EQ(plan.archive_name, "2026-07-12 01-44-07~2.zip");
 
   std::ofstream(base / "source" / "data.bin", std::ios::binary | std::ios::trunc) << "second";
   entries = vsm::compute_folder_entries((base / "source").string(), &entries_ok);
@@ -862,6 +1176,40 @@ void test_backup_store_builds_normalized_archive_path() {
   EXPECT_EQ(vsm::local_backup_archive_path("/backups", "PCSE00120: Persona/4",
                                            "2026-05-21 16-14.zip"),
             "/backups/PCSE00120_ Persona_4/2026-05-21 16-14.zip");
+}
+
+void test_backup_download_publication_is_exclusive_and_cleans_temporary_files() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-download-publication-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base);
+
+  const std::filesystem::path temporary = base / "backup.zip.download";
+  const std::filesystem::path destination = base / "backup.zip";
+  const std::filesystem::path interrupted_reservation = base / "backup.zip.publishing";
+  // Simulate a power loss after reserving the name. Recovery removes the hidden reservation;
+  // it must never expose an empty backup.zip to the normal backup scanner.
+  std::filesystem::create_directory(interrupted_reservation);
+  std::ofstream(temporary, std::ios::binary) << "complete-backup";
+  std::string error;
+  EXPECT_TRUE(vsm::publish_backup_download(temporary.string(), destination.string(), &error));
+  EXPECT_TRUE(!std::filesystem::exists(temporary));
+  EXPECT_TRUE(!std::filesystem::exists(interrupted_reservation));
+  EXPECT_TRUE(std::filesystem::exists(destination));
+
+  // A later metadata inspection failure must not remove the successfully downloaded ZIP.
+  const bool metadata_recovered = false;
+  EXPECT_TRUE(!metadata_recovered);
+  EXPECT_TRUE(std::filesystem::exists(destination));
+
+  std::ofstream(temporary, std::ios::binary) << "replacement";
+  EXPECT_TRUE(!vsm::publish_backup_download(temporary.string(), destination.string(), &error));
+  EXPECT_TRUE(!std::filesystem::exists(temporary));
+  std::ifstream published(destination, std::ios::binary);
+  const std::string contents((std::istreambuf_iterator<char>(published)),
+                             std::istreambuf_iterator<char>());
+  EXPECT_EQ(contents, "complete-backup");
+  std::filesystem::remove_all(base);
 }
 
 void test_google_auth_builds_device_code_request_body() {
@@ -993,6 +1341,13 @@ void test_google_drive_builds_upload_metadata_json() {
                 "2026-07-12 01-44-07.json", "folder-id", "zip-id"),
             "{\"name\":\"2026-07-12 01-44-07.json\",\"parents\":[\"folder-id\"],"
             "\"appProperties\":{\"archiveFileId\":\"zip-id\"}}");
+  EXPECT_EQ(vsm::build_drive_sidecar_update_metadata_json(
+                "2026-07-12 01-44-07.json", "zip-id"),
+            "{\"name\":\"2026-07-12 01-44-07.json\","
+            "\"appProperties\":{\"archiveFileId\":\"zip-id\"}}");
+  EXPECT_EQ(vsm::build_drive_multipart_update_url("sidecar/id"),
+            "https://www.googleapis.com/upload/drive/v3/files/sidecar%2Fid?uploadType="
+            "multipart&fields=id%2Cname");
 }
 
 void test_google_drive_builds_sidecar_lookup_queries() {
@@ -1097,21 +1452,28 @@ void test_save_category_classification() {
 }
 
 void test_save_sort_modes_order_saves() {
-  std::vector<vsm::SaveRecord> saves(3);
+  std::vector<vsm::SaveRecord> saves(4);
   saves[0].id = "PCSB00001";
   saves[0].display_name = "Alpha";
   saves[0].saved_at_epoch = 100;
+  saves[0].save_time_known = true;
   saves[1].id = "PCSB00002";
   saves[1].display_name = "Bravo";
   saves[1].saved_at_epoch = 300;
+  saves[1].save_time_known = true;
   saves[2].id = "PCSB00003";
   saves[2].display_name = "Charlie";
   saves[2].saved_at_epoch = 200;
+  saves[2].save_time_known = true;
+  saves[3].id = "PCSB00004";
+  saves[3].display_name = "Delta";
+  saves[3].saved_at_epoch = 999;
 
   vsm::apply_save_sort(&saves, vsm::SaveSortMode::LastSaved, {});
   EXPECT_EQ(saves[0].display_name, "Bravo");
   EXPECT_EQ(saves[1].display_name, "Charlie");
   EXPECT_EQ(saves[2].display_name, "Alpha");
+  EXPECT_EQ(saves[3].display_name, "Delta");
 
   // Only Alpha and Charlie exist on Drive; Charlie's backup is newer, Bravo sinks to the end.
   const std::map<std::string, std::string> newest = {
@@ -1122,9 +1484,17 @@ void test_save_sort_modes_order_saves() {
   EXPECT_EQ(saves[0].display_name, "Charlie");
   EXPECT_EQ(saves[1].display_name, "Alpha");
   EXPECT_EQ(saves[2].display_name, "Bravo");
+  EXPECT_EQ(saves[3].display_name, "Delta");
+  EXPECT_EQ(std::string(vsm::save_sort_mode_label(vsm::SaveSortMode::LastSynced)), "Backup");
 
   vsm::apply_save_sort(&saves, vsm::SaveSortMode::Name, {});
   EXPECT_EQ(saves[0].display_name, "Alpha");
+}
+
+void test_only_last_saved_sort_requires_all_save_times() {
+  EXPECT_TRUE(!vsm::save_sort_requires_all_times(vsm::SaveSortMode::Name));
+  EXPECT_TRUE(vsm::save_sort_requires_all_times(vsm::SaveSortMode::LastSaved));
+  EXPECT_TRUE(!vsm::save_sort_requires_all_times(vsm::SaveSortMode::LastSynced));
 }
 
 void test_app_settings_roundtrip_and_unknown_keys() {
@@ -1347,6 +1717,18 @@ void test_display_backup_name_strips_zip_extension() {
   EXPECT_EQ(vsm::display_backup_name(".zip"), "");
 }
 
+void test_tap_hold_gesture_resolves_release_and_trigger_once() {
+  using vsm::TapHoldAction;
+  EXPECT_TRUE(vsm::resolve_tap_hold_action(4, true, false, 8, 60) ==
+              TapHoldAction::Tap);
+  EXPECT_TRUE(vsm::resolve_tap_hold_action(60, false, false, 8, 60) ==
+              TapHoldAction::Hold);
+  EXPECT_TRUE(vsm::resolve_tap_hold_action(20, true, false, 8, 60) ==
+              TapHoldAction::None);
+  EXPECT_TRUE(vsm::resolve_tap_hold_action(60, false, true, 8, 60) ==
+              TapHoldAction::None);
+}
+
 void test_drive_save_folder_names_carry_the_game_title() {
   EXPECT_EQ(vsm::drive_save_folder_name("PCSB00456", "FEZ"), "PCSB00456 FEZ");
   // No usable title: the folder stays the bare key, as older versions created it.
@@ -1377,31 +1759,41 @@ int main() {
   test_timestamped_backup_name_uses_jksv_style_zip_name();
   test_backup_rows_merge_local_and_remote_by_timestamp_identity();
   test_backup_rows_do_not_merge_foreign_names_sharing_a_prefix();
+  test_backup_details_offer_download_only_for_uninspected_drive_copy();
   test_backup_name_identity_label_and_rename_helpers();
+  test_backup_timestamp_parser_reads_legacy_names_defensively();
   test_backup_counter_identity_and_allocation();
   test_backup_label_sanitizer_and_auto_conflict();
   test_path_component_normalization_replaces_unsafe_characters();
   test_sfo_parser_reads_title_strings();
   test_sdslot_parser_reads_noncontiguous_slots_and_selects_newest();
+  test_sdslot_parser_converts_utc_slot_time_to_device_local_time();
   test_sdslot_parser_skips_bad_records_but_keeps_valid_siblings();
   test_sdslot_parser_rejects_invalid_magic_truncation_and_unterminated_fields();
   test_save_metadata_resolver_uses_recursive_files_then_backup_clock();
+  test_pfs_mount_policy_requires_existing_metadata_directory();
   test_save_metadata_json_round_trips_and_ignores_unknown_fields();
+  test_legacy_vita_slot_json_is_upgraded_from_utc_to_local_time();
+  test_backup_metadata_is_usable_only_for_matching_trustworthy_identity();
+  test_observed_save_metadata_accepts_slots_and_files_but_not_backup_clock();
   test_save_metadata_json_rejects_untrusted_bounds_and_invalid_utf8();
   test_save_metadata_json_file_write_is_atomic_and_bounded();
   test_backup_metadata_names_follow_archive_identity();
   test_save_scanner_lists_direct_child_save_directories();
+  test_mounted_slot_time_replaces_untrusted_pfs_file_time();
   test_selection_wraps_and_handles_empty_lists();
   test_grid_window_scrolls_only_when_selection_leaves_view();
   test_backup_archive_creates_timestamped_zip_snapshot();
   test_backup_archive_reads_bounded_sdslot_entry_without_restoring();
   test_legacy_zip_metadata_can_be_recovered_without_rewriting_the_archive();
+  test_backup_archive_extracts_to_isolated_inspection_directory_and_cleans_up();
   test_backup_archive_explicit_name_never_overwrites();
   test_backup_creation_plan_reuses_matching_content_and_counts_collisions();
   test_backup_archive_restores_snapshot_and_removes_stale_files();
   test_backup_archive_missing_file_does_not_clear_destination();
   test_backup_store_lists_local_zip_backups_newest_first();
   test_backup_store_builds_normalized_archive_path();
+  test_backup_download_publication_is_exclusive_and_cleans_temporary_files();
   test_google_auth_builds_device_code_request_body();
   test_google_auth_builds_token_poll_request_body();
   test_google_auth_builds_refresh_request_body();
@@ -1425,6 +1817,7 @@ int main() {
   test_save_category_classification();
   test_saves_sort_by_display_name_case_insensitive();
   test_save_sort_modes_order_saves();
+  test_only_last_saved_sort_requires_all_save_times();
   test_utf8_truncation_and_system_font_detection();
   test_auto_backup_suffix_display_and_content_matching();
   test_app_settings_roundtrip_and_unknown_keys();
@@ -1433,6 +1826,7 @@ int main() {
   test_sync_run_summary_reports_results_and_cancellation();
   test_sync_all_hold_message_names_the_tab();
   test_display_backup_name_strips_zip_extension();
+  test_tap_hold_gesture_resolves_release_and_trigger_once();
   test_drive_save_folder_names_carry_the_game_title();
   test_drive_folder_matching_accepts_bare_and_titled_names();
   test_drive_rename_metadata_json_escapes_the_name();

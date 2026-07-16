@@ -39,6 +39,9 @@ struct RestoreRequest {
 struct RestoreResult {
   bool ok{};
   std::string error;
+  // Inspection uses this to recognize legacy Save Keeper archives, which stamped every entry
+  // with one synthetic backup time. Such a timestamp must not be presented as a file save time.
+  bool file_timestamps_uniform{};
 };
 
 struct ArchiveEntryInfo {
@@ -51,10 +54,22 @@ struct ArchiveReadResult {
   bool ok{};
   std::vector<unsigned char> data;
   std::string error;
+
+  // A missing optional file is different from a damaged ZIP: callers can stop cleanly instead
+  // of extracting the whole archive in an attempt to decrypt a file that was never there.
+  bool entry_missing() const { return !ok && error == "entry not found"; }
 };
 
 BackupResult create_backup_archive(const BackupRequest &request);
 RestoreResult restore_backup_archive(const RestoreRequest &request);
+// Extracts into a brand-new work directory without touching a live save. Metadata inspection uses
+// this before asking the Vita to mount an encrypted backup copy.
+RestoreResult extract_backup_archive_for_inspection(const std::string &archive_path,
+                                                     const std::string &destination_path,
+                                                     std::uint64_t max_total_bytes =
+                                                         512ULL * 1024ULL * 1024ULL);
+// Removes only an isolated inspection directory; empty paths and filesystem roots are rejected.
+bool remove_backup_inspection_directory(const std::string &path);
 // Content signature of a live save folder: relative path, CRC32, and size per file, the same
 // values our ZIP writer stores. Used to detect whether a folder is already backed up.
 std::vector<ArchiveEntryInfo> compute_folder_entries(const std::string &folder_path, bool *ok);

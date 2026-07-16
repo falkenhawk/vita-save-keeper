@@ -34,6 +34,11 @@ std::string build_drive_upload_metadata_json(const std::string &file_name,
 std::string build_drive_sidecar_upload_metadata_json(const std::string &file_name,
                                                      const std::string &parent_id,
                                                      const std::string &archive_file_id);
+std::string build_drive_sidecar_update_metadata_json(const std::string &file_name,
+                                                     const std::string &archive_file_id);
+// Existing sidecars are updated by file ID. Drive keeps the previous contents intact if the
+// replacement upload fails, unlike a delete-then-create sequence.
+std::string build_drive_multipart_update_url(const std::string &file_id);
 std::string build_drive_find_folder_query(const std::string &folder_name,
                                           const std::string &parent_id);
 std::string build_drive_find_sidecar_by_archive_query(const std::string &parent_id,

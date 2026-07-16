@@ -151,6 +151,48 @@ bool read_binary_file(const std::string &path, std::string *contents) {
   }
 }
 
+HttpResponse send_multipart_file(const std::string &url, const std::string &metadata_json,
+                                 const std::string &file_path,
+                                 const std::string &bearer_token, bool update_existing) {
+  CURL *curl = acquire_handle();
+  if (!curl) {
+    return transport_error("network not initialized");
+  }
+
+  curl_slist *headers = nullptr;
+  headers = curl_slist_append(headers, "Accept: application/json");
+  headers = append_bearer_header(headers, bearer_token);
+
+  std::string file_contents;
+  if (!read_binary_file(file_path, &file_contents)) {
+    curl_slist_free_all(headers);
+    return transport_error("could not read upload file");
+  }
+
+  // Drive expects multipart/related, while libcurl's MIME helper emits multipart/form-data.
+  constexpr const char *kBoundary = "save-keeper-drive-boundary";
+  const std::string body = std::string("--") + kBoundary +
+                           "\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n" +
+                           metadata_json + "\r\n--" + kBoundary +
+                           "\r\nContent-Type: application/zip\r\n\r\n" + file_contents +
+                           "\r\n--" + kBoundary + "--\r\n";
+  headers = curl_slist_append(
+      headers, (std::string("Content-Type: multipart/related; boundary=") + kBoundary).c_str());
+
+  curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+  if (update_existing) {
+    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PATCH");
+  } else {
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+  }
+  curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.data());
+  curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
+
+  const HttpResponse response = perform_with_body(curl, headers);
+  curl_slist_free_all(headers);
+  return response;
+}
+
 } // namespace
 
 bool HttpClient::network_startup(std::string *error_message) {
@@ -354,41 +396,14 @@ HttpResponse HttpClient::post_multipart_file(const std::string &url,
                                              const std::string &metadata_json,
                                              const std::string &file_path,
                                              const std::string &bearer_token) const {
-  CURL *curl = acquire_handle();
-  if (!curl) {
-    return transport_error("network not initialized");
-  }
+  return send_multipart_file(url, metadata_json, file_path, bearer_token, false);
+}
 
-  curl_slist *headers = nullptr;
-  headers = curl_slist_append(headers, "Accept: application/json");
-  headers = append_bearer_header(headers, bearer_token);
-
-  std::string file_contents;
-  if (!read_binary_file(file_path, &file_contents)) {
-    curl_slist_free_all(headers);
-    return transport_error("could not read upload file");
-  }
-
-  // Drive's multipart upload endpoint expects multipart/related, while libcurl's MIME helper emits
-  // multipart/form-data. Build the small snapshot upload body directly for now; larger saves can
-  // move to Drive's resumable upload flow when we add progress reporting.
-  constexpr const char *kBoundary = "save-keeper-drive-boundary";
-  const std::string body = std::string("--") + kBoundary +
-                           "\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n" +
-                           metadata_json + "\r\n--" + kBoundary +
-                           "\r\nContent-Type: application/zip\r\n\r\n" + file_contents +
-                           "\r\n--" + kBoundary + "--\r\n";
-  headers = curl_slist_append(
-      headers, (std::string("Content-Type: multipart/related; boundary=") + kBoundary).c_str());
-
-  curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-  curl_easy_setopt(curl, CURLOPT_POST, 1L);
-  curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.data());
-  curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
-
-  const HttpResponse response = perform_with_body(curl, headers);
-  curl_slist_free_all(headers);
-  return response;
+HttpResponse HttpClient::patch_multipart_file(const std::string &url,
+                                              const std::string &metadata_json,
+                                              const std::string &file_path,
+                                              const std::string &bearer_token) const {
+  return send_multipart_file(url, metadata_json, file_path, bearer_token, true);
 }
 
 HttpResponse HttpClient::download_file(const std::string &url, const std::string &file_path,

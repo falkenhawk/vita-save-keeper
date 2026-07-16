@@ -29,6 +29,14 @@ BackupCreationPlan plan_backup_creation(const BackupTimestamp &timestamp,
                                         const std::string &backup_root,
                                         const std::string &save_id,
                                         const std::vector<std::string> &local_names,
-                                        const std::vector<std::string> &remote_names);
+                                        const std::vector<std::string> &remote_names,
+                                        bool reuse_matching_archive = true);
+
+// Publishes a completed same-folder download without replacing an existing backup. The temporary
+// file is removed on both success and failure; a successfully published ZIP is never tied to the
+// optional metadata-inspection result that follows.
+bool publish_backup_download(const std::string &temporary_path,
+                             const std::string &destination_path,
+                             std::string *error);
 
 } // namespace vsm

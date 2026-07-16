@@ -68,6 +68,9 @@ else()
   include(cmake/vita-toolchain-check.cmake)
   include("${VITASDK}/share/vita.cmake" REQUIRED)
 
+  add_subdirectory(src/vita/mount/kernel)
+  add_subdirectory(src/vita/mount/user)
+
   set(VITA_APP_NAME "Save Keeper")
   set(VITA_TITLEID "SVK000001")
   set(VITA_VERSION "01.01")
@@ -83,6 +86,8 @@ else()
   )
   target_include_directories(save-keeper PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vita/mount/kernel
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vita/mount/user
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/qrcodegen
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/vitasqlite
   )
@@ -113,7 +118,10 @@ else()
     ScePvf_stub
     SceSqlite_stub
     SceSysmodule_stub
+    taihen_stub
+    ${CMAKE_CURRENT_BINARY_DIR}/src/vita/mount/user/libSaveKeeperMountUser_stub_weak.a
   )
+  add_dependencies(save-keeper save_keeper_mount_user_stubs)
 
   vita_create_self(save-keeper.self save-keeper UNSAFE)
   vita_create_vpk(save-keeper.vpk ${VITA_TITLEID} save-keeper.self
@@ -128,5 +136,7 @@ else()
     FILE sce_sys/resources/cloud-synced.png sce_sys/resources/cloud-synced.png
     FILE sce_sys/resources/cloud-drive-only.png sce_sys/resources/cloud-drive-only.png
     FILE sce_sys/resources/cloud-local-only.png sce_sys/resources/cloud-local-only.png
+    FILE ${CMAKE_CURRENT_BINARY_DIR}/src/vita/mount/kernel/save-data-kernel.skprx sce_sys/save-data-kernel.skprx
+    FILE ${CMAKE_CURRENT_BINARY_DIR}/src/vita/mount/user/save-data-user.suprx sce_sys/save-data-user.suprx
   )
 endif()

@@ -117,6 +117,20 @@ std::string build_drive_sidecar_upload_metadata_json(const std::string &file_nam
          json_escape(archive_file_id) + "\"}}";
 }
 
+std::string build_drive_sidecar_update_metadata_json(const std::string &file_name,
+                                                     const std::string &archive_file_id) {
+  // The file already has the correct parent. Omitting parents keeps this valid for Drive's update
+  // endpoint while refreshing the stable archive link and canonical sidecar name.
+  return "{\"name\":\"" + json_escape(file_name) +
+         "\",\"appProperties\":{\"archiveFileId\":\"" +
+         json_escape(archive_file_id) + "\"}}";
+}
+
+std::string build_drive_multipart_update_url(const std::string &file_id) {
+  return "https://www.googleapis.com/upload/drive/v3/files/" + form_url_encode(file_id) +
+         "?uploadType=multipart&fields=id%2Cname";
+}
+
 std::string build_drive_find_folder_query(const std::string &folder_name,
                                           const std::string &parent_id) {
   // Drive's query language has its own string escaping, then the whole q value is URL-encoded for

@@ -52,6 +52,9 @@ public:
   HttpResponse post_multipart_file(const std::string &url, const std::string &metadata_json,
                                    const std::string &file_path,
                                    const std::string &bearer_token) const;
+  HttpResponse patch_multipart_file(const std::string &url, const std::string &metadata_json,
+                                    const std::string &file_path,
+                                    const std::string &bearer_token) const;
   HttpResponse download_file(const std::string &url, const std::string &file_path,
                              const std::string &bearer_token) const;
   HttpResponse delete_request(const std::string &url, const std::string &bearer_token) const;

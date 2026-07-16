@@ -159,6 +159,22 @@ void sort_saves_by_display_name(std::vector<SaveRecord> *saves) {
   });
 }
 
+bool apply_mounted_save_time(SaveRecord *save, const SaveMetadata &metadata) {
+  if (!save) {
+    return false;
+  }
+  save->save_time_requires_mount = false;
+  save->save_time_known = false;
+  if (metadata.source != SaveTimeSource::VitaSlot ||
+      !save_metadata_has_observed_time(metadata)) {
+    return false;
+  }
+  save->saved_at = metadata.saved_at;
+  save->saved_at_epoch = save_datetime_to_local_epoch(metadata.saved_at);
+  save->save_time_known = true;
+  return true;
+}
+
 void apply_save_sort(std::vector<SaveRecord> *saves, SaveSortMode mode,
                      const std::map<std::string, std::string> &newest_remote_by_folder) {
   if (!saves) {
@@ -174,7 +190,12 @@ void apply_save_sort(std::vector<SaveRecord> *saves, SaveSortMode mode,
   sort_saves_by_display_name(saves);
   if (mode == SaveSortMode::LastSaved) {
     std::stable_sort(saves->begin(), saves->end(), [](const SaveRecord &a, const SaveRecord &b) {
-      return a.saved_at_epoch > b.saved_at_epoch;
+      // Unknown and unresolved PFS times sort after every trustworthy time. Their raw mtimes may
+      // belong to encryption bookkeeping and must not make them look recently saved.
+      if (a.save_time_known != b.save_time_known) {
+        return a.save_time_known;
+      }
+      return a.save_time_known && a.saved_at_epoch > b.saved_at_epoch;
     });
     return;
   }
@@ -190,7 +211,11 @@ void apply_save_sort(std::vector<SaveRecord> *saves, SaveSortMode mode,
   std::stable_sort(saves->begin(), saves->end(),
                    [&](const SaveRecord &a, const SaveRecord &b) {
                      return newest_remote(a) > newest_remote(b);
-                   });
+  });
+}
+
+bool save_sort_requires_all_times(SaveSortMode mode) {
+  return mode == SaveSortMode::LastSaved;
 }
 
 const char *save_sort_mode_label(SaveSortMode mode) {
@@ -198,7 +223,7 @@ const char *save_sort_mode_label(SaveSortMode mode) {
   case SaveSortMode::LastSaved:
     return "Saved";
   case SaveSortMode::LastSynced:
-    return "Synced";
+    return "Backup";
   case SaveSortMode::Name:
   default:
     return "Name";
@@ -227,8 +252,12 @@ SaveSortMode save_sort_mode_from_string(const std::string &value) {
   return SaveSortMode::Name;
 }
 
-std::vector<SaveRecord> scan_save_roots(const std::vector<SaveRoot> &roots) {
+std::vector<SaveRecord> scan_save_roots(
+    const std::vector<SaveRoot> &roots, const std::function<void()> &on_progress,
+    const SaveMetadataResolver &resolve_metadata) {
   std::vector<SaveRecord> saves;
+  const SaveMetadataResolver metadata_resolver =
+      resolve_metadata ? resolve_metadata : resolve_save_metadata;
 
   for (const SaveRoot &root : roots) {
     const std::vector<std::string> child_directories = list_direct_child_directories(root.path);
@@ -238,13 +267,23 @@ std::vector<SaveRecord> scan_save_roots(const std::vector<SaveRoot> &roots) {
       save.id = child;
       save.display_name = child;
       save.path = join_path(root.path, child);
-      const SaveMetadata metadata = resolve_save_metadata(save.path, current_local_datetime());
-      save.saved_at_epoch = save_datetime_to_local_epoch(metadata.saved_at);
+      save.save_time_requires_mount =
+          save.platform != SavePlatform::Psp && save_directory_has_pfs_metadata(save.path);
+      if (!save.save_time_requires_mount) {
+        const SaveMetadata metadata =
+            metadata_resolver(save.path, current_local_datetime());
+        save.saved_at = metadata.saved_at;
+        save.saved_at_epoch = save_datetime_to_local_epoch(metadata.saved_at);
+        save.save_time_known = metadata.source != SaveTimeSource::BackupClock;
+      }
       apply_sfo_metadata(&save);
 
       // Only direct children are treated as saves. Descending into save payloads would turn internal
       // folders such as sce_sys into fake titles and would make scanning much slower on a Vita.
       saves.push_back(std::move(save));
+      if (on_progress) {
+        on_progress();
+      }
     }
   }
 

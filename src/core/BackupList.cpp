@@ -81,4 +81,8 @@ std::vector<BackupRow> build_backup_rows(const std::vector<std::string> &remote_
   return result;
 }
 
+bool backup_details_download_available(const BackupRow &row, bool usable_metadata) {
+  return !row.new_backup && row.has_remote() && !row.has_local() && !usable_metadata;
+}
+
 } // namespace vsm

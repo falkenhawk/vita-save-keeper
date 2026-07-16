@@ -46,9 +46,18 @@ struct SaveMetadataJsonResult {
   std::string archive_identity;
   SaveMetadata metadata;
   std::string error;
+  int schema_version{};
 };
 
+constexpr int kSaveMetadataJsonVersion = 2;
+
 SaveMetadata parse_sdslot_data(const std::vector<unsigned char> &data);
+bool save_directory_has_pfs_metadata(const std::string &save_path);
+bool save_metadata_is_usable(const SaveMetadataJsonResult &metadata,
+                             const std::string &expected_identity);
+// True only when the time came from save contents: exact Vita slots or the newest save file.
+// A backup-clock fallback must not be published as if it were the game's save time.
+bool save_metadata_has_observed_time(const SaveMetadata &metadata);
 SaveMetadata resolve_save_metadata(const std::string &save_path,
                                    const SaveDateTime &backup_clock);
 SaveDateTime current_local_datetime();

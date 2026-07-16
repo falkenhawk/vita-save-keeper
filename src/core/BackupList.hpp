@@ -30,4 +30,8 @@ struct BackupRow {
 std::vector<BackupRow> build_backup_rows(const std::vector<std::string> &remote_files,
                                          const std::vector<std::string> &local_files);
 
+// Details may offer an explicit full-ZIP download only when the backup exists solely on Drive
+// and its small JSON companion could not provide usable metadata.
+bool backup_details_download_available(const BackupRow &row, bool usable_metadata);
+
 } // namespace vsm

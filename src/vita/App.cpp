@@ -7,18 +7,23 @@
 #include "core/GoogleAuth.hpp"
 #include "core/GoogleConfig.hpp"
 #include "core/GoogleDrive.hpp"
+#include "core/InputGesture.hpp"
 #include "core/PathUtil.hpp"
 #include "core/SaveScanner.hpp"
 #include "core/Selection.hpp"
 #include "vita/SaveAppDbMetadata.hpp"
+#include "vita/mount/user/save_data_mount.h"
 #include "vita/net/HttpClient.hpp"
 
+#include <psp2/appmgr.h>
 #include <psp2/apputil.h>
 #include <psp2/common_dialog.h>
 #include <psp2/ctrl.h>
+#include <psp2/kernel/modulemgr.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/system_param.h>
+#include <taihen.h>
 #include <algorithm>
 #include <cerrno>
 #include <cstdio>
@@ -43,6 +48,9 @@ constexpr const char *kBackupRoot = "ux0:data/save-keeper/backups";
 constexpr const char *kGoogleClientPath = "ux0:data/save-keeper/google-client.json";
 constexpr const char *kGoogleTokenPath = "ux0:data/save-keeper/google-token.json";
 constexpr const char *kSettingsPath = "ux0:data/save-keeper/settings.txt";
+constexpr const char *kMountKernelPath =
+    "ux0:app/SVK000001/sce_sys/save-data-kernel.skprx";
+constexpr const char *kMountUserPath = "ux0:app/SVK000001/sce_sys/save-data-user.suprx";
 constexpr const char *kDriveFilesEndpoint = "https://www.googleapis.com/drive/v3/files";
 constexpr const char *kDriveUploadEndpoint =
     "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id%2Cname";
@@ -77,8 +85,93 @@ BackupTimestamp backup_timestamp_from(const SaveDateTime &value) {
   return {value.year, value.month, value.day, value.hour, value.minute, value.second};
 }
 
+SaveMetadata resolve_live_save_metadata(const std::string &save_path,
+                                        const SaveDateTime &backup_clock,
+                                        bool allow_pfs_mount) {
+  // PSP and other plain save folders must never be handed to AppMgr's PFS mount routine: mounting
+  // a plain folder creates sce_pfs bookkeeping in the user's save. If PFS metadata is absent, its
+  // ordinary file times are already the authoritative information we need.
+  if (!allow_pfs_mount || !save_directory_has_pfs_metadata(save_path)) {
+    return resolve_save_metadata(save_path, backup_clock);
+  }
+
+  char mount_point[16] {};
+  char key[16] {};
+  SaveKeeperMountArgs args {};
+  args.process_title_id = "SVK000001";
+  args.path = save_path.c_str();
+  args.key = key;
+  args.mount_point = mount_point;
+
+  // Retail Vita saves are PFS-encrypted on disk. Try the mount IDs VitaShell knows, then retain
+  // AppMgr's public read-only fallback for unusual setups. A successful mount decrypts the same
+  // save path; the returned name is used only to unmount immediately after reading metadata.
+  int mount_result = -1;
+  static constexpr int kSavedataMountIds[] = {0x6E, 0x12E, 0x12F, 0x3ED};
+  for (const int id : kSavedataMountIds) {
+    args.id = id;
+    mount_result = saveKeeperUserMountById(&args);
+    if (mount_result >= 0) {
+      break;
+    }
+  }
+  if (mount_result < 0) {
+    mount_result = sceAppMgrGameDataMount(save_path.c_str(), nullptr, nullptr, mount_point);
+  }
+  const SaveMetadata metadata = resolve_save_metadata(save_path, backup_clock);
+  if (mount_result >= 0) {
+    sceAppMgrUmount(mount_point);
+  }
+  return metadata;
+}
+
+class BackupInspectionDirectory {
+public:
+  explicit BackupInspectionDirectory(std::string path) : path_(std::move(path)) {
+    // A previous crash may have left this private work directory behind. It is never a backup or
+    // a live save, so clearing it before reuse is safe.
+    remove_backup_inspection_directory(path_);
+  }
+
+  ~BackupInspectionDirectory() {
+    // resolve_live_save_metadata unmounts before returning, so encrypted files are no longer in
+    // use when this cleanup runs.
+    remove_backup_inspection_directory(path_);
+  }
+
+  const std::string &path() const { return path_; }
+
+private:
+  std::string path_;
+};
+
+bool initialize_save_data_mount_bridge() {
+  // Kernel modules survive an app restart on some setups. "Already loaded" is therefore usable;
+  // the process-local user bridge is still loaded on every launch.
+  const SceUID kernel_module = taiLoadStartKernelModule(kMountKernelPath, 0, nullptr, 0);
+  if (kernel_module < 0 && static_cast<unsigned int>(kernel_module) != 0x8002D013U) {
+    return false;
+  }
+  return sceKernelLoadStartModule(kMountUserPath, 0, nullptr, 0, nullptr, nullptr) >= 0;
+}
+
 long long current_epoch_seconds() {
   return static_cast<long long>(std::time(nullptr));
+}
+
+bool upgrade_legacy_metadata_file(const std::string &path, const std::string &identity,
+                                  SaveMetadataJsonResult *metadata) {
+  if (!metadata || !metadata->ok || metadata->schema_version >= kSaveMetadataJsonVersion) {
+    return true;
+  }
+  std::string error;
+  if (!write_save_metadata_json_atomic(path, identity, metadata->metadata, &error)) {
+    metadata->ok = false;
+    metadata->error = error;
+    return false;
+  }
+  metadata->schema_version = kSaveMetadataJsonVersion;
+  return true;
 }
 
 unsigned int buttons_with_left_analog(const SceCtrlData &pad) {
@@ -235,11 +328,13 @@ void App::clear_status() {
 
 LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
                                                const std::string &suffix,
-                                               bool report_progress) {
+                                               bool report_progress,
+                                               bool force_new) {
   LocalSnapshotResult snapshot;
   // Resolve once so the ZIP name and JSON describe the same moment, even if creating the archive
   // takes long enough for the wall clock to tick over.
-  const SaveMetadata metadata = resolve_save_metadata(save.path, current_local_datetime());
+  const SaveMetadata metadata = resolve_live_save_metadata(
+      save.path, current_local_datetime(), save.platform != SavePlatform::Psp);
 
   bool entries_ok = false;
   const std::vector<ArchiveEntryInfo> entries = compute_folder_entries(save.path, &entries_ok);
@@ -266,7 +361,7 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
   const BackupTimestamp timestamp = backup_timestamp_from(metadata.saved_at);
   const BackupCreationPlan plan =
       plan_backup_creation(timestamp, suffix, entries, kBackupRoot, save.id, local_names,
-                           remote_names);
+                           remote_names, !force_new);
   snapshot.archive_name = plan.archive_name;
   snapshot.reused = plan.reuse_existing;
 
@@ -337,12 +432,58 @@ std::map<std::string, std::string> App::newest_remote_by_folder() const {
   return newest;
 }
 
+bool App::resolve_save_time(SaveRecord *save) {
+  if (!save || !save->save_time_requires_mount) {
+    return save && save->save_time_known;
+  }
+  const SaveMetadata metadata = resolve_live_save_metadata(save->path, {}, true);
+  return apply_mounted_save_time(save, metadata);
+}
+
+void App::resolve_selected_save_time() {
+  if (visible_saves_.empty()) {
+    return;
+  }
+  SaveRecord &save = saves_[visible_saves_[selected_save_ % visible_saves_.size()]];
+  if (!save.save_time_requires_mount) {
+    return;
+  }
+  ui_.draw_busy("Reading save time", 0, -1);
+  resolve_save_time(&save);
+}
+
+void App::resolve_all_save_times() {
+  const std::size_t total = static_cast<std::size_t>(std::count_if(
+      saves_.begin(), saves_.end(),
+      [](const SaveRecord &save) { return save.save_time_requires_mount; }));
+  if (total == 0) {
+    return;
+  }
+  std::size_t done = 0;
+  for (SaveRecord &save : saves_) {
+    if (!save.save_time_requires_mount) {
+      continue;
+    }
+    ui_.draw_busy("Reading save times", static_cast<long long>(done),
+                  static_cast<long long>(total));
+    resolve_save_time(&save);
+    ++done;
+  }
+  ui_.draw_busy("Reading save times", static_cast<long long>(done),
+                static_cast<long long>(total));
+}
+
 void App::apply_sort_and_rebuild() {
   std::string focused_id;
   if (const SaveRecord *current = selected_save_record()) {
     focused_id = current->id;
   }
 
+  if (save_sort_requires_all_times(sort_mode_)) {
+    // Sorting must never compare raw sce_pfs bookkeeping times. Resolve every pending encrypted
+    // save once, only when the user actually asks for the Last Saved order.
+    resolve_all_save_times();
+  }
   apply_save_sort(&saves_, sort_mode_, newest_remote_by_folder());
   // Remembered per-tab positions point into the old order; the current save is re-located by id
   // instead so the focus survives the re-sort (the grid window follows it on the next frame).
@@ -358,6 +499,7 @@ void App::apply_sort_and_rebuild() {
     }
   }
   category_selection_[static_cast<std::size_t>(category_)] = selected_save_;
+  resolve_selected_save_time();
   refresh_local_backups();
   refresh_remote_backups_view();
 }
@@ -375,7 +517,7 @@ void App::cycle_sort_mode() {
     set_status(StatusKind::Info, "Sorted by last saved.");
     break;
   case SaveSortMode::LastSynced:
-    set_status(StatusKind::Info, "Sorted by last synced.");
+    set_status(StatusKind::Info, "Sorted by latest backup.");
     break;
   case SaveSortMode::Name:
   default:
@@ -440,6 +582,7 @@ void App::move_selected_save(int delta) {
     // A different save means a different backup list; focus its "New Backup" entry. Any status
     // message described the previous save, so it goes too.
     selected_backup_ = 0;
+    resolve_selected_save_time();
     refresh_local_backups();
     refresh_remote_backups_view();
     clear_status();
@@ -467,6 +610,7 @@ void App::move_selected_category(int delta) {
     selected_save_ = category_selection_[static_cast<std::size_t>(category_)];
     selected_backup_ = 0;
     rebuild_visible_saves();
+    resolve_selected_save_time();
     refresh_local_backups();
     refresh_remote_backups_view();
     clear_status();
@@ -514,7 +658,8 @@ void App::create_new_backup() {
   }
 
   const SaveRecord &save = *selected;
-  if (!duplicate_backup_confirmation_pending_) {
+  const bool force_new = duplicate_backup_confirmation_pending_;
+  if (!force_new) {
     // Content identical to an existing archive would only stack a same-bytes snapshot under a new
     // timestamp; warn first, and let a second press force it anyway (the batch never forces).
     ui_.draw_busy("Checking current save", 0, -1);
@@ -536,7 +681,7 @@ void App::create_new_backup() {
 
   // One busy frame before the blocking ZIP work, so the screen does not look frozen.
   ui_.draw_busy("Creating backup", 0, -1);
-  const LocalSnapshotResult result = create_local_snapshot(save, "", true);
+  const LocalSnapshotResult result = create_local_snapshot(save, "", true, force_new);
   if (result.ok) {
     refresh_local_backups();
     // Focus the fresh (or safely reused) snapshot so an immediate Select-to-upload needs no
@@ -548,7 +693,7 @@ void App::create_new_backup() {
       return;
     }
     if (result.reused) {
-      set_status(StatusKind::Info, "Existing save-time snapshot selected.");
+      clear_status();
       return;
     }
     // With Drive available, nudge the natural next step. The fresh snapshot is focused, so the
@@ -622,7 +767,7 @@ void App::perform_scoped_delete(bool delete_local, bool delete_remote) {
   const std::string display = row.display_name();
 
   // Drive first: if the Drive delete fails, the card copy is untouched and the pair is intact,
-  // instead of a half-deleted snapshot surviving only in the cloud.
+  // instead of a half-deleted backup surviving only in the cloud.
   const bool remote_requested = delete_remote && row.has_remote();
   if (remote_requested) {
     if (!ensure_google_access_token()) {
@@ -643,6 +788,23 @@ void App::perform_scoped_delete(bool delete_local, bool delete_remote) {
         delete_local ? ui_.compose_modal_label("Deleting ", display, "")
                      : ui_.compose_modal_label("Deleting ", display, " Cloud backup");
     BusyLabelScope busy(busy_label.c_str());
+    // Remove the optional companion first. If that request fails, keep the ZIP and report the
+    // delete failure, rather than deleting the ZIP and stranding an orphaned JSON file. Should
+    // the ZIP request then fail, its metadata can be rebuilt from the archive on the next visit.
+    if (!folder_id.empty()) {
+      const DriveFile sidecar = find_remote_sidecar(folder_id, file_id, row.remote_name);
+      if (!sidecar.id.empty()) {
+        const std::string sidecar_url =
+            std::string(kDriveFilesEndpoint) + "/" + form_url_encode(sidecar.id);
+        const HttpResponse sidecar_response = drive_request([&](const std::string &token) {
+          return HttpClient().delete_request(sidecar_url, token);
+        });
+        if (!sidecar_response.ok) {
+          set_status(StatusKind::Error, "Cloud delete failed.");
+          return;
+        }
+      }
+    }
     const std::string url = std::string(kDriveFilesEndpoint) + "/" + form_url_encode(file_id);
     const HttpResponse response = drive_request([&](const std::string &token) {
       return HttpClient().delete_request(url, token);
@@ -662,18 +824,6 @@ void App::perform_scoped_delete(bool delete_local, bool delete_remote) {
       }
       if (list.empty()) {
         drive_index_.erase(indexed);
-      }
-    }
-    // The ZIP is authoritative: once its delete succeeds, companion lookup/deletion is
-    // best-effort and cannot turn the operation into a failure.
-    if (!folder_id.empty()) {
-      const DriveFile sidecar = find_remote_sidecar(folder_id, file_id, row.remote_name);
-      if (!sidecar.id.empty()) {
-        const std::string sidecar_url =
-            std::string(kDriveFilesEndpoint) + "/" + form_url_encode(sidecar.id);
-        drive_request([&](const std::string &token) {
-          return HttpClient().delete_request(sidecar_url, token);
-        });
       }
     }
     if (drive_index_.find(folder_name) == drive_index_.end()) {
@@ -925,7 +1075,9 @@ void App::begin_google_auth() {
   // missing so the flow still times out instead of polling forever.
   device_code_expires_at_ =
       current_epoch_seconds() + (device_code_.expires_in > 0 ? device_code_.expires_in : 1800);
-  set_status(StatusKind::Info, "Scan the QR code with your phone and approve access.");
+  // The dedicated sign-in panel already shows the QR instructions and waiting state. Keeping the
+  // shared status line empty avoids repeating the same sentence in a narrower, truncated area.
+  clear_status();
 }
 
 void App::cancel_google_auth() {
@@ -945,7 +1097,7 @@ void App::update_google_auth() {
   if (current_epoch_seconds() >= device_code_expires_at_) {
     google_auth_pending_ = false;
     device_code_ = {};
-    set_status(StatusKind::Error, "Sign-in code expired. Press Triangle for a new code.");
+    set_status(StatusKind::Error, "Sign-in expired. Press Triangle to retry.");
     return;
   }
 
@@ -974,7 +1126,7 @@ void App::poll_google_token() {
       device_code_ = {};
       set_status(StatusKind::Error, "Network trouble stopped the sign-in: " + response.error);
     } else {
-      set_status(StatusKind::Info, "Network hiccup while checking with Google; retrying.");
+      set_status(StatusKind::Info, "Network hiccup; retrying.");
     }
     return;
   }
@@ -1006,18 +1158,18 @@ void App::poll_google_token() {
   }
 
   if (token.error == "authorization_pending") {
-    set_status(StatusKind::Info, "Waiting for approval on your phone.");
+    clear_status();
   } else if (token.error == "slow_down") {
     // RFC 8628: on slow_down the client must add five seconds to the poll interval.
     auth_poll_interval_seconds_ += 5;
     auth_poll_delay_frames_ = auth_poll_interval_seconds_ * kFramesPerSecond;
-    set_status(StatusKind::Info, "Waiting for approval on your phone.");
+    clear_status();
   } else if (token.error == "expired_token" || token.error == "invalid_grant") {
     // Google does not send the RFC 8628 expired_token error; a device code that expired or was
     // already claimed comes back as invalid_grant instead.
     google_auth_pending_ = false;
     device_code_ = {};
-    set_status(StatusKind::Error, "Sign-in code expired. Press Triangle for a new code.");
+    set_status(StatusKind::Error, "Sign-in expired. Press Triangle to retry.");
   } else if (token.error == "access_denied") {
     google_auth_pending_ = false;
     device_code_ = {};
@@ -1361,6 +1513,69 @@ bool App::remote_backup_exists(const std::string &save_id, const std::string &ba
 
 // Select moves the focused snapshot across: a card-only row uploads, a Drive-only row downloads
 // a card copy without touching the live save (unlike restore, which downloads as a side effect).
+bool App::download_remote_backup_to_card(const SaveRecord &save, const BackupRow &row,
+                                         std::string *error) {
+  if (!row.has_remote() || row.has_local()) {
+    if (error) {
+      *error = "This backup is already on the card.";
+    }
+    return false;
+  }
+  if (!ensure_google_access_token()) {
+    return false;
+  }
+  const std::string file_id = remote_file_id_for(row.remote_name);
+  if (file_id.empty()) {
+    if (error) {
+      *error = "Cloud copy not found; refresh and retry.";
+    }
+    return false;
+  }
+  const std::string archive_path =
+      local_backup_archive_path(kBackupRoot, save.id, row.remote_name);
+  const std::string temporary_path = archive_path + ".download";
+  if (!ensure_parent_directory(archive_path)) {
+    if (error) {
+      *error = "Could not create local backup folder.";
+    }
+    return false;
+  }
+
+  // Download beside the final file, then publish only the complete ZIP. A failed stream cannot
+  // appear in the backup list and an out-of-date row can never overwrite a card copy.
+  std::remove(temporary_path.c_str());
+  const std::string busy_label =
+      ui_.compose_modal_label("Downloading ", display_backup_name(row.remote_name), "");
+  BusyLabelScope busy(busy_label.c_str());
+  const std::string download_url =
+      std::string(kDriveFilesEndpoint) + "/" + form_url_encode(file_id) + "?alt=media";
+  const HttpResponse download = drive_request([&](const std::string &token) {
+    return HttpClient().download_file(download_url, temporary_path, token);
+  });
+  if (!download.ok) {
+    std::remove(temporary_path.c_str());
+    if (error) {
+      *error = "Cloud download failed.";
+    }
+    return false;
+  }
+  std::string publish_error;
+  if (!publish_backup_download(temporary_path, archive_path, &publish_error)) {
+    if (error) {
+      *error = publish_error == "backup already exists"
+                   ? "This backup is already on the card."
+                   : "Could not save the downloaded backup.";
+    }
+    return false;
+  }
+  refresh_local_backups();
+  focus_backup_row_by_identity(row.remote_name);
+  if (error) {
+    error->clear();
+  }
+  return true;
+}
+
 void App::handle_transfer_button() {
   cancel_sync_all_confirmation();
   cancel_duplicate_backup_confirmation();
@@ -1378,37 +1593,13 @@ void App::handle_transfer_button() {
   const BackupRow row = *selected_row;
 
   if (!row.has_local()) {
-    if (!ensure_google_access_token()) {
+    std::string error;
+    if (!download_remote_backup_to_card(*selected, row, &error)) {
+      if (!error.empty()) {
+        set_status(StatusKind::Error, std::move(error));
+      }
       return;
     }
-    const std::string file_id = remote_file_id_for(row.remote_name);
-    if (file_id.empty()) {
-      set_status(StatusKind::Error, "Cloud copy not found; refresh and retry.");
-      return;
-    }
-    const std::string archive_path =
-        local_backup_archive_path(kBackupRoot, selected->id, row.remote_name);
-    if (!ensure_parent_directory(archive_path)) {
-      set_status(StatusKind::Error, "Could not create local backup folder.");
-      return;
-    }
-    const std::string busy_label =
-        ui_.compose_modal_label("Downloading ", display_backup_name(row.remote_name), "");
-    BusyLabelScope busy(busy_label.c_str());
-    const std::string download_url =
-        std::string(kDriveFilesEndpoint) + "/" + form_url_encode(file_id) + "?alt=media";
-    const HttpResponse download = drive_request([&](const std::string &token) {
-      return HttpClient().download_file(download_url, archive_path, token);
-    });
-    if (!download.ok) {
-      // download_file streams to disk, so a failed transfer leaves a partial zip that the next
-      // refresh would list as a real backup; remove it.
-      std::remove(archive_path.c_str());
-      set_status(StatusKind::Error, "Cloud download failed.");
-      return;
-    }
-    refresh_local_backups();
-    focus_backup_row_by_identity(row.remote_name);
     set_status(StatusKind::Success,
                ui_.compose_status_with_name("Downloaded ", display_backup_name(row.remote_name),
                                             "."));
@@ -1461,7 +1652,9 @@ SaveMetadataJsonResult App::ensure_local_backup_metadata(const SaveRecord &save,
   const std::string metadata_path =
       local_backup_metadata_path(kBackupRoot, save.id, backup_name);
   SaveMetadataJsonResult metadata = read_save_metadata_json(metadata_path);
-  if (metadata.ok && metadata.archive_identity == identity) {
+  const bool usable_cached_metadata = save_metadata_is_usable(metadata, identity);
+  if (usable_cached_metadata && metadata.metadata.source == SaveTimeSource::VitaSlot) {
+    upgrade_legacy_metadata_file(metadata_path, identity, &metadata);
     return metadata;
   }
 
@@ -1471,13 +1664,49 @@ SaveMetadataJsonResult App::ensure_local_backup_metadata(const SaveRecord &save,
       local_backup_archive_path(kBackupRoot, save.id, backup_name);
   const ArchiveReadResult embedded =
       read_stored_backup_entry(archive_path, "sce_sys/sdslot.dat", kMaxSdslotFileSize);
-  if (!embedded.ok) {
-    return {false, {}, {}, "slot details unavailable"};
+  SaveMetadata recovered;
+  if (embedded.ok) {
+    recovered = parse_sdslot_data(embedded.data);
   }
 
-  SaveMetadata recovered = parse_sdslot_data(embedded.data);
+  // PSP/homebrew saves normally have no Vita slot file. Their cached filesystem time is already
+  // the best available metadata, so do not repeatedly unpack the same archive on every visit.
+  if (embedded.entry_missing() && usable_cached_metadata) {
+    upgrade_legacy_metadata_file(metadata_path, identity, &metadata);
+    return metadata;
+  }
+
+  // Retail backups contain raw PFS-encrypted files, so their embedded sdslot.dat looks like
+  // random bytes until the whole save directory is mounted. Extract into an isolated work path;
+  // never mount over the live save merely to inspect an old backup.
   if (recovered.slots.empty()) {
-    return {false, {}, {}, "slot details unavailable"};
+    // AppMgr accepts savedata mounts only from a savedata device root. Use the alternate ur0 root
+    // so inspection can never collide with the game's live ux0 save. The fixed title-ID-shaped
+    // folder belongs only to Save Keeper and is removed by BackupInspectionDirectory.
+    const std::string work_root = "ur0:user/00/savedata";
+    if (ensure_directory_path(work_root)) {
+      BackupInspectionDirectory inspection(work_root + "/SVKMTMP01");
+      const RestoreResult extracted =
+          extract_backup_archive_for_inspection(archive_path, inspection.path());
+      if (extracted.ok) {
+        SaveMetadata mounted = resolve_live_save_metadata(
+            inspection.path(), {}, save.platform != SavePlatform::Psp);
+        if ((mounted.source == SaveTimeSource::VitaSlot && !mounted.slots.empty()) ||
+            (mounted.source == SaveTimeSource::Filesystem &&
+             !extracted.file_timestamps_uniform)) {
+          recovered = std::move(mounted);
+        }
+      }
+    }
+  }
+
+  if (!save_metadata_has_observed_time(recovered)) {
+    // A healthy filesystem-time companion is still useful for games that do not use Vita slots.
+    // Preserve it after the one best-effort archive inspection rather than replacing it with an
+    // invented backup time.
+    return usable_cached_metadata
+               ? metadata
+               : SaveMetadataJsonResult{false, {}, {}, "slot details unavailable"};
   }
   std::string write_error;
   if (!write_save_metadata_json_atomic(metadata_path, identity, recovered, &write_error)) {
@@ -1517,9 +1746,12 @@ SaveMetadataJsonResult App::download_remote_backup_metadata(
     const std::string &archive_file_id) {
   const std::string metadata_path =
       local_backup_metadata_path(kBackupRoot, save.id, archive_name);
+  const std::string expected_identity = backup_identity(archive_name);
   const SaveMetadataJsonResult cached = read_save_metadata_json(metadata_path);
-  if (cached.ok) {
-    return cached;
+  if (save_metadata_is_usable(cached, expected_identity)) {
+    SaveMetadataJsonResult upgraded = cached;
+    upgrade_legacy_metadata_file(metadata_path, expected_identity, &upgraded);
+    return upgraded;
   }
 
   const std::string folder_name = resolved_drive_folder_name(save.id);
@@ -1549,19 +1781,38 @@ SaveMetadataJsonResult App::download_remote_backup_metadata(
     return {false, {}, {}, "slot details download failed"};
   }
   SaveMetadataJsonResult metadata = read_save_metadata_json(temporary_path);
-  if (!metadata.ok || std::rename(temporary_path.c_str(), metadata_path.c_str()) != 0) {
+  if (!save_metadata_is_usable(metadata, expected_identity)) {
     std::remove(temporary_path.c_str());
-    if (metadata.ok) {
-      metadata.ok = false;
-      metadata.error = "could not cache slot details";
-    }
+    metadata.ok = false;
+    metadata.error = "slot details do not match this backup";
+    return metadata;
+  }
+  if (!upgrade_legacy_metadata_file(temporary_path, expected_identity, &metadata)) {
+    std::remove(temporary_path.c_str());
+    return metadata;
+  }
+  if (std::rename(temporary_path.c_str(), metadata_path.c_str()) != 0) {
+    std::remove(temporary_path.c_str());
+    metadata.ok = false;
+    metadata.error = "could not cache slot details";
     return metadata;
   }
   return metadata;
 }
 
-void App::repair_remote_backup_metadata(const SaveRecord &save, const BackupRow &row) {
+void App::repair_remote_backup_metadata(const SaveRecord &save, const BackupRow &row,
+                                        bool replace_unusable) {
   if (!row.has_remote() || !google_connected_ || !network_connected_) {
+    return;
+  }
+  const std::string metadata_path =
+      local_backup_metadata_path(kBackupRoot, save.id, row.primary_name());
+  SaveMetadataJsonResult local_metadata = read_save_metadata_json(metadata_path);
+  if (!save_metadata_is_usable(local_metadata, backup_identity(row.primary_name()))) {
+    return;
+  }
+  if (!upgrade_legacy_metadata_file(metadata_path, backup_identity(row.primary_name()),
+                                    &local_metadata)) {
     return;
   }
   const std::string archive_file_id = remote_file_id_for(row.remote_name);
@@ -1575,11 +1826,23 @@ void App::repair_remote_backup_metadata(const SaveRecord &save, const BackupRow 
   // Do not create duplicate companions if Drive already has either the stable property link or
   // an older canonical-name companion. Repair is opportunistic; the details screen never waits
   // for it and never reports it as a ZIP failure.
-  if (!find_remote_sidecar(folder->second, archive_file_id, row.remote_name).id.empty()) {
+  const DriveFile existing =
+      find_remote_sidecar(folder->second, archive_file_id, row.remote_name);
+  if (!existing.id.empty()) {
+    if (!replace_unusable) {
+      return;
+    }
+    // Update in place: Drive keeps the old JSON if this request fails, and the stable file ID
+    // prevents another device from observing a delete/create gap or duplicate companions.
+    drive_request([&](const std::string &token) {
+      return HttpClient().patch_multipart_file(
+          build_drive_multipart_update_url(existing.id),
+          build_drive_sidecar_update_metadata_json(
+              backup_metadata_name(row.remote_name), archive_file_id),
+          metadata_path, token);
+    });
     return;
   }
-  const std::string metadata_path =
-      local_backup_metadata_path(kBackupRoot, save.id, row.primary_name());
   drive_request([&](const std::string &token) {
     return HttpClient().post_multipart_file(
         kDriveUploadEndpoint,
@@ -1589,25 +1852,75 @@ void App::repair_remote_backup_metadata(const SaveRecord &save, const BackupRow 
   });
 }
 
-void App::open_slot_details() {
+void App::download_and_inspect_selected_backup() {
   const SaveRecord *selected = selected_save_record();
   const BackupRow *selected_row = selected_backup_row();
-  if (!selected || !selected_row) {
+  if (!selected || !selected_row || !slot_details_.download_to_inspect_available) {
     return;
   }
   const SaveRecord save = *selected;
-  const BackupRow row = *selected_row;
-  ui_.draw_busy("Loading slot details", 0, -1);
+  const BackupRow remote_row = *selected_row;
+  std::string error;
+  if (!download_remote_backup_to_card(save, remote_row, &error)) {
+    slot_details_.warning_message =
+        error.empty() ? "The backup could not be downloaded." : std::move(error);
+    return;
+  }
+
+  // The ZIP is now a normal card backup regardless of whether optional slot information exists.
+  // Recover locally, replace an unusable Drive companion when possible, then redraw this screen.
+  const SaveMetadataJsonResult metadata =
+      ensure_local_backup_metadata(save, remote_row.remote_name);
+  if (save_metadata_is_usable(metadata, backup_identity(remote_row.remote_name))) {
+    repair_remote_backup_metadata(save, remote_row, true);
+  }
+  open_save_details();
+}
+
+void App::open_save_details() {
+  const SaveRecord *selected = selected_save_record();
+  const BackupRow *selected_row = selected_backup_row();
+  if (!selected) {
+    return;
+  }
+  const SaveRecord save = *selected;
+  ui_.draw_busy("Loading save details", 0, -1);
 
   slot_details_ = {};
   slot_details_.game_title = save.display_name;
+  if (!selected_row) {
+    // "New Backup" represents the live save. Resolve its details directly without creating an
+    // archive or JSON companion; this is a read-only preview of what the next backup would use.
+    slot_details_.snapshot_name = "Current Save";
+    slot_details_.metadata = resolve_live_save_metadata(
+        save.path, {}, save.platform != SavePlatform::Psp);
+    if (!save_metadata_has_observed_time(slot_details_.metadata)) {
+      slot_details_.metadata = {};
+      slot_details_.unavailable_message = "No save details available";
+      slot_details_.warning_message =
+          "No readable Vita slot information or save-file timestamp was found.";
+    } else if (slot_details_.metadata.slots.empty()) {
+      slot_details_.unavailable_message = "No Vita slot details available";
+      slot_details_.warning_message =
+          save.platform == SavePlatform::Psp
+              ? "PSP saves do not use Vita slot metadata. The save time comes from the newest "
+                "file in this save."
+              : "This save has no readable Vita slot metadata. The save time comes from its "
+                "newest file.";
+    }
+    slot_details_.open = true;
+    return;
+  }
+
+  const BackupRow row = *selected_row;
   slot_details_.snapshot_name = row.primary_name();
   SaveMetadataJsonResult metadata;
 
   if (row.has_local()) {
     const std::string metadata_path =
         local_backup_metadata_path(kBackupRoot, save.id, row.local_name);
-    const bool already_cached = read_save_metadata_json(metadata_path).ok;
+    const bool already_cached = save_metadata_is_usable(
+        read_save_metadata_json(metadata_path), backup_identity(row.local_name));
     metadata = ensure_local_backup_metadata(save, row.local_name);
     if (metadata.ok && !already_cached && row.has_remote()) {
       repair_remote_backup_metadata(save, row);
@@ -1621,16 +1934,24 @@ void App::open_slot_details() {
                                                 remote_file_id_for(row.remote_name));
   }
 
-  if (metadata.ok) {
+  const bool usable_metadata =
+      save_metadata_is_usable(metadata, backup_identity(row.primary_name()));
+  slot_details_.download_to_inspect_available =
+      backup_details_download_available(row, usable_metadata);
+
+  if (usable_metadata) {
     slot_details_.metadata = std::move(metadata.metadata);
   } else {
-    slot_details_.unavailable_message = "Slot details unavailable";
+    // Old Save Keeper ZIPs used backup creation time in their names and entry headers, so neither
+    // is evidence of when the game was saved. Leave the time unknown instead of presenting it as
+    // an estimate.
+    slot_details_.unavailable_message = "No slot details available";
     if (!row.has_local()) {
       slot_details_.warning_message =
-          "Download this backup to inspect its embedded metadata.";
+          "Download the backup to check for Vita slot information.";
     } else {
       slot_details_.warning_message =
-          "This backup has no readable Vita slot metadata.";
+          "No readable Vita slot information was found in this backup.";
     }
   }
   slot_details_.open = true;
@@ -1829,7 +2150,7 @@ void App::begin_label_edit() {
     return;
   }
   if (backup_label_conflicts_with_auto(label)) {
-    set_status(StatusKind::Error, "\"auto\" is reserved for automatic snapshots.");
+    set_status(StatusKind::Error, "\"auto\" is reserved for automatic backups.");
     return;
   }
 
@@ -1889,7 +2210,7 @@ bool App::poll_batch_cancel() {
 void App::cancel_duplicate_backup_confirmation() {
   if (duplicate_backup_confirmation_pending_) {
     duplicate_backup_confirmation_pending_ = false;
-    set_status(StatusKind::Info, "Backup canceled.");
+    clear_status();
   }
 }
 
@@ -2045,13 +2366,18 @@ int App::run() {
     return -1;
   }
 
+  // Slot timestamps are optional. If the mount bridge cannot load, all backup operations still
+  // work and metadata falls back to save-file times as before.
+  initialize_save_data_mount_bridge();
+
   // Scanning storage and reading the system app database (titles, icons) blocks for a moment on a
   // full library; draw a frame first so the screen is not blank while it runs.
   ui_.draw_busy("Loading saves", 0, -1);
 
   // Scan once at startup for the foundation build. Later actions that create, restore, or delete a
   // save will refresh this list explicitly so the UI does not rescan storage every frame.
-  saves_ = scan_save_roots(default_save_roots());
+  saves_ = scan_save_roots(default_save_roots(),
+                           [this] { ui_.draw_busy("Loading saves", 0, -1); });
   // Keep the "Loading saves" sweep moving through the app-database query (its slowest part) by
   // repainting a frame every few rows, instead of a frozen bar.
   const AppDbMetadataResult metadata_result =
@@ -2060,6 +2386,9 @@ int App::run() {
     set_status(StatusKind::Info, "Using save-folder metadata: " + metadata_result.error);
   }
   load_settings();
+  if (save_sort_requires_all_times(sort_mode_)) {
+    resolve_all_save_times();
+  }
   apply_save_sort(&saves_, sort_mode_, {});
   // Open on the first tab that actually has saves so the app never starts on an empty grid.
   for (int i = 0; i < kSaveCategoryCount; ++i) {
@@ -2069,6 +2398,7 @@ int App::run() {
     }
   }
   rebuild_visible_saves();
+  resolve_selected_save_time();
   refresh_local_backups();
   load_google_token_cache();
 
@@ -2153,6 +2483,13 @@ int App::run() {
     if (slot_details_.open) {
       if ((pressed & cancel_button) != 0) {
         slot_details_.open = false;
+        previous_buttons = buttons;
+        sceKernelDelayThread(kFrameDelayUs);
+        continue;
+      }
+      if ((pressed & backup_button) != 0 &&
+          slot_details_.download_to_inspect_available) {
+        download_and_inspect_selected_backup();
         previous_buttons = buttons;
         sceKernelDelayThread(kFrameDelayUs);
         continue;
@@ -2253,25 +2590,31 @@ int App::run() {
       cancel_duplicate_backup_confirmation();
       cancel_google_auth();
     }
-    // Triangle now mirrors the other tap/hold gestures: tap keeps the Google action, while a
-    // deliberate hold opens metadata for the focused snapshot. Delete-scope remains immediate.
+    // Triangle mirrors the other tap/hold gestures: a tap opens save details, while a deliberate
+    // hold performs the Google action. Delete scope and an active sign-in keep their immediate
+    // Triangle actions because waiting for release would make those modal controls feel broken.
     if ((buttons & SCE_CTRL_TRIANGLE) != 0) {
       if ((pressed & SCE_CTRL_TRIANGLE) != 0 && delete_scope_prompt_pending_) {
         delete_scope_prompt_pending_ = false;
         perform_scoped_delete(false, true);
         triangle_hold_consumed = true;
+      } else if ((pressed & SCE_CTRL_TRIANGLE) != 0 && google_auth_pending_) {
+        handle_google_button();
+        triangle_hold_consumed = true;
       } else if (!delete_scope_prompt_pending_) {
         ++triangle_hold_frames;
-        if (!triangle_hold_consumed &&
-            triangle_hold_frames >= kSelectHoldTriggerFrames) {
+        if (resolve_tap_hold_action(triangle_hold_frames, false, triangle_hold_consumed,
+                                    kSelectHoldTapFrames, kSelectHoldTriggerFrames) ==
+            TapHoldAction::Hold) {
           triangle_hold_consumed = true;
-          open_slot_details();
+          handle_google_button();
         }
       }
     } else {
-      if (triangle_hold_frames > 0 && !triangle_hold_consumed &&
-          triangle_hold_frames < kSelectHoldTapFrames) {
-        handle_google_button();
+      if (resolve_tap_hold_action(triangle_hold_frames, true, triangle_hold_consumed,
+                                  kSelectHoldTapFrames, kSelectHoldTriggerFrames) ==
+          TapHoldAction::Tap) {
+        open_save_details();
       }
       triangle_hold_frames = 0;
       triangle_hold_consumed = false;
@@ -2375,9 +2718,9 @@ int App::run() {
     } else if (!triangle_hold_consumed &&
                triangle_hold_frames >= kSelectHoldTapFrames) {
       ui_state.hold_gauge_fraction = gauge_fraction(triangle_hold_frames);
-      ui_state.status_message = selected_backup_row() != nullptr
-                                    ? "Keep holding to view slot details"
-                                    : "Pick a backup first to view slot details";
+      ui_state.status_message = google_connected_
+                                    ? "Keep holding to refresh Google Drive"
+                                    : "Keep holding to connect Google Drive";
       ui_state.status_kind = StatusKind::Info;
     }
     ui_.draw(ui_state);

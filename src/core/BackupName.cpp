@@ -31,6 +31,33 @@ bool is_digit_at(const std::string &text, std::size_t index) {
   return std::isdigit(static_cast<unsigned char>(text[index])) != 0;
 }
 
+int parse_digits(const std::string &text, std::size_t offset, std::size_t count) {
+  int value = 0;
+  for (std::size_t i = 0; i < count; ++i) {
+    value = value * 10 + (text[offset + i] - '0');
+  }
+  return value;
+}
+
+bool is_leap_year(int year) {
+  return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+}
+
+bool valid_timestamp(const BackupTimestamp &value) {
+  static const int days_per_month[] = {31, 28, 31, 30, 31, 30,
+                                       31, 31, 30, 31, 30, 31};
+  if (value.year < 1 || value.year > 9999 || value.month < 1 || value.month > 12 ||
+      value.hour < 0 || value.hour > 23 || value.minute < 0 || value.minute > 59 ||
+      value.second < 0 || value.second > 59) {
+    return false;
+  }
+  int days = days_per_month[value.month - 1];
+  if (value.month == 2 && is_leap_year(value.year)) {
+    ++days;
+  }
+  return value.day >= 1 && value.day <= days;
+}
+
 std::size_t canonical_identity_length(const std::string &plain) {
   if (plain.size() < kBackupTimestampPrefixLength) {
     return 0;
@@ -88,6 +115,25 @@ std::string make_timestamped_backup_name(const BackupTimestamp &timestamp,
   }
   out << ".zip";
   return out.str();
+}
+
+bool parse_backup_timestamp(const std::string &file_name, BackupTimestamp *timestamp) {
+  if (!timestamp || !has_backup_timestamp_prefix(file_name)) {
+    return false;
+  }
+  const std::string plain = display_backup_name(file_name);
+  BackupTimestamp parsed;
+  parsed.year = parse_digits(plain, 0, 4);
+  parsed.month = parse_digits(plain, 5, 2);
+  parsed.day = parse_digits(plain, 8, 2);
+  parsed.hour = parse_digits(plain, 11, 2);
+  parsed.minute = parse_digits(plain, 14, 2);
+  parsed.second = parse_digits(plain, 17, 2);
+  if (!valid_timestamp(parsed)) {
+    return false;
+  }
+  *timestamp = parsed;
+  return true;
 }
 
 std::string display_backup_name(const std::string &file_name) {

@@ -58,6 +58,9 @@ private:
   void load_settings();
   void save_settings();
   void rebuild_visible_saves();
+  void resolve_selected_save_time();
+  void resolve_all_save_times();
+  bool resolve_save_time(SaveRecord *save);
   std::size_t category_count(SaveCategory category) const;
   const SaveRecord *selected_save_record() const;
   void cancel_restore_confirmation();
@@ -65,7 +68,7 @@ private:
   void handle_action_button();
   void create_new_backup();
   LocalSnapshotResult create_local_snapshot(const SaveRecord &save, const std::string &suffix,
-                                            bool report_progress);
+                                            bool report_progress, bool force_new = false);
   void handle_restore();
   void handle_delete_button();
   void load_google_token_cache();
@@ -98,6 +101,9 @@ private:
   bool rename_remote_backup(const SaveRecord &save, const std::string &remote_name,
                             const std::string &new_name);
   void handle_transfer_button();
+  bool download_remote_backup_to_card(const SaveRecord &save, const BackupRow &row,
+                                      std::string *error);
+  void download_and_inspect_selected_backup();
   BackupUploadResult upload_local_backup(const SaveRecord &save,
                                          const std::string &backup_name);
   // Read a healthy local JSON companion, or rebuild it from sdslot.dat inside an older ZIP.
@@ -110,8 +116,9 @@ private:
   SaveMetadataJsonResult download_remote_backup_metadata(const SaveRecord &save,
                                                           const std::string &archive_name,
                                                           const std::string &archive_file_id);
-  void open_slot_details();
-  void repair_remote_backup_metadata(const SaveRecord &save, const BackupRow &row);
+  void open_save_details();
+  void repair_remote_backup_metadata(const SaveRecord &save, const BackupRow &row,
+                                     bool replace_unusable = false);
   bool remote_backup_exists(const std::string &save_id, const std::string &backup_name) const;
   void begin_sync_all();
   void run_sync_all();

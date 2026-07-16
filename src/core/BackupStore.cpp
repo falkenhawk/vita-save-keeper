@@ -4,10 +4,13 @@
 #include "core/PathUtil.hpp"
 
 #include <algorithm>
+#include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <dirent.h>
 #include <string>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <vector>
 
 namespace vsm {
@@ -124,19 +127,22 @@ BackupCreationPlan plan_backup_creation(const BackupTimestamp &timestamp,
                                         const std::string &backup_root,
                                         const std::string &save_id,
                                         const std::vector<std::string> &local_names,
-                                        const std::vector<std::string> &remote_names) {
+                                        const std::vector<std::string> &remote_names,
+                                        bool reuse_matching_archive) {
   for (unsigned int counter = 0;; counter = counter == 0 ? 2 : counter + 1) {
     const std::string candidate = candidate_name(timestamp, suffix, counter);
     const std::string identity = backup_identity(candidate);
 
-    for (const std::string &local_name : local_names) {
-      if (backup_identity(local_name) != identity) {
-        continue;
-      }
-      if (entries_match_backup_archive(
-              current_entries,
-              local_backup_archive_path(backup_root, save_id, local_name))) {
-        return {local_name, true};
+    if (reuse_matching_archive) {
+      for (const std::string &local_name : local_names) {
+        if (backup_identity(local_name) != identity) {
+          continue;
+        }
+        if (entries_match_backup_archive(
+                current_entries,
+                local_backup_archive_path(backup_root, save_id, local_name))) {
+          return {local_name, true};
+        }
       }
     }
 
@@ -144,6 +150,59 @@ BackupCreationPlan plan_backup_creation(const BackupTimestamp &timestamp,
       return {candidate, false};
     }
   }
+}
+
+bool publish_backup_download(const std::string &temporary_path,
+                             const std::string &destination_path,
+                             std::string *error) {
+  if (temporary_path.empty() || destination_path.empty() ||
+      temporary_path == destination_path) {
+    if (error) {
+      *error = "download paths are invalid";
+    }
+    return false;
+  }
+
+  // Reserve with a directory the backup scanner cannot mistake for a ZIP. If power is lost here,
+  // the next attempt removes this empty marker and no zero-byte backup is ever shown.
+  const std::string reservation_path = destination_path + ".publishing";
+  if (rmdir(reservation_path.c_str()) != 0 && errno != ENOENT) {
+    std::remove(temporary_path.c_str());
+    if (error) {
+      *error = "could not clear interrupted backup download";
+    }
+    return false;
+  }
+  if (mkdir(reservation_path.c_str(), 0777) != 0) {
+    std::remove(temporary_path.c_str());
+    if (error) {
+      *error = "could not reserve backup path";
+    }
+    return false;
+  }
+
+  struct stat destination_info {};
+  if (stat(destination_path.c_str(), &destination_info) == 0) {
+    rmdir(reservation_path.c_str());
+    std::remove(temporary_path.c_str());
+    if (error) {
+      *error = "backup already exists";
+    }
+    return false;
+  }
+  if (std::rename(temporary_path.c_str(), destination_path.c_str()) != 0) {
+    rmdir(reservation_path.c_str());
+    std::remove(temporary_path.c_str());
+    if (error) {
+      *error = "could not publish downloaded backup";
+    }
+    return false;
+  }
+  rmdir(reservation_path.c_str());
+  if (error) {
+    error->clear();
+  }
+  return true;
 }
 
 } // namespace vsm

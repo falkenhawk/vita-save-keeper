@@ -29,6 +29,7 @@ struct SlotDetailsState {
   int details_scroll{};
   std::string unavailable_message;
   std::string warning_message;
+  bool download_to_inspect_available{};
 };
 
 // Grid width of the save panel; D-pad up/down moves by one full row, so the input handler in App
@@ -54,7 +55,8 @@ struct UiState {
   bool delete_scope_prompt_pending{};
   bool sync_all_confirmation_pending{};
   bool duplicate_backup_confirmation_pending{};
-  // 0 when idle; fraction of the active hold gesture (Select = batch, Square = label) completed,
+  // 0 when idle; fraction of the active hold gesture (Select = batch, Square = label, Triangle =
+  // Google action) completed,
   // drawn as a gauge under the status line while the hold hint is showing.
   float hold_gauge_fraction{};
   bool google_connected{};

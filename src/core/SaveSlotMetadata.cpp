@@ -215,6 +215,35 @@ SaveDateTime datetime_from_time(std::time_t value) {
           local->tm_min, local->tm_sec};
 }
 
+long long days_from_civil(int year, unsigned int month, unsigned int day) {
+  // Convert a Gregorian calendar date to days since the Unix epoch without consulting the
+  // process timezone. sdslot.dat stores UTC calendar fields, so mktime() would mislabel them as
+  // local time before the real UTC-to-local conversion happens.
+  year -= month <= 2;
+  const int era = (year >= 0 ? year : year - 399) / 400;
+  const unsigned int year_of_era = static_cast<unsigned int>(year - era * 400);
+  const unsigned int shifted_month = month > 2 ? month - 3 : month + 9;
+  const unsigned int day_of_year =
+      (153 * shifted_month + 2) / 5 + day - 1;
+  const unsigned int day_of_era =
+      year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+  return static_cast<long long>(era) * 146097 + static_cast<long long>(day_of_era) - 719468;
+}
+
+SaveDateTime local_datetime_from_utc(const SaveDateTime &utc) {
+  const long long seconds =
+      days_from_civil(utc.year, static_cast<unsigned int>(utc.month),
+                      static_cast<unsigned int>(utc.day)) *
+          86400LL +
+      static_cast<long long>(utc.hour) * 3600 + utc.minute * 60 + utc.second;
+  const std::time_t epoch = static_cast<std::time_t>(seconds);
+  if (static_cast<long long>(epoch) != seconds) {
+    return utc;
+  }
+  const SaveDateTime local = datetime_from_time(epoch);
+  return valid_datetime(local) ? local : utc;
+}
+
 bool is_valid_utf8(const std::string &value) {
   return sanitize_utf8(reinterpret_cast<const unsigned char *>(value.data()), value.size()) == value;
 }
@@ -345,6 +374,9 @@ SaveMetadata parse_sdslot_data(const std::vector<unsigned char> &data) {
         !read_fixed_string(data, record + kDetailsOffset, kDetailsSize, &slot.details)) {
       continue;
     }
+    // Save-slot timestamps are UTC calendar fields. Normalize them at the parser boundary so
+    // filenames, JSON, list rows, and details all receive the same device-local wall-clock time.
+    slot.modified_at = local_datetime_from_utc(slot.modified_at);
     result.slots.push_back(std::move(slot));
   }
 
@@ -359,6 +391,22 @@ SaveMetadata parse_sdslot_data(const std::vector<unsigned char> &data) {
     }
   }
   return result;
+}
+
+bool save_directory_has_pfs_metadata(const std::string &save_path) {
+  struct stat info {};
+  return stat(join_path(save_path, "sce_pfs").c_str(), &info) == 0 && S_ISDIR(info.st_mode);
+}
+
+bool save_metadata_is_usable(const SaveMetadataJsonResult &metadata,
+                             const std::string &expected_identity) {
+  return metadata.ok && metadata.archive_identity == expected_identity &&
+         metadata.metadata.source != SaveTimeSource::BackupClock;
+}
+
+bool save_metadata_has_observed_time(const SaveMetadata &metadata) {
+  return metadata.source == SaveTimeSource::Filesystem ||
+         (metadata.source == SaveTimeSource::VitaSlot && !metadata.slots.empty());
 }
 
 SaveMetadata resolve_save_metadata(const std::string &save_path,
@@ -413,7 +461,7 @@ long long save_datetime_to_local_epoch(const SaveDateTime &value) {
 std::string serialize_save_metadata_json(const std::string &identity,
                                          const SaveMetadata &metadata) {
   picojson::object root;
-  root["version"] = picojson::value(1.0);
+  root["version"] = picojson::value(static_cast<double>(kSaveMetadataJsonVersion));
   root["archiveIdentity"] = picojson::value(identity);
   root["savedAt"] = picojson::value(format_save_datetime(metadata.saved_at));
   root["source"] = picojson::value(source_text(metadata.source));
@@ -454,7 +502,9 @@ SaveMetadataJsonResult parse_save_metadata_json(const std::string &json) {
   const picojson::value *source = json_member(root, "source");
   const picojson::value *approximate = json_member(root, "approximate");
   const picojson::value *slots = json_member(root, "slots");
-  if (!version || !version->is<double>() || version->get<double>() != 1.0 ||
+  if (!version || !version->is<double>() ||
+      (version->get<double>() != 1.0 &&
+       version->get<double>() != static_cast<double>(kSaveMetadataJsonVersion)) ||
       !json_string(root, "archiveIdentity", 255, &result.archive_identity) ||
       result.archive_identity.empty() || !saved_at || !saved_at->is<std::string>() ||
       !source || !source->is<std::string>() || !approximate || !approximate->is<bool>() ||
@@ -462,6 +512,7 @@ SaveMetadataJsonResult parse_save_metadata_json(const std::string &json) {
     result.error = "metadata fields missing or unsupported";
     return result;
   }
+  result.schema_version = static_cast<int>(version->get<double>());
   if (!parse_datetime_string(saved_at->get<std::string>(), &result.metadata.saved_at)) {
     result.error = "savedAt is invalid";
     return result;
@@ -493,6 +544,16 @@ SaveMetadataJsonResult parse_save_metadata_json(const std::string &json) {
       return result;
     }
     result.metadata.slots.push_back(std::move(slot));
+  }
+
+  // Version 1 was produced before Save Keeper established that sdslot.dat calendar fields are
+  // UTC. Only Vita-slot metadata needs migration; filesystem and backup-clock values were already
+  // generated from the device's local clock.
+  if (result.schema_version == 1 && result.metadata.source == SaveTimeSource::VitaSlot) {
+    result.metadata.saved_at = local_datetime_from_utc(result.metadata.saved_at);
+    for (SaveSlotMetadata &slot : result.metadata.slots) {
+      slot.modified_at = local_datetime_from_utc(slot.modified_at);
+    }
   }
 
   result.ok = true;
