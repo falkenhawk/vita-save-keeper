@@ -37,7 +37,8 @@ static int mount_with_app_manager(SaveKeeperMountArgs *args) {
   size_t mount_offset = 0;
 
   // SceAppMgr does not export this mount operation. These offsets are the firmware-specific
-  // locations used by VitaShell for every retail firmware from 3.55 through 3.73.
+  // locations used by VitaShell for every retail firmware from 3.55 through 3.74 (3.74 shares the
+  // 3.69-3.73 offsets; its module NID comes from RealYoti's maintained VitaShell fork).
   switch (app_manager.module_nid) {
   case 0x94CEFE4B: // 3.55 retail
   case 0xDFBC288C: // 3.57 retail
@@ -62,6 +63,7 @@ static int mount_with_app_manager(SaveKeeperMountArgs *args) {
   case 0xF7846B4E: // 3.71 retail
   case 0xA8E80BA8: // 3.72 retail
   case 0xB299D195: // 3.73 retail
+  case 0x30007BD3: // 3.74 retail
     find_offset = 0x2DE9;
     mount_offset = 0x19E95;
     break;
@@ -107,18 +109,23 @@ static int mount_with_app_manager(SaveKeeperMountArgs *args) {
   char desired_mount_point[16] = {0};
   char mount_point[16] = {0};
   char key[16] = {0};
-  if (args->process_title_id) {
-    ksceKernelStrncpyUserToKernel(title_id, args->process_title_id, sizeof(title_id) - 1);
+  // Copying from user pointers can fail on a bad address. Abort the mount rather than drive the
+  // AppMgr routine with a half-copied or empty argument that looks valid to the guards below.
+  if (args->process_title_id &&
+      ksceKernelStrncpyUserToKernel(title_id, args->process_title_id, sizeof(title_id) - 1) < 0) {
+    return -1;
   }
-  if (args->path) {
-    ksceKernelStrncpyUserToKernel(path, args->path, sizeof(path) - 1);
+  if (args->path &&
+      ksceKernelStrncpyUserToKernel(path, args->path, sizeof(path) - 1) < 0) {
+    return -1;
   }
-  if (args->desired_mount_point) {
-    ksceKernelStrncpyUserToKernel(desired_mount_point, args->desired_mount_point,
-                                 sizeof(desired_mount_point) - 1);
+  if (args->desired_mount_point &&
+      ksceKernelStrncpyUserToKernel(desired_mount_point, args->desired_mount_point,
+                                    sizeof(desired_mount_point) - 1) < 0) {
+    return -1;
   }
-  if (args->key) {
-    ksceKernelMemcpyUserToKernel(key, args->key, sizeof(key));
+  if (args->key && ksceKernelMemcpyUserToKernel(key, args->key, sizeof(key)) < 0) {
+    return -1;
   }
 
   result = mount_by_id(process_id, (void *)((uintptr_t)process_info + 0x580), args->id,
@@ -136,9 +143,11 @@ int saveKeeperKernelMountById(SaveKeeperMountArgs *args) {
   ENTER_SYSCALL(state);
 
   SaveKeeperMountArgs kernel_args;
-  ksceKernelMemcpyUserToKernel(&kernel_args, args, sizeof(kernel_args));
-  const int result =
-      ksceKernelRunWithStack(0x2000, (void *)mount_with_app_manager, &kernel_args);
+  memset(&kernel_args, 0, sizeof(kernel_args));
+  int result = ksceKernelMemcpyUserToKernel(&kernel_args, args, sizeof(kernel_args));
+  if (result >= 0) {
+    result = ksceKernelRunWithStack(0x2000, (void *)mount_with_app_manager, &kernel_args);
+  }
 
   EXIT_SYSCALL(state);
   return result;

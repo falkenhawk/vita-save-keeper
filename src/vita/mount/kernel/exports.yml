@@ -6,7 +6,7 @@ SaveKeeperMountKernel:
   main:
     start: module_start
     stop: module_stop
-  modules:
+  libraries:
     SaveKeeperMountKernelLibrary:
       syscall: true
       functions:

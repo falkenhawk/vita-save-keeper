@@ -6,7 +6,7 @@ SaveKeeperMountUser:
   main:
     start: module_start
     stop: module_stop
-  modules:
+  libraries:
     SaveKeeperMountUserLibrary:
       syscall: false
       functions:
