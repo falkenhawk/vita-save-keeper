@@ -1,4 +1,11 @@
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "core/SaveSlotMetadata.hpp"
+
+#include "core/CalendarUtil.hpp"
+#include "core/PathUtil.hpp"
 
 #include <picojson.h>
 
@@ -40,24 +47,9 @@ std::uint32_t read_le32(const std::vector<unsigned char> &data, std::size_t offs
          (static_cast<std::uint32_t>(data[offset + 3]) << 24);
 }
 
-bool is_leap_year(int year) {
-  return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-}
-
 bool valid_datetime(const SaveDateTime &value) {
-  if (value.year < 1 || value.year > 9999 || value.month < 1 || value.month > 12 ||
-      value.hour < 0 || value.hour > 23 || value.minute < 0 || value.minute > 59 ||
-      value.second < 0 || value.second > 59) {
-    return false;
-  }
-  static constexpr std::array<int, 12> kMonthDays = {
-      31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
-  };
-  int days = kMonthDays[static_cast<std::size_t>(value.month - 1)];
-  if (value.month == 2 && is_leap_year(value.year)) {
-    ++days;
-  }
-  return value.day >= 1 && value.day <= days;
+  return is_valid_calendar_datetime(value.year, value.month, value.day, value.hour, value.minute,
+                                    value.second);
 }
 
 bool datetime_less(const SaveDateTime &left, const SaveDateTime &right) {
@@ -127,24 +119,16 @@ std::string sanitize_utf8(const unsigned char *bytes, std::size_t size) {
   return out;
 }
 
-bool read_fixed_string(const std::vector<unsigned char> &data, std::size_t offset,
+// Reads a NUL-terminated fixed-capacity field. A field that fills the whole capacity with no
+// terminator is treated as a maxed-out string, not corruption: dropping the slot over it would
+// also discard its already-validated timestamp. The caller guarantees the field is in-bounds.
+void read_fixed_string(const std::vector<unsigned char> &data, std::size_t offset,
                        std::size_t capacity, std::string *value) {
   const auto begin = data.begin() + static_cast<long>(offset);
   const auto end = begin + static_cast<long>(capacity);
   const auto terminator = std::find(begin, end, 0);
-  if (terminator == end) {
-    return false;
-  }
   const std::size_t length = static_cast<std::size_t>(terminator - begin);
   *value = sanitize_utf8(data.data() + offset, length);
-  return true;
-}
-
-std::string join_path(const std::string &parent, const std::string &child) {
-  if (parent.empty() || parent.back() == '/') {
-    return parent + child;
-  }
-  return parent + "/" + child;
 }
 
 bool is_dot_entry(const char *name) {
@@ -207,12 +191,12 @@ bool read_sdslot_file(const std::string &path, std::vector<unsigned char> *data)
 }
 
 SaveDateTime datetime_from_time(std::time_t value) {
-  const std::tm *local = std::localtime(&value);
-  if (!local) {
+  std::tm local {};
+  if (!localtime_r(&value, &local)) {
     return {};
   }
-  return {local->tm_year + 1900, local->tm_mon + 1, local->tm_mday, local->tm_hour,
-          local->tm_min, local->tm_sec};
+  return {local.tm_year + 1900, local.tm_mon + 1, local.tm_mday, local.tm_hour, local.tm_min,
+          local.tm_sec};
 }
 
 long long days_from_civil(int year, unsigned int month, unsigned int day) {
@@ -277,6 +261,7 @@ bool json_depth_within_limit(const std::string &json) {
   }
   return depth == 0 && !in_string;
 }
+
 bool parse_datetime_string(const std::string &text, SaveDateTime *value) {
   if (text.size() != 19 || text[4] != '-' || text[7] != '-' || text[10] != 'T' ||
       text[13] != ':' || text[16] != ':') {
@@ -332,6 +317,7 @@ bool parse_slot_json(const picojson::value &value, SaveSlotMetadata *slot) {
          json_string(object, "subtitle", kSubtitleSize, &slot->subtitle) &&
          json_string(object, "details", kDetailsSize, &slot->details);
 }
+
 const char *source_text(SaveTimeSource source) {
   switch (source) {
   case SaveTimeSource::VitaSlot: return "vita-slot";
@@ -368,14 +354,16 @@ SaveMetadata parse_sdslot_data(const std::vector<unsigned char> &data) {
         read_le16(data, record + kDateOffset + 8),
         read_le16(data, record + kDateOffset + 10),
     };
-    if (!valid_datetime(slot.modified_at) ||
-        !read_fixed_string(data, record + kTitleOffset, kTitleSize, &slot.title) ||
-        !read_fixed_string(data, record + kSubtitleOffset, kSubtitleSize, &slot.subtitle) ||
-        !read_fixed_string(data, record + kDetailsOffset, kDetailsSize, &slot.details)) {
+    if (!valid_datetime(slot.modified_at)) {
       continue;
     }
-    // Save-slot timestamps are UTC calendar fields. Normalize them at the parser boundary so
-    // filenames, JSON, list rows, and details all receive the same device-local wall-clock time.
+    read_fixed_string(data, record + kTitleOffset, kTitleSize, &slot.title);
+    read_fixed_string(data, record + kSubtitleOffset, kSubtitleSize, &slot.subtitle);
+    read_fixed_string(data, record + kDetailsOffset, kDetailsSize, &slot.details);
+    // Load-bearing assumption: sdslot.dat stores the slot time as UTC calendar fields (observed
+    // by comparing an in-game save time against the raw bytes; if it were ever local instead,
+    // every displayed time would shift by the timezone offset). Normalize to device-local time
+    // once here so filenames, JSON, list rows, and details all agree. See docs/save-slot-format.md.
     slot.modified_at = local_datetime_from_utc(slot.modified_at);
     result.slots.push_back(std::move(slot));
   }
@@ -502,9 +490,11 @@ SaveMetadataJsonResult parse_save_metadata_json(const std::string &json) {
   const picojson::value *source = json_member(root, "source");
   const picojson::value *approximate = json_member(root, "approximate");
   const picojson::value *slots = json_member(root, "slots");
-  if (!version || !version->is<double>() ||
-      (version->get<double>() != 1.0 &&
-       version->get<double>() != static_cast<double>(kSaveMetadataJsonVersion)) ||
+  const double version_number = version && version->is<double>() ? version->get<double>() : 0.0;
+  const bool version_supported = std::floor(version_number) == version_number &&
+                                 version_number >= kMinSaveMetadataJsonVersion &&
+                                 version_number <= kSaveMetadataJsonVersion;
+  if (!version || !version->is<double>() || !version_supported ||
       !json_string(root, "archiveIdentity", 255, &result.archive_identity) ||
       result.archive_identity.empty() || !saved_at || !saved_at->is<std::string>() ||
       !source || !source->is<std::string>() || !approximate || !approximate->is<bool>() ||
@@ -559,6 +549,7 @@ SaveMetadataJsonResult parse_save_metadata_json(const std::string &json) {
   result.ok = true;
   return result;
 }
+
 SaveMetadataJsonResult read_save_metadata_json(const std::string &path) {
   SaveMetadataJsonResult result;
   FILE *file = std::fopen(path.c_str(), "rb");
@@ -606,19 +597,24 @@ bool write_save_metadata_json_atomic(const std::string &path,
     if (error) *error = "could not create metadata file";
     return false;
   }
-  bool ok = std::fwrite(json.data(), 1, json.size(), file) == json.size();
-  ok = std::fflush(file) == 0 && ok;
-  ok = std::fclose(file) == 0 && ok;
-  if (ok) {
-    ok = std::rename(temporary.c_str(), path.c_str()) == 0;
+  // Write to a temp file, then rename over the target so a reader never sees a half-written
+  // sidecar. No fsync: the sidecar is optional and always rebuildable from the ZIP, so durability
+  // across a power cut is not worth the flush cost on the Vita's storage.
+  bool wrote = std::fwrite(json.data(), 1, json.size(), file) == json.size();
+  wrote = std::fflush(file) == 0 && wrote;
+  wrote = std::fclose(file) == 0 && wrote;
+  if (!wrote) {
+    std::remove(temporary.c_str());
+    if (error) *error = "could not write metadata file";
+    return false;
   }
-  if (!ok) {
+  if (std::rename(temporary.c_str(), path.c_str()) != 0) {
     std::remove(temporary.c_str());
     if (error) *error = "could not replace metadata file";
-  } else if (error) {
-    error->clear();
+    return false;
   }
-  return ok;
+  if (error) error->clear();
+  return true;
 }
 
 } // namespace vsm

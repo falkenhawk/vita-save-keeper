@@ -16,16 +16,6 @@
 namespace vsm {
 namespace {
 
-std::string join_path(const std::string &parent, const std::string &child) {
-  if (parent.empty()) {
-    return child;
-  }
-  if (parent.back() == '/') {
-    return parent + child;
-  }
-  return parent + "/" + child;
-}
-
 bool is_dot_entry(const char *name) {
   return std::strcmp(name, ".") == 0 || std::strcmp(name, "..") == 0;
 }

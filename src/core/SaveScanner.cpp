@@ -18,16 +18,6 @@ bool is_dot_entry(const char *name) {
   return std::string(name) == "." || std::string(name) == "..";
 }
 
-std::string join_path(const std::string &parent, const std::string &child) {
-  if (parent.empty()) {
-    return child;
-  }
-  if (parent.back() == '/') {
-    return parent + child;
-  }
-  return parent + "/" + child;
-}
-
 bool is_directory(const std::string &path) {
   struct stat info {};
   if (stat(path.c_str(), &info) != 0) {
@@ -165,8 +155,7 @@ bool apply_mounted_save_time(SaveRecord *save, const SaveMetadata &metadata) {
   }
   save->save_time_requires_mount = false;
   save->save_time_known = false;
-  if (metadata.source != SaveTimeSource::VitaSlot ||
-      !save_metadata_has_observed_time(metadata)) {
+  if (!save_metadata_has_observed_time(metadata)) {
     return false;
   }
   save->saved_at = metadata.saved_at;
@@ -211,7 +200,7 @@ void apply_save_sort(std::vector<SaveRecord> *saves, SaveSortMode mode,
   std::stable_sort(saves->begin(), saves->end(),
                    [&](const SaveRecord &a, const SaveRecord &b) {
                      return newest_remote(a) > newest_remote(b);
-  });
+                   });
 }
 
 bool save_sort_requires_all_times(SaveSortMode mode) {
@@ -222,7 +211,7 @@ const char *save_sort_mode_label(SaveSortMode mode) {
   switch (mode) {
   case SaveSortMode::LastSaved:
     return "Saved";
-  case SaveSortMode::LastSynced:
+  case SaveSortMode::LastBackup:
     return "Backup";
   case SaveSortMode::Name:
   default:
@@ -234,8 +223,8 @@ std::string save_sort_mode_to_string(SaveSortMode mode) {
   switch (mode) {
   case SaveSortMode::LastSaved:
     return "saved";
-  case SaveSortMode::LastSynced:
-    return "synced";
+  case SaveSortMode::LastBackup:
+    return "backup";
   case SaveSortMode::Name:
   default:
     return "name";
@@ -246,44 +235,58 @@ SaveSortMode save_sort_mode_from_string(const std::string &value) {
   if (value == "saved") {
     return SaveSortMode::LastSaved;
   }
-  if (value == "synced") {
-    return SaveSortMode::LastSynced;
+  // "synced" is the legacy spelling of the backup sort; settings written by older builds keep
+  // their sort preference instead of silently falling back to name order.
+  if (value == "backup" || value == "synced") {
+    return SaveSortMode::LastBackup;
   }
   return SaveSortMode::Name;
 }
 
 std::vector<SaveRecord> scan_save_roots(
-    const std::vector<SaveRoot> &roots, const std::function<void()> &on_progress,
+    const std::vector<SaveRoot> &roots, const SaveScanProgress &on_progress,
     const SaveMetadataResolver &resolve_metadata) {
-  std::vector<SaveRecord> saves;
   const SaveMetadataResolver metadata_resolver =
       resolve_metadata ? resolve_metadata : resolve_save_metadata;
 
+  // List every save directory up front so progress is a real fraction of a known total instead of
+  // an indeterminate pulse. Only direct children are treated as saves; descending into save
+  // payloads would turn internal folders such as sce_sys into fake titles and slow the scan.
+  struct PendingSave {
+    SavePlatform platform{};
+    std::string id;
+    std::string path;
+  };
+  std::vector<PendingSave> pending;
   for (const SaveRoot &root : roots) {
-    const std::vector<std::string> child_directories = list_direct_child_directories(root.path);
-    for (const std::string &child : child_directories) {
-      SaveRecord save;
-      save.platform = root.platform;
-      save.id = child;
-      save.display_name = child;
-      save.path = join_path(root.path, child);
-      save.save_time_requires_mount =
-          save.platform != SavePlatform::Psp && save_directory_has_pfs_metadata(save.path);
-      if (!save.save_time_requires_mount) {
-        const SaveMetadata metadata =
-            metadata_resolver(save.path, current_local_datetime());
-        save.saved_at = metadata.saved_at;
-        save.saved_at_epoch = save_datetime_to_local_epoch(metadata.saved_at);
-        save.save_time_known = metadata.source != SaveTimeSource::BackupClock;
-      }
-      apply_sfo_metadata(&save);
+    for (const std::string &child : list_direct_child_directories(root.path)) {
+      pending.push_back({root.platform, child, join_path(root.path, child)});
+    }
+  }
 
-      // Only direct children are treated as saves. Descending into save payloads would turn internal
-      // folders such as sce_sys into fake titles and would make scanning much slower on a Vita.
-      saves.push_back(std::move(save));
-      if (on_progress) {
-        on_progress();
-      }
+  std::vector<SaveRecord> saves;
+  saves.reserve(pending.size());
+  const std::size_t total = pending.size();
+  std::size_t done = 0;
+  for (PendingSave &item : pending) {
+    SaveRecord save;
+    save.platform = item.platform;
+    save.id = item.id;
+    save.display_name = item.id;
+    save.path = std::move(item.path);
+    save.save_time_requires_mount =
+        save.platform != SavePlatform::Psp && save_directory_has_pfs_metadata(save.path);
+    if (!save.save_time_requires_mount) {
+      const SaveMetadata metadata = metadata_resolver(save.path, current_local_datetime());
+      save.saved_at = metadata.saved_at;
+      save.saved_at_epoch = save_datetime_to_local_epoch(metadata.saved_at);
+      save.save_time_known = metadata.source != SaveTimeSource::BackupClock;
+    }
+    apply_sfo_metadata(&save);
+    saves.push_back(std::move(save));
+    ++done;
+    if (on_progress) {
+      on_progress(done, total);
     }
   }
 

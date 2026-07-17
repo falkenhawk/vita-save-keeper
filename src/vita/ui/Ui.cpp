@@ -43,6 +43,43 @@ constexpr unsigned int kTextSizeNormal = 18;
 constexpr unsigned int kTextSizeTitle = 22;
 constexpr unsigned int kTextSizeCode = 38;
 
+// Slot-details description pane: scroll clamping (details_max_scroll) and rendering
+// (draw_slot_details) must share these, or the last line becomes unreachable or overscrolls.
+constexpr int kDetailsPaneWidth = 580;
+constexpr int kVisibleDetailLines = 10;
+
+// ISO timestamps are stored as "YYYY-MM-DDTHH:MM:SS"; the details and list rows show the date and
+// time separated by a space instead of the 'T'.
+std::string format_save_datetime_spaced(const SaveDateTime &value) {
+  std::string text = format_save_datetime(value);
+  if (text.size() > 10) {
+    text[10] = ' ';
+  }
+  return text;
+}
+
+// A small rotating-dot circle spinner for a value still resolving (a save time read through a
+// mount). Eight dots sit on a fixed ring; a bright head sweeps around with the trailing dots
+// fading behind it. Driven by the per-frame counter, ~1.9 revolutions/second.
+void draw_circle_spinner(float cx, float cy, unsigned int frame, unsigned int base_color) {
+  constexpr int kDots = 8;
+  // Fixed ring positions (radius 6), starting at the top and going clockwise.
+  static const float kOffsets[kDots][2] = {
+      {0.0f, -6.0f},  {4.24f, -4.24f}, {6.0f, 0.0f},  {4.24f, 4.24f},
+      {0.0f, 6.0f},   {-4.24f, 4.24f}, {-6.0f, 0.0f}, {-4.24f, -4.24f},
+  };
+  const int head = static_cast<int>((frame / 4U) % kDots);
+  for (int i = 0; i < kDots; ++i) {
+    const int trail = (head - i + kDots) % kDots;  // 0 = head (brightest), higher = further behind
+    unsigned int alpha = 255U - static_cast<unsigned int>(trail) * 26U;
+    if (alpha < 40U) {
+      alpha = 40U;
+    }
+    const unsigned int color = (base_color & 0x00FFFFFFu) | (alpha << 24);
+    vita2d_draw_fill_circle(cx + kOffsets[i][0], cy + kOffsets[i][1], 2.0f, color);
+  }
+}
+
 enum class ButtonSymbol {
   Circle,
   Cross,
@@ -682,8 +719,7 @@ int Ui::details_max_scroll(const SlotDetailsState &state) const {
   const std::string details = state.metadata.slots[selected].details.empty()
                                   ? "No description provided."
                                   : state.metadata.slots[selected].details;
-  constexpr int kVisibleDetailLines = 11;
-  const std::vector<std::string> lines = wrap_text(kTextSizeSmall, details, 580);
+  const std::vector<std::string> lines = wrap_text(kTextSizeSmall, details, kDetailsPaneWidth);
   return std::max(0, static_cast<int>(lines.size()) - kVisibleDetailLines);
 }
 
@@ -704,17 +740,14 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross) {
   constexpr int kDividerX = 308;
   constexpr int kLeftCardWidth = 272;
   constexpr int kRightX = 336;
-  constexpr int kRightTextWidth = 580;
+  constexpr int kRightTextWidth = kDetailsPaneWidth;
   vita2d_draw_rectangle(0, 52, kDividerX, 456, kColorPanel);
   vita2d_draw_rectangle(kDividerX, 52, 960 - kDividerX, 456, RGBA8(15, 23, 42, 255));
   vita2d_draw_line(kDividerX, 52, kDividerX, 508, RGBA8(255, 255, 255, 20));
 
   std::string saved_display = "Unknown";
   if (state.metadata.saved_at.year > 0) {
-    saved_display = format_save_datetime(state.metadata.saved_at);
-    if (saved_display.size() > 10) {
-      saved_display[10] = ' ';
-    }
+    saved_display = format_save_datetime_spaced(state.metadata.saved_at);
   }
   vita2d_draw_rectangle(18, 72, kLeftCardWidth, 68, kColorPanelAlt);
   draw_text(fonts_, 34, 98, kColorMuted, kTextSizeTiny, "LAST SAVE TIME");
@@ -743,10 +776,7 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross) {
       std::snprintf(slot_label, sizeof(slot_label), "Slot %03u", slot.id);
       draw_text(fonts_, 32, y + 24, focused ? kColorText : kColorMuted, kTextSizeSmall,
                 slot_label);
-      std::string slot_date = format_save_datetime(slot.modified_at);
-      if (slot_date.size() > 10) {
-        slot_date[10] = ' ';
-      }
+      const std::string slot_date = format_save_datetime_spaced(slot.modified_at);
       draw_text(fonts_, 276 - measure_text(kTextSizeTiny, slot_date.c_str()), y + 23,
                 focused ? kColorText : kColorIdleDot, kTextSizeTiny, slot_date.c_str());
     }
@@ -760,8 +790,8 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross) {
     std::string explanation = state.warning_message;
     if (explanation.empty()) {
       explanation = state.metadata.source == SaveTimeSource::Filesystem
-                        ? "The backup has a save time, but no readable Vita slot information."
-                        : "This backup does not contain readable Vita slot information.";
+                        ? "The backup has a save time, but no readable save slot information."
+                        : "This backup does not contain readable save slot information.";
     }
     const std::vector<std::string> lines =
         wrap_text(kTextSizeSmall, explanation, kRightTextWidth);
@@ -773,37 +803,45 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross) {
     const std::size_t selected =
         std::min(state.selected_slot, state.metadata.slots.size() - 1);
     const SaveSlotMetadata &slot = state.metadata.slots[selected];
-    // The selected slot's full timestamp is already visible in the left row. Repeating it here
-    // spent the most useful part of the description pane without adding information.
-    draw_text(fonts_, kRightX, 84, kColorMuted, kTextSizeTiny, "TITLE");
-    draw_text(fonts_, kRightX, 110, kColorText, kTextSizeNormal,
+    // Echo the selected slot's number and time at the top of this pane (they are also in the left
+    // list). When several slots share the same title/subtitle/details, this header is the only part
+    // that visibly changes as you move between them, confirming the selection landed.
+    char slot_label[16];
+    std::snprintf(slot_label, sizeof(slot_label), "Slot %03u", slot.id);
+    draw_text(fonts_, kRightX, 82, kColorAccent, kTextSizeNormal, slot_label);
+    const std::string slot_time = format_save_datetime_spaced(slot.modified_at);
+    draw_text(fonts_, 926 - measure_text(kTextSizeSmall, slot_time.c_str()), 82, kColorText,
+              kTextSizeSmall, slot_time.c_str());
+    vita2d_draw_line(kRightX, 96, 926, 96, RGBA8(255, 255, 255, 20));
+
+    draw_text(fonts_, kRightX, 128, kColorMuted, kTextSizeTiny, "TITLE");
+    draw_text(fonts_, kRightX, 154, kColorText, kTextSizeNormal,
               fit_text(kTextSizeNormal, slot.title.empty() ? "Untitled" : slot.title,
                        kRightTextWidth)
                   .c_str());
-    draw_text(fonts_, kRightX, 144, kColorMuted, kTextSizeTiny, "SUBTITLE");
-    draw_text(fonts_, kRightX, 170, kColorText, kTextSizeSmall,
+    draw_text(fonts_, kRightX, 196, kColorMuted, kTextSizeTiny, "SUBTITLE");
+    draw_text(fonts_, kRightX, 222, kColorText, kTextSizeSmall,
               fit_text(kTextSizeSmall, slot.subtitle.empty() ? "—" : slot.subtitle,
                        kRightTextWidth)
                   .c_str());
-    draw_text(fonts_, kRightX, 204, kColorMuted, kTextSizeTiny, "DETAILS");
+    draw_text(fonts_, kRightX, 262, kColorMuted, kTextSizeTiny, "DETAILS");
 
     const std::string details =
         slot.details.empty() ? "No description provided." : slot.details;
     const std::vector<std::string> lines =
         wrap_text(kTextSizeSmall, details, kRightTextWidth);
-    constexpr int kVisibleDetailLines = 11;
     const int max_scroll = std::max(0, static_cast<int>(lines.size()) - kVisibleDetailLines);
     const int scroll = std::min(std::max(0, state.details_scroll), max_scroll);
     vita2d_enable_clipping();
-    vita2d_set_clip_rectangle(kRightX, 216, 926, 486);
+    vita2d_set_clip_rectangle(kRightX, 270, 926, 502);
     for (int i = 0; i < kVisibleDetailLines && scroll + i < static_cast<int>(lines.size()); ++i) {
-      draw_text(fonts_, kRightX, 236 + i * 22, kColorText, kTextSizeSmall,
+      draw_text(fonts_, kRightX, 286 + i * 22, kColorText, kTextSizeSmall,
                 lines[static_cast<std::size_t>(scroll + i)].c_str());
     }
     vita2d_disable_clipping();
     if (max_scroll > 0) {
-      constexpr int kTrackY = 220;
-      constexpr int kTrackH = 258;
+      constexpr int kTrackY = 274;
+      constexpr int kTrackH = 224;
       vita2d_draw_rectangle(942, kTrackY, 3, kTrackH, RGBA8(255, 255, 255, 24));
       const int thumb_h = std::max(24, kTrackH * kVisibleDetailLines /
                                           static_cast<int>(lines.size()));
@@ -1000,20 +1038,23 @@ void Ui::draw_backup_panel(const UiState &state) {
     // color even when unselected: the hue is the signal, so dimming it would cost meaning.
     int max_text_width = 386;
     if (row.new_backup) {
-      // The live save was scanned once when the list was built, so showing its resolved save time
-      // here does not add file reads to every frame. Unknown means the scan found no trustworthy
-      // slot or file timestamp.
-      std::string current_save_time = "Unknown";
-      if (save->save_time_known) {
-        current_save_time = format_save_datetime(save->saved_at);
-        if (current_save_time.size() > 10) {
-          current_save_time[10] = ' ';
-        }
+      // The focused save's time is shown here. Encrypted saves resolve it lazily through a mount a
+      // moment after the selection settles; a circle spinner stands in until then, instead of
+      // flashing a misleading "unknown". A resolved save with no trustworthy time reads "unknown".
+      const unsigned int time_color = selected ? kColorAccent : kColorIdleDot;
+      if (save->save_time_requires_mount) {
+        static const char *const kPrefix = "Last save:";
+        draw_text(fonts_, 898 - measure_text(kTextSizeTiny, kPrefix), y + 23, time_color,
+                  kTextSizeTiny, kPrefix);
+        draw_circle_spinner(912.0f, static_cast<float>(y) + 17.0f, frame_counter_, time_color);
+      } else {
+        const std::string current_save_time =
+            save->save_time_known ? "Last save: " + format_save_datetime_spaced(save->saved_at)
+                                  : "Last save: unknown";
+        draw_text(fonts_, 922 - measure_text(kTextSizeTiny, current_save_time.c_str()), y + 23,
+                  time_color, kTextSizeTiny, current_save_time.c_str());
       }
-      draw_text(fonts_, 922 - measure_text(kTextSizeTiny, current_save_time.c_str()), y + 23,
-                selected ? kColorAccent : kColorIdleDot, kTextSizeTiny,
-                current_save_time.c_str());
-      max_text_width = 180;
+      max_text_width = 150;
     } else {
       max_text_width = 340;
       vita2d_texture *glyph = nullptr;
@@ -1264,7 +1305,8 @@ void Ui::clear_batch_progress() {
   batch_game_.clear();
 }
 
-void Ui::draw_busy(const std::string &label, long long done, long long total) {
+void Ui::draw_busy(const std::string &label, long long done, long long total,
+                   const char *context_above, const char *cancel_hint) {
   ++frame_counter_;
   vita2d_start_drawing();
   vita2d_clear_screen();
@@ -1285,6 +1327,12 @@ void Ui::draw_busy(const std::string &label, long long done, long long total) {
   constexpr int kBoxH = 112;
   vita2d_draw_rectangle(kBoxX, kBoxY, kBoxW, kBoxH, kColorPanelAlt);
   vita2d_draw_rectangle(kBoxX, kBoxY, kBoxW, 4, kColorAccent);
+
+  if (context_above != nullptr) {
+    const int w = text_width(fonts_, kTextSizeSmall, context_above);
+    draw_text(fonts_, kBoxX + kBoxW / 2 - w / 2, kBoxY - 12, kColorMuted, kTextSizeSmall,
+              context_above);
+  }
 
   // The title and the bar track overall games progress in a batch. The in-flight transfer
   // percent rides on the title line next to "Uploading ..." - it belongs to that one file - and
@@ -1369,6 +1417,14 @@ void Ui::draw_busy(const std::string &label, long long done, long long total) {
                       kColorMuted);
     x += 22;
     draw_text(fonts_, x, kBoxY + 98, kColorMuted, kTextSizeSmall, cancel_text);
+  }
+
+  if (cancel_hint != nullptr) {
+    const int text_w = text_width(fonts_, kTextSizeSmall, cancel_hint);
+    int x = kBoxX + kBoxW / 2 - (22 + text_w) / 2;
+    draw_button_shape(x, kBoxY + kBoxH + 8, ButtonSymbol::Square, kColorMuted);
+    x += 22;
+    draw_text(fonts_, x, kBoxY + kBoxH + 22, kColorMuted, kTextSizeSmall, cancel_hint);
   }
 
   vita2d_end_drawing();

@@ -16,23 +16,30 @@ struct SaveRoot {
   std::string path;
 };
 
+// Declaration order is the tap-cycle order: cycle_sort_mode steps (mode + 1) % count. Persisted
+// settings map by string, so reordering here does not disturb saved preferences.
 enum class SaveSortMode {
   Name,
+  LastBackup,
   LastSaved,
-  LastSynced,
 };
 
 constexpr int kSaveSortModeCount = 3;
 
 using SaveMetadataResolver =
     std::function<SaveMetadata(const std::string &, const SaveDateTime &)>;
+// Called after each save is processed with (saves done, total to do), so a caller can show a real
+// percentage while scanning. The total is known up front from the directory listing.
+using SaveScanProgress = std::function<void(std::size_t done, std::size_t total)>;
 
 std::vector<SaveRecord> scan_save_roots(
     const std::vector<SaveRoot> &roots,
-    const std::function<void()> &on_progress = {},
+    const SaveScanProgress &on_progress = {},
     const SaveMetadataResolver &resolve_metadata = {});
-// Accepts only a real Vita slot time for a PFS-protected save. Raw filesystem times in sce_pfs
-// describe encryption bookkeeping and must never become user-facing save times.
+// Applies a save time resolved through the live mount: a real Vita slot time when the save has
+// slots, otherwise the newest-file time as an approximate fallback. Only a backup-clock (no
+// observed time) result is rejected, leaving the save time unknown. Matches what the details
+// screen shows for the same save.
 bool apply_mounted_save_time(SaveRecord *save, const SaveMetadata &metadata);
 void sort_saves_by_display_name(std::vector<SaveRecord> *saves);
 // newest_remote_by_folder maps normalized save folder names to the newest remote backup name

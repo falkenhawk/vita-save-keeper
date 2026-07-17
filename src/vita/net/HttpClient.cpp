@@ -30,6 +30,10 @@ HttpClient::ProgressHook g_progress_hook;
 HttpClient::CancelCheck g_cancel_check;
 std::string g_busy_label;
 bool g_report_downloads = true;
+// When false, the progress callback ignores both upload and download byte counts and always
+// reports an indeterminate sweep. Set for tiny metadata/auth requests (token refresh, Drive index
+// listing) whose responses would otherwise flash the bar to 100% for a frame.
+bool g_report_transfer_bytes = true;
 SceUInt64 g_last_progress_us = 0;
 
 std::size_t append_response_body(char *ptr, std::size_t size, std::size_t nmemb, void *userdata) {
@@ -72,7 +76,9 @@ int transfer_progress(void *, curl_off_t dltotal, curl_off_t dlnow, curl_off_t u
     return 1;
   }
 
-  if (ultotal > 0) {
+  if (!g_report_transfer_bytes) {
+    emit_progress(0, -1);
+  } else if (ultotal > 0) {
     emit_progress(ulnow, ultotal);
   } else if (dltotal > 0 && g_report_downloads) {
     emit_progress(dlnow, dltotal);
@@ -152,7 +158,7 @@ bool read_binary_file(const std::string &path, std::string *contents) {
 }
 
 HttpResponse send_multipart_file(const std::string &url, const std::string &metadata_json,
-                                 const std::string &file_path,
+                                 const std::string &file_path, const std::string &file_content_type,
                                  const std::string &bearer_token, bool update_existing) {
   CURL *curl = acquire_handle();
   if (!curl) {
@@ -169,13 +175,14 @@ HttpResponse send_multipart_file(const std::string &url, const std::string &meta
     return transport_error("could not read upload file");
   }
 
-  // Drive expects multipart/related, while libcurl's MIME helper emits multipart/form-data.
+  // Drive expects multipart/related, while libcurl's MIME helper emits multipart/form-data. The
+  // media part's content type is the caller's, so a JSON sidecar is not mislabeled as a ZIP.
   constexpr const char *kBoundary = "save-keeper-drive-boundary";
   const std::string body = std::string("--") + kBoundary +
                            "\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n" +
-                           metadata_json + "\r\n--" + kBoundary +
-                           "\r\nContent-Type: application/zip\r\n\r\n" + file_contents +
-                           "\r\n--" + kBoundary + "--\r\n";
+                           metadata_json + "\r\n--" + kBoundary + "\r\nContent-Type: " +
+                           file_content_type + "\r\n\r\n" + file_contents + "\r\n--" + kBoundary +
+                           "--\r\n";
   headers = curl_slist_append(
       headers, (std::string("Content-Type: multipart/related; boundary=") + kBoundary).c_str());
 
@@ -299,8 +306,15 @@ void HttpClient::set_report_downloads(bool report) {
   g_report_downloads = report;
 }
 
-BusyLabelScope::BusyLabelScope(const char *label) : previous_(HttpClient::busy_label()) {
+BusyLabelScope::BusyLabelScope(const char *label, bool indeterminate)
+    : previous_(HttpClient::busy_label()),
+      previous_report_transfer_bytes_(g_report_transfer_bytes) {
   HttpClient::set_busy_label(label ? label : "");
+  // Tiny metadata/auth requests keep an animated sweep for their whole scope instead of flashing
+  // a determinate 100% when their small response finishes.
+  if (indeterminate) {
+    g_report_transfer_bytes = false;
+  }
   // Draw the modal once, immediately, so it appears the instant the operation starts rather than
   // only when the transfer's first progress callback fires. A large upload spends a noticeable
   // beat first reading the file and packing the multipart body, during which curl reports nothing;
@@ -312,6 +326,7 @@ BusyLabelScope::BusyLabelScope(const char *label) : previous_(HttpClient::busy_l
 
 BusyLabelScope::~BusyLabelScope() {
   HttpClient::set_busy_label(previous_);
+  g_report_transfer_bytes = previous_report_transfer_bytes_;
 }
 
 HttpResponse HttpClient::post_form(const std::string &url, const std::string &body) const {
@@ -395,15 +410,17 @@ HttpResponse HttpClient::patch_json(const std::string &url, const std::string &j
 HttpResponse HttpClient::post_multipart_file(const std::string &url,
                                              const std::string &metadata_json,
                                              const std::string &file_path,
+                                             const std::string &file_content_type,
                                              const std::string &bearer_token) const {
-  return send_multipart_file(url, metadata_json, file_path, bearer_token, false);
+  return send_multipart_file(url, metadata_json, file_path, file_content_type, bearer_token, false);
 }
 
 HttpResponse HttpClient::patch_multipart_file(const std::string &url,
                                               const std::string &metadata_json,
                                               const std::string &file_path,
+                                              const std::string &file_content_type,
                                               const std::string &bearer_token) const {
-  return send_multipart_file(url, metadata_json, file_path, bearer_token, true);
+  return send_multipart_file(url, metadata_json, file_path, file_content_type, bearer_token, true);
 }
 
 HttpResponse HttpClient::download_file(const std::string &url, const std::string &file_path,

@@ -110,7 +110,10 @@ public:
                                   const std::string &suffix) const;
   // Full-screen modal frame for blocking work; safe to call from transfer callbacks because all
   // network requests run on the UI thread. total <= 0 draws an indeterminate sweep.
-  void draw_busy(const std::string &label, long long done, long long total);
+  // context_above draws a muted line above the modal (the reason the operation is running);
+  // cancel_hint draws a Square-button hint below it (an escape hatch). Both optional.
+  void draw_busy(const std::string &label, long long done, long long total,
+                 const char *context_above = nullptr, const char *cancel_hint = nullptr);
   // Batch context for draw_busy: while set, the modal's title and bar track overall games
   // progress, any transfer progress passed to draw_busy shows as a percent line instead of a
   // second bar, and a "hold to cancel" hint appears.

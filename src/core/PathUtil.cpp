@@ -52,4 +52,11 @@ std::string normalize_path_component(const std::string &input) {
   return std::string(first, last);
 }
 
+std::string join_path(const std::string &parent, const std::string &child) {
+  if (parent.empty() || parent.back() == '/') {
+    return parent + child;
+  }
+  return parent + "/" + child;
+}
+
 } // namespace vsm

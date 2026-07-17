@@ -437,7 +437,7 @@ void test_sdslot_parser_skips_bad_records_but_keeps_valid_siblings() {
   EXPECT_EQ(vsm::format_save_datetime(metadata.saved_at), "2024-02-29T12:00:00");
 }
 
-void test_sdslot_parser_rejects_invalid_magic_truncation_and_unterminated_fields() {
+void test_sdslot_parser_rejects_invalid_magic_and_truncation_but_keeps_full_fields() {
   ScopedTimezone timezone("UTC0");
   std::vector<unsigned char> invalid_magic = build_sdslot({
       {0, {2026, 1, 1, 0, 0, 0}, "Title", "Subtitle", "Details"},
@@ -451,13 +451,18 @@ void test_sdslot_parser_rejects_invalid_magic_truncation_and_unterminated_fields
   truncated.resize(0x400 + 5 * 0x400 + 100);
   EXPECT_TRUE(vsm::parse_sdslot_data(truncated).slots.empty());
 
+  // A field that fills its whole capacity with no terminator is a maxed-out string, not
+  // corruption: the slot (and its valid timestamp) is kept and the title is truncated at capacity.
   std::vector<unsigned char> unterminated = build_sdslot({
       {1, {2026, 1, 1, 0, 0, 0}, "Title", "Subtitle", "Details"},
   });
   const std::size_t record = 0x400 + 0x400;
   std::fill(unterminated.begin() + static_cast<long>(record + 0x04),
             unterminated.begin() + static_cast<long>(record + 0x44), 'x');
-  EXPECT_TRUE(vsm::parse_sdslot_data(unterminated).slots.empty());
+  const vsm::SaveMetadata parsed = vsm::parse_sdslot_data(unterminated);
+  EXPECT_EQ(parsed.slots.size(), static_cast<std::size_t>(1));
+  EXPECT_EQ(parsed.slots[0].title, std::string(0x40, 'x'));
+  EXPECT_EQ(parsed.slots[0].subtitle, "Subtitle");
 }
 
 void test_save_metadata_resolver_uses_recursive_files_then_backup_clock() {
@@ -717,13 +722,19 @@ void test_save_scanner_lists_direct_child_save_directories() {
     return vsm::resolve_save_metadata(path, clock);
   };
   std::size_t scan_progress = 0;
+  std::size_t scan_last_total = 0;
   const std::vector<vsm::SaveRecord> saves = vsm::scan_save_roots(
       {
           {vsm::SavePlatform::Vita, (base / "vita").string()},
           {vsm::SavePlatform::Psp, (base / "psp").string()},
           {vsm::SavePlatform::GameCard, (base / "missing").string()},
       },
-      [&] { ++scan_progress; }, resolver);
+      [&](std::size_t done, std::size_t total) {
+        ++scan_progress;
+        scan_last_total = total;
+        EXPECT_TRUE(done <= total);
+      },
+      resolver);
 
   EXPECT_EQ(saves.size(), static_cast<std::size_t>(5));
   EXPECT_TRUE(saves[0].platform == vsm::SavePlatform::Vita);
@@ -767,22 +778,35 @@ void test_save_scanner_lists_direct_child_save_directories() {
   EXPECT_TRUE(std::find(resolved_paths.begin(), resolved_paths.end(), saves[2].path) ==
               resolved_paths.end());
   EXPECT_EQ(scan_progress, saves.size());
+  EXPECT_EQ(scan_last_total, saves.size());
 
   std::filesystem::remove_all(base);
 }
 
-void test_mounted_slot_time_replaces_untrusted_pfs_file_time() {
+void test_mounted_save_time_trusts_observed_times_and_rejects_unresolved() {
   vsm::SaveRecord save;
   save.saved_at_epoch = 999;
   save.save_time_requires_mount = true;
 
-  vsm::SaveMetadata raw_files;
-  raw_files.saved_at = {2026, 7, 15, 12, 0, 0};
-  raw_files.source = vsm::SaveTimeSource::Filesystem;
-  EXPECT_TRUE(!vsm::apply_mounted_save_time(&save, raw_files));
+  // A backup-clock (no observed time) result means neither a slot time nor a file time was found.
+  // The record keeps its prior epoch and stays time-unknown, so the grid shows "Unknown".
+  vsm::SaveMetadata unresolved;
+  unresolved.source = vsm::SaveTimeSource::BackupClock;
+  EXPECT_TRUE(!vsm::apply_mounted_save_time(&save, unresolved));
   EXPECT_TRUE(!save.save_time_known);
   EXPECT_TRUE(!save.save_time_requires_mount);
   EXPECT_EQ(static_cast<std::size_t>(save.saved_at_epoch), static_cast<std::size_t>(999));
+
+  // A filesystem time from a successful mount (a save with no Vita slots, e.g. Cladun Returns) is
+  // trusted now, so the grid row and the details screen agree instead of showing "Unknown" vs a
+  // real time.
+  save.save_time_requires_mount = true;
+  vsm::SaveMetadata files;
+  files.saved_at = {2020, 1, 16, 23, 10, 48};
+  files.source = vsm::SaveTimeSource::Filesystem;
+  EXPECT_TRUE(vsm::apply_mounted_save_time(&save, files));
+  EXPECT_TRUE(save.save_time_known);
+  EXPECT_EQ(vsm::format_save_datetime(save.saved_at), "2020-01-16T23:10:48");
 
   save.save_time_requires_mount = true;
   vsm::SaveMetadata slots;
@@ -970,6 +994,24 @@ void test_backup_archive_extracts_to_isolated_inspection_directory_and_cleans_up
   EXPECT_TRUE(uniform_extracted.ok);
   EXPECT_TRUE(uniform_extracted.file_timestamps_uniform);
   EXPECT_TRUE(vsm::remove_backup_inspection_directory(uniform_inspection.string()));
+
+  // A single-file save is deliberately reported as uniform: one timestamp cannot be told apart
+  // from a legacy synthetic backup stamp, so its filesystem time must not be trusted as a save time.
+  const std::filesystem::path single_source = base / "single-source";
+  std::filesystem::create_directories(single_source);
+  std::ofstream(single_source / "only.bin", std::ios::binary) << "only";
+  EXPECT_TRUE(utime((single_source / "only.bin").string().c_str(), &original_times) == 0);
+  const vsm::BackupResult single_backup = vsm::create_backup_archive({
+      single_source.string(), (base / "backups").string(), "PSP-SINGLE",
+      {2026, 7, 15, 12, 0, 0},
+  });
+  EXPECT_TRUE(single_backup.ok);
+  const std::filesystem::path single_inspection = base / "single-inspection";
+  const vsm::RestoreResult single_extracted = vsm::extract_backup_archive_for_inspection(
+      single_backup.archive_path, single_inspection.string());
+  EXPECT_TRUE(single_extracted.ok);
+  EXPECT_TRUE(single_extracted.file_timestamps_uniform);
+  EXPECT_TRUE(vsm::remove_backup_inspection_directory(single_inspection.string()));
 
   // Local entries alone are not a complete ZIP. Rejecting this interruption also prevents a
   // uniform legacy archive from bypassing the synthetic-timestamp guard through the EOF path.
@@ -1480,12 +1522,12 @@ void test_save_sort_modes_order_saves() {
       {"PCSB00001", "2026-07-01 10-00-00.zip"},
       {"PCSB00003", "2026-07-04 09-30-00.zip"},
   };
-  vsm::apply_save_sort(&saves, vsm::SaveSortMode::LastSynced, newest);
+  vsm::apply_save_sort(&saves, vsm::SaveSortMode::LastBackup, newest);
   EXPECT_EQ(saves[0].display_name, "Charlie");
   EXPECT_EQ(saves[1].display_name, "Alpha");
   EXPECT_EQ(saves[2].display_name, "Bravo");
   EXPECT_EQ(saves[3].display_name, "Delta");
-  EXPECT_EQ(std::string(vsm::save_sort_mode_label(vsm::SaveSortMode::LastSynced)), "Backup");
+  EXPECT_EQ(std::string(vsm::save_sort_mode_label(vsm::SaveSortMode::LastBackup)), "Backup");
 
   vsm::apply_save_sort(&saves, vsm::SaveSortMode::Name, {});
   EXPECT_EQ(saves[0].display_name, "Alpha");
@@ -1494,17 +1536,21 @@ void test_save_sort_modes_order_saves() {
 void test_only_last_saved_sort_requires_all_save_times() {
   EXPECT_TRUE(!vsm::save_sort_requires_all_times(vsm::SaveSortMode::Name));
   EXPECT_TRUE(vsm::save_sort_requires_all_times(vsm::SaveSortMode::LastSaved));
-  EXPECT_TRUE(!vsm::save_sort_requires_all_times(vsm::SaveSortMode::LastSynced));
+  EXPECT_TRUE(!vsm::save_sort_requires_all_times(vsm::SaveSortMode::LastBackup));
 }
 
 void test_app_settings_roundtrip_and_unknown_keys() {
   vsm::AppSettings settings;
-  settings.sort_mode = vsm::SaveSortMode::LastSynced;
-  EXPECT_EQ(vsm::serialize_app_settings(settings), "sort=synced\n");
+  settings.sort_mode = vsm::SaveSortMode::LastBackup;
+  EXPECT_EQ(vsm::serialize_app_settings(settings), "sort=backup\n");
 
   const vsm::AppSettings parsed =
       vsm::parse_app_settings("future_key=whatever\r\nsort=saved\n");
   EXPECT_TRUE(parsed.sort_mode == vsm::SaveSortMode::LastSaved);
+
+  // "synced" is what pre-rename builds wrote for the backup sort; it must keep parsing.
+  const vsm::AppSettings legacy = vsm::parse_app_settings("sort=synced\n");
+  EXPECT_TRUE(legacy.sort_mode == vsm::SaveSortMode::LastBackup);
 
   const vsm::AppSettings defaults = vsm::parse_app_settings("");
   EXPECT_TRUE(defaults.sort_mode == vsm::SaveSortMode::Name);
@@ -1769,7 +1815,7 @@ int main() {
   test_sdslot_parser_reads_noncontiguous_slots_and_selects_newest();
   test_sdslot_parser_converts_utc_slot_time_to_device_local_time();
   test_sdslot_parser_skips_bad_records_but_keeps_valid_siblings();
-  test_sdslot_parser_rejects_invalid_magic_truncation_and_unterminated_fields();
+  test_sdslot_parser_rejects_invalid_magic_and_truncation_but_keeps_full_fields();
   test_save_metadata_resolver_uses_recursive_files_then_backup_clock();
   test_pfs_mount_policy_requires_existing_metadata_directory();
   test_save_metadata_json_round_trips_and_ignores_unknown_fields();
@@ -1780,7 +1826,7 @@ int main() {
   test_save_metadata_json_file_write_is_atomic_and_bounded();
   test_backup_metadata_names_follow_archive_identity();
   test_save_scanner_lists_direct_child_save_directories();
-  test_mounted_slot_time_replaces_untrusted_pfs_file_time();
+  test_mounted_save_time_trusts_observed_times_and_rejects_unresolved();
   test_selection_wraps_and_handles_empty_lists();
   test_grid_window_scrolls_only_when_selection_leaves_view();
   test_backup_archive_creates_timestamped_zip_snapshot();

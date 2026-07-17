@@ -52,16 +52,6 @@ struct LocalZipHeader {
   std::string name;
 };
 
-std::string join_path(const std::string &parent, const std::string &child) {
-  if (parent.empty()) {
-    return child;
-  }
-  if (parent.back() == '/') {
-    return parent + child;
-  }
-  return parent + "/" + child;
-}
-
 bool is_dot_entry(const char *name) {
   return std::strcmp(name, ".") == 0 || std::strcmp(name, "..") == 0;
 }
@@ -538,7 +528,14 @@ bool extract_stored_file(FILE *zip, const LocalZipHeader &header,
   if (std::fclose(output) != 0) {
     return false;
   }
-  return crc == header.crc32 && restore_file_zip_timestamp(destination_path, header.modified_at);
+  if (crc != header.crc32) {
+    return false;
+  }
+  // Restoring the original modification time is best-effort. A flaky utime() on the target
+  // filesystem or an out-of-range DOS timestamp in an imported ZIP must never turn an otherwise
+  // complete, CRC-verified restore into a failure that leaves the user without their save.
+  restore_file_zip_timestamp(destination_path, header.modified_at);
+  return true;
 }
 
 bool extract_archive_to_directory(FILE *zip, const std::string &destination_path,
@@ -558,6 +555,9 @@ bool extract_archive_to_directory(FILE *zip, const std::string &destination_path
 
     if (signature == 0x02014b50 || signature == 0x06054b50) {
       if (file_timestamps_uniform) {
+        // A single entry counts as uniform on purpose: one file's timestamp is indistinguishable
+        // from a legacy synthetic backup stamp, so its filesystem time is not trusted as a save
+        // time. The caller then leaves the time unknown rather than risk showing the backup time.
         *file_timestamps_uniform = entry_count > 0 && timestamps_uniform;
       }
       return true;
@@ -609,12 +609,12 @@ BackupResult create_backup_archive(const BackupRequest &request) {
   }
 
   const std::string backup_directory = join_path(request.backup_root, save_folder);
+  if (!request.archive_name.empty() && !is_safe_archive_name(request.archive_name)) {
+    return error_result(join_path(backup_directory, request.archive_name), "archive name is unsafe");
+  }
   std::string archive_name = request.archive_name.empty()
                                  ? make_timestamped_backup_name(request.timestamp)
                                  : request.archive_name;
-  if (!request.archive_name.empty() && !is_safe_archive_name(request.archive_name)) {
-    return error_result({}, "archive name is unsafe");
-  }
   if (request.archive_name.empty() && !request.name_suffix.empty()) {
     archive_name.insert(archive_name.size() - 4, request.name_suffix);
   }

@@ -49,6 +49,9 @@ struct SaveMetadataJsonResult {
   int schema_version{};
 };
 
+// Sidecars are written at kSaveMetadataJsonVersion; every version from the minimum up to it is
+// still read (version 1 is migrated to correct its UTC handling, see parse_save_metadata_json).
+constexpr int kMinSaveMetadataJsonVersion = 1;
 constexpr int kSaveMetadataJsonVersion = 2;
 
 SaveMetadata parse_sdslot_data(const std::vector<unsigned char> &data);

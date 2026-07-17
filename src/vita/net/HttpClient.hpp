@@ -51,9 +51,11 @@ public:
                           const std::string &bearer_token) const;
   HttpResponse post_multipart_file(const std::string &url, const std::string &metadata_json,
                                    const std::string &file_path,
+                                   const std::string &file_content_type,
                                    const std::string &bearer_token) const;
   HttpResponse patch_multipart_file(const std::string &url, const std::string &metadata_json,
                                     const std::string &file_path,
+                                    const std::string &file_content_type,
                                     const std::string &bearer_token) const;
   HttpResponse download_file(const std::string &url, const std::string &file_path,
                              const std::string &bearer_token) const;
@@ -64,7 +66,9 @@ public:
 // so nested helpers (token refresh inside an upload) keep the outer label.
 class BusyLabelScope {
 public:
-  explicit BusyLabelScope(const char *label);
+  // indeterminate: keep an animated sweep for the whole scope (no determinate byte progress). Use
+  // for tiny metadata/auth requests whose small responses would otherwise flash the bar to 100%.
+  explicit BusyLabelScope(const char *label, bool indeterminate = false);
   ~BusyLabelScope();
 
   BusyLabelScope(const BusyLabelScope &) = delete;
@@ -72,6 +76,7 @@ public:
 
 private:
   std::string previous_;
+  bool previous_report_transfer_bytes_;
 };
 
 } // namespace vsm::vita

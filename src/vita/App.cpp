@@ -70,6 +70,9 @@ constexpr unsigned int kRepeatableButtons = SCE_CTRL_LEFT | SCE_CTRL_RIGHT | SCE
 // leaving room to abort a hold.
 constexpr int kSelectHoldTriggerFrames = 60;
 constexpr int kSelectHoldTapFrames = 24;
+// Frames the focused save must stay put before its mount-only time is read (~150 ms at 60 fps).
+// Long enough that scrolling through encrypted saves does not mount every one it passes.
+constexpr int kSaveTimeResolveDelayFrames = 10;
 constexpr std::size_t kMaxSdslotFileSize =
     kSdslotHeaderSize + kMaxSaveSlots * kSdslotRecordSize;
 
@@ -86,8 +89,8 @@ BackupTimestamp backup_timestamp_from(const SaveDateTime &value) {
 }
 
 SaveMetadata resolve_live_save_metadata(const std::string &save_path,
-                                        const SaveDateTime &backup_clock,
-                                        bool allow_pfs_mount) {
+                                        const SaveDateTime &backup_clock, bool allow_pfs_mount,
+                                        bool bridge_available) {
   // PSP and other plain save folders must never be handed to AppMgr's PFS mount routine: mounting
   // a plain folder creates sce_pfs bookkeeping in the user's save. If PFS metadata is absent, its
   // ordinary file times are already the authoritative information we need.
@@ -107,18 +110,26 @@ SaveMetadata resolve_live_save_metadata(const std::string &save_path,
   // AppMgr's public read-only fallback for unusual setups. A successful mount decrypts the same
   // save path; the returned name is used only to unmount immediately after reading metadata.
   int mount_result = -1;
-  static constexpr int kSavedataMountIds[] = {0x6E, 0x12E, 0x12F, 0x3ED};
-  for (const int id : kSavedataMountIds) {
-    args.id = id;
-    mount_result = saveKeeperUserMountById(&args);
-    if (mount_result >= 0) {
-      break;
+  if (bridge_available) {
+    // Only call the kernel bridge syscall when its modules actually loaded. Otherwise skip
+    // straight to the AppMgr fallback rather than invoke an unresolved weak import.
+    static constexpr int kSavedataMountIds[] = {0x6E, 0x12E, 0x12F, 0x3ED};
+    for (const int id : kSavedataMountIds) {
+      args.id = id;
+      mount_result = saveKeeperUserMountById(&args);
+      if (mount_result >= 0) {
+        break;
+      }
     }
   }
   if (mount_result < 0) {
     mount_result = sceAppMgrGameDataMount(save_path.c_str(), nullptr, nullptr, mount_point);
   }
-  const SaveMetadata metadata = resolve_save_metadata(save_path, backup_clock);
+  // Whether or not the mount succeeded, resolve_save_metadata falls back to the newest file's
+  // modification time when there are no readable Vita slots. Mounting decrypts file *contents*, not
+  // their timestamps, so that time is the same approximate "last written" moment either way - a
+  // useful fallback for saves whose mount fails, rather than showing nothing.
+  SaveMetadata metadata = resolve_save_metadata(save_path, backup_clock);
   if (mount_result >= 0) {
     sceAppMgrUmount(mount_point);
   }
@@ -334,7 +345,8 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
   // Resolve once so the ZIP name and JSON describe the same moment, even if creating the archive
   // takes long enough for the wall clock to tick over.
   const SaveMetadata metadata = resolve_live_save_metadata(
-      save.path, current_local_datetime(), save.platform != SavePlatform::Psp);
+      save.path, current_local_datetime(), save.platform != SavePlatform::Psp,
+      mount_bridge_ready_);
 
   bool entries_ok = false;
   const std::vector<ArchiveEntryInfo> entries = compute_folder_entries(save.path, &entries_ok);
@@ -436,8 +448,22 @@ bool App::resolve_save_time(SaveRecord *save) {
   if (!save || !save->save_time_requires_mount) {
     return save && save->save_time_known;
   }
-  const SaveMetadata metadata = resolve_live_save_metadata(save->path, {}, true);
+  const SaveMetadata metadata =
+      resolve_live_save_metadata(save->path, {}, true, mount_bridge_ready_);
   return apply_mounted_save_time(save, metadata);
+}
+
+void App::schedule_selected_save_time_resolve() {
+  // Defer the (blocking) mount until the selection settles, so scrolling past several encrypted
+  // saves does not mount each one in turn. The main loop counts this down and then resolves
+  // without a modal, leaving the grid on screen during the brief read.
+  if (visible_saves_.empty()) {
+    pending_time_resolve_frames_ = -1;
+    return;
+  }
+  const SaveRecord &save = saves_[visible_saves_[selected_save_ % visible_saves_.size()]];
+  pending_time_resolve_frames_ =
+      save.save_time_requires_mount ? kSaveTimeResolveDelayFrames : -1;
 }
 
 void App::resolve_selected_save_time() {
@@ -448,29 +474,40 @@ void App::resolve_selected_save_time() {
   if (!save.save_time_requires_mount) {
     return;
   }
-  ui_.draw_busy("Reading save time", 0, -1);
+  // Synchronous mount on the main thread. Deliberately not on a background thread: mounting a save
+  // from a second thread leaked AppMgr mount slots until, mid-session, the system refused any
+  // further mounts. The grid freezes briefly during the read, which the debounce keeps to only the
+  // save the user settles on.
   resolve_save_time(&save);
 }
 
-void App::resolve_all_save_times() {
+bool App::resolve_all_save_times() {
   const std::size_t total = static_cast<std::size_t>(std::count_if(
       saves_.begin(), saves_.end(),
       [](const SaveRecord &save) { return save.save_time_requires_mount; }));
   if (total == 0) {
-    return;
+    return true;
   }
+  constexpr const char *kContext = "Switching to Last Saved sort";
+  constexpr const char *kCancelHint = "cancel and sort by name";
   std::size_t done = 0;
   for (SaveRecord &save : saves_) {
     if (!save.save_time_requires_mount) {
       continue;
     }
+    // Each save needs its own (blocking) mount, so a full library can take a while. Let Square bail
+    // out; the caller then keeps the name order instead of a half-resolved Last Saved order.
+    SceCtrlData pad {};
+    sceCtrlPeekBufferPositive(0, &pad, 1);
+    if ((pad.buttons & SCE_CTRL_SQUARE) != 0) {
+      return false;
+    }
     ui_.draw_busy("Reading save times", static_cast<long long>(done),
-                  static_cast<long long>(total));
+                  static_cast<long long>(total), kContext, kCancelHint);
     resolve_save_time(&save);
     ++done;
   }
-  ui_.draw_busy("Reading save times", static_cast<long long>(done),
-                static_cast<long long>(total));
+  return true;
 }
 
 void App::apply_sort_and_rebuild() {
@@ -479,10 +516,10 @@ void App::apply_sort_and_rebuild() {
     focused_id = current->id;
   }
 
-  if (save_sort_requires_all_times(sort_mode_)) {
-    // Sorting must never compare raw sce_pfs bookkeeping times. Resolve every pending encrypted
-    // save once, only when the user actually asks for the Last Saved order.
-    resolve_all_save_times();
+  if (save_sort_requires_all_times(sort_mode_) && !resolve_all_save_times()) {
+    // The user canceled the read; keep the name order rather than a half-resolved Last Saved order.
+    sort_mode_ = SaveSortMode::Name;
+    save_settings();
   }
   apply_save_sort(&saves_, sort_mode_, newest_remote_by_folder());
   // Remembered per-tab positions point into the old order; the current save is re-located by id
@@ -499,7 +536,7 @@ void App::apply_sort_and_rebuild() {
     }
   }
   category_selection_[static_cast<std::size_t>(category_)] = selected_save_;
-  resolve_selected_save_time();
+  schedule_selected_save_time_resolve();
   refresh_local_backups();
   refresh_remote_backups_view();
 }
@@ -516,7 +553,7 @@ void App::cycle_sort_mode() {
   case SaveSortMode::LastSaved:
     set_status(StatusKind::Info, "Sorted by last saved.");
     break;
-  case SaveSortMode::LastSynced:
+  case SaveSortMode::LastBackup:
     set_status(StatusKind::Info, "Sorted by latest backup.");
     break;
   case SaveSortMode::Name:
@@ -582,7 +619,7 @@ void App::move_selected_save(int delta) {
     // A different save means a different backup list; focus its "New Backup" entry. Any status
     // message described the previous save, so it goes too.
     selected_backup_ = 0;
-    resolve_selected_save_time();
+    schedule_selected_save_time_resolve();
     refresh_local_backups();
     refresh_remote_backups_view();
     clear_status();
@@ -610,7 +647,7 @@ void App::move_selected_category(int delta) {
     selected_save_ = category_selection_[static_cast<std::size_t>(category_)];
     selected_backup_ = 0;
     rebuild_visible_saves();
-    resolve_selected_save_time();
+    schedule_selected_save_time_resolve();
     refresh_local_backups();
     refresh_remote_backups_view();
     clear_status();
@@ -623,6 +660,7 @@ void App::move_selected_backup(int delta) {
   // Menu size is the backups plus the "New Backup" entry at index 0.
   selected_backup_ = move_selection(selected_backup_, backup_count() + 1, delta);
   if (selected_backup_ != previous) {
+    details_open_pending_ = false;
     cancel_restore_confirmation();
     cancel_delete_confirmation();
     cancel_sync_all_confirmation();
@@ -1031,7 +1069,7 @@ void App::handle_google_button() {
   if (google_connected_) {
     if (sync_drive_index()) {
       refresh_remote_backups_view();
-      if (sort_mode_ == SaveSortMode::LastSynced) {
+      if (sort_mode_ == SaveSortMode::LastBackup) {
         apply_sort_and_rebuild();
       }
       // The overlay already showed the sync happening; whatever status was left over predates
@@ -1048,7 +1086,7 @@ void App::begin_google_auth() {
     return;
   }
 
-  BusyLabelScope busy("Contacting Google");
+  BusyLabelScope busy("Contacting Google", /*indeterminate=*/true);
   HttpClient http;
   const HttpResponse response =
       http.post_form(kGoogleDeviceCodeEndpoint,
@@ -1190,7 +1228,7 @@ bool App::refresh_google_access_token() {
     return false;
   }
 
-  BusyLabelScope busy("Refreshing Google session");
+  BusyLabelScope busy("Refreshing Google session", /*indeterminate=*/true);
   HttpClient http;
   const HttpResponse response = http.post_form(
       kGoogleTokenEndpoint,
@@ -1321,7 +1359,7 @@ bool App::sync_drive_index() {
   if (!ensure_google_access_token()) {
     return false;
   }
-  BusyLabelScope busy("Syncing with Google Drive");
+  BusyLabelScope busy("Syncing with Google Drive", /*indeterminate=*/true);
 
   // First sweep: every folder the app can see (drive.file scope limits this to folders Save
   // Keeper created). The root "PSV Saves" folder is identified by name; save folders are the
@@ -1690,7 +1728,7 @@ SaveMetadataJsonResult App::ensure_local_backup_metadata(const SaveRecord &save,
           extract_backup_archive_for_inspection(archive_path, inspection.path());
       if (extracted.ok) {
         SaveMetadata mounted = resolve_live_save_metadata(
-            inspection.path(), {}, save.platform != SavePlatform::Psp);
+            inspection.path(), {}, save.platform != SavePlatform::Psp, mount_bridge_ready_);
         if ((mounted.source == SaveTimeSource::VitaSlot && !mounted.slots.empty()) ||
             (mounted.source == SaveTimeSource::Filesystem &&
              !extracted.file_timestamps_uniform)) {
@@ -1704,9 +1742,14 @@ SaveMetadataJsonResult App::ensure_local_backup_metadata(const SaveRecord &save,
     // A healthy filesystem-time companion is still useful for games that do not use Vita slots.
     // Preserve it after the one best-effort archive inspection rather than replacing it with an
     // invented backup time.
-    return usable_cached_metadata
-               ? metadata
-               : SaveMetadataJsonResult{false, {}, {}, "slot details unavailable"};
+    if (usable_cached_metadata) {
+      return metadata;
+    }
+    // Do not cache the failure. Inspection can fail for transient/environmental reasons - a mount
+    // that could not be satisfied this session, or not enough ur0: space to extract - and a cached
+    // "nothing here" marker would permanently hide slot details that are actually recoverable. This
+    // path is user-initiated (opening details), not per-frame, so re-inspecting next time is cheap.
+    return {false, {}, {}, "slot details unavailable"};
   }
   std::string write_error;
   if (!write_save_metadata_json_atomic(metadata_path, identity, recovered, &write_error)) {
@@ -1792,10 +1835,10 @@ SaveMetadataJsonResult App::download_remote_backup_metadata(
     return metadata;
   }
   if (std::rename(temporary_path.c_str(), metadata_path.c_str()) != 0) {
+    // The details were downloaded and validated; only caching them for next time failed. Return
+    // the in-memory metadata so the screen can still show it instead of "unavailable".
     std::remove(temporary_path.c_str());
-    metadata.ok = false;
-    metadata.error = "could not cache slot details";
-    return metadata;
+    metadata.error.clear();
   }
   return metadata;
 }
@@ -1839,7 +1882,7 @@ void App::repair_remote_backup_metadata(const SaveRecord &save, const BackupRow 
           build_drive_multipart_update_url(existing.id),
           build_drive_sidecar_update_metadata_json(
               backup_metadata_name(row.remote_name), archive_file_id),
-          metadata_path, token);
+          metadata_path, "application/json", token);
     });
     return;
   }
@@ -1848,7 +1891,7 @@ void App::repair_remote_backup_metadata(const SaveRecord &save, const BackupRow 
         kDriveUploadEndpoint,
         build_drive_sidecar_upload_metadata_json(
             backup_metadata_name(row.remote_name), folder->second, archive_file_id),
-        metadata_path, token);
+        metadata_path, "application/json", token);
   });
 }
 
@@ -1877,6 +1920,20 @@ void App::download_and_inspect_selected_backup() {
   open_save_details();
 }
 
+void App::request_save_details() {
+  const BackupRow *row = selected_backup_row();
+  const SaveRecord *save = selected_save_record();
+  // The live-save ("New Backup") row shows a time still being read through a mount. Opening now
+  // would race that background read and the press could be swallowed by it, so defer the open until
+  // the time lands (the main loop tick fires it, and any other input cancels it). Backup rows carry
+  // their own metadata, so they open immediately.
+  if (row && row->new_backup && save && save->save_time_requires_mount) {
+    details_open_pending_ = true;
+    return;
+  }
+  open_save_details();
+}
+
 void App::open_save_details() {
   const SaveRecord *selected = selected_save_record();
   const BackupRow *selected_row = selected_backup_row();
@@ -1893,19 +1950,19 @@ void App::open_save_details() {
     // archive or JSON companion; this is a read-only preview of what the next backup would use.
     slot_details_.snapshot_name = "Current Save";
     slot_details_.metadata = resolve_live_save_metadata(
-        save.path, {}, save.platform != SavePlatform::Psp);
+        save.path, {}, save.platform != SavePlatform::Psp, mount_bridge_ready_);
     if (!save_metadata_has_observed_time(slot_details_.metadata)) {
       slot_details_.metadata = {};
       slot_details_.unavailable_message = "No save details available";
       slot_details_.warning_message =
-          "No readable Vita slot information or save-file timestamp was found.";
+          "No readable save slot information or save-file timestamp was found.";
     } else if (slot_details_.metadata.slots.empty()) {
-      slot_details_.unavailable_message = "No Vita slot details available";
+      slot_details_.unavailable_message = "No save slot details available";
       slot_details_.warning_message =
           save.platform == SavePlatform::Psp
-              ? "PSP saves do not use Vita slot metadata. The save time comes from the newest "
+              ? "PSP saves do not use save slot metadata. The save time comes from the newest "
                 "file in this save."
-              : "This save has no readable Vita slot metadata. The save time comes from its "
+              : "This save has no readable save slot metadata. The save time comes from its "
                 "newest file.";
     }
     slot_details_.open = true;
@@ -1948,10 +2005,10 @@ void App::open_save_details() {
     slot_details_.unavailable_message = "No slot details available";
     if (!row.has_local()) {
       slot_details_.warning_message =
-          "Download the backup to check for Vita slot information.";
+          "Download the backup to check for save slot information.";
     } else {
       slot_details_.warning_message =
-          "No readable Vita slot information was found in this backup.";
+          "No readable save slot information was found in this backup.";
     }
   }
   slot_details_.open = true;
@@ -2023,7 +2080,7 @@ BackupUploadResult App::upload_local_backup(const SaveRecord &save,
   const HttpResponse upload_response = drive_request([&](const std::string &token) {
     return HttpClient().post_multipart_file(
         kDriveUploadEndpoint, build_drive_upload_metadata_json(backup_name, folder_id),
-        archive_path, token);
+        archive_path, "application/zip", token);
   });
   if (!upload_response.ok) {
     set_status(StatusKind::Error, "Cloud upload failed.");
@@ -2059,7 +2116,7 @@ BackupUploadResult App::upload_local_backup(const SaveRecord &save,
         kDriveUploadEndpoint,
         build_drive_sidecar_upload_metadata_json(backup_metadata_name(backup_name), folder_id,
                                                  archive_file_id),
-        metadata_path, token);
+        metadata_path, "application/json", token);
   });
   result.metadata_warning = !sidecar_upload.ok;
   return result;
@@ -2078,7 +2135,7 @@ bool App::rename_remote_backup(const SaveRecord &save, const std::string &remote
   if (file_id.empty()) {
     return false;
   }
-  BusyLabelScope busy("Renaming Cloud backup");
+  BusyLabelScope busy("Renaming Cloud backup", /*indeterminate=*/true);
   const std::string rename_url =
       std::string(kDriveFilesEndpoint) + "/" + form_url_encode(file_id) + "?fields=id%2Cname";
   const HttpResponse renamed = drive_request([&](const std::string &token) {
@@ -2348,7 +2405,7 @@ void App::run_sync_all() {
 
   refresh_local_backups();
   refresh_remote_backups_view();
-  if (run.uploaded > 0 && sort_mode_ == SaveSortMode::LastSynced) {
+  if (run.uploaded > 0 && sort_mode_ == SaveSortMode::LastBackup) {
     apply_sort_and_rebuild();
   }
   std::string summary = sync_run_summary(run);
@@ -2367,27 +2424,35 @@ int App::run() {
   }
 
   // Slot timestamps are optional. If the mount bridge cannot load, all backup operations still
-  // work and metadata falls back to save-file times as before.
-  initialize_save_data_mount_bridge();
+  // work and metadata falls back to save-file times as before. The result gates the kernel-bridge
+  // syscall so a failed load degrades to the AppMgr mount instead of calling an unloaded module.
+  mount_bridge_ready_ = initialize_save_data_mount_bridge();
 
   // Scanning storage and reading the system app database (titles, icons) blocks for a moment on a
-  // full library; draw a frame first so the screen is not blank while it runs.
-  ui_.draw_busy("Loading saves", 0, -1);
+  // full library; draw a frame first so the screen is not blank while it runs. Start at a
+  // determinate 0% (total 1 is a placeholder until the scan lists the saves and reports the real
+  // count) so the bar opens at 0% rather than flashing an indeterminate sweep before it fills.
+  ui_.draw_busy("Loading saves", 0, 1);
 
   // Scan once at startup for the foundation build. Later actions that create, restore, or delete a
   // save will refresh this list explicitly so the UI does not rescan storage every frame.
   saves_ = scan_save_roots(default_save_roots(),
-                           [this] { ui_.draw_busy("Loading saves", 0, -1); });
-  // Keep the "Loading saves" sweep moving through the app-database query (its slowest part) by
-  // repainting a frame every few rows, instead of a frozen bar.
+                           [this](std::size_t done, std::size_t total) {
+                             ui_.draw_busy("Loading saves", static_cast<long long>(done),
+                                           static_cast<long long>(total));
+                           });
+  // The app-database query (titles, icons) has no known row count, so it stays a pulse after the
+  // determinate scan above; repaint a frame every few rows so it does not look frozen.
   const AppDbMetadataResult metadata_result =
       apply_app_db_metadata(&saves_, [this] { ui_.draw_busy("Loading saves", 0, -1); });
   if (!metadata_result.ok && !metadata_result.error.empty()) {
     set_status(StatusKind::Info, "Using save-folder metadata: " + metadata_result.error);
   }
   load_settings();
-  if (save_sort_requires_all_times(sort_mode_)) {
-    resolve_all_save_times();
+  if (save_sort_requires_all_times(sort_mode_) && !resolve_all_save_times()) {
+    // Canceled the startup read (the saved sort was Last Saved); fall back to name.
+    sort_mode_ = SaveSortMode::Name;
+    save_settings();
   }
   apply_save_sort(&saves_, sort_mode_, {});
   // Open on the first tab that actually has saves so the app never starts on an empty grid.
@@ -2398,7 +2463,7 @@ int App::run() {
     }
   }
   rebuild_visible_saves();
-  resolve_selected_save_time();
+  schedule_selected_save_time_resolve();
   refresh_local_backups();
   load_google_token_cache();
 
@@ -2445,7 +2510,7 @@ int App::run() {
   if (google_connected_) {
     if (sync_drive_index()) {
       refresh_remote_backups_view();
-      if (sort_mode_ == SaveSortMode::LastSynced) {
+      if (sort_mode_ == SaveSortMode::LastBackup) {
         apply_sort_and_rebuild();
       }
     }
@@ -2541,6 +2606,13 @@ int App::run() {
       continue;
     }
 
+    // Any input other than the Triangle press itself cancels a deferred details open, so a change
+    // of mind (or moving to another save) never pops the screen open once the time resolves. The
+    // right stick browses backups below and cancels it too, via move_selected_backup.
+    if (details_open_pending_ && (pressed & ~static_cast<unsigned int>(SCE_CTRL_TRIANGLE)) != 0) {
+      details_open_pending_ = false;
+    }
+
     if ((pressed & SCE_CTRL_LEFT) != 0) {
       move_selected_save(-1);
     }
@@ -2614,7 +2686,7 @@ int App::run() {
       if (resolve_tap_hold_action(triangle_hold_frames, true, triangle_hold_consumed,
                                   kSelectHoldTapFrames, kSelectHoldTriggerFrames) ==
           TapHoldAction::Tap) {
-        open_save_details();
+        request_save_details();
       }
       triangle_hold_frames = 0;
       triangle_hold_consumed = false;
@@ -2665,6 +2737,21 @@ int App::run() {
       }
       square_hold_frames = 0;
       square_hold_consumed = false;
+    }
+
+    // Once the selection has settled, resolve the focused save's mount-only time. Only the grid
+    // path reaches here; the details mode returns earlier, so an open details screen never triggers
+    // a background mount.
+    if (pending_time_resolve_frames_ > 0) {
+      --pending_time_resolve_frames_;
+    } else if (pending_time_resolve_frames_ == 0) {
+      pending_time_resolve_frames_ = -1;
+      resolve_selected_save_time();
+      if (details_open_pending_) {
+        // A Triangle press was waiting on this resolve; honor it now that the time has landed.
+        details_open_pending_ = false;
+        open_save_details();
+      }
     }
 
     UiState ui_state;
@@ -2734,7 +2821,7 @@ int App::run() {
       pending_remote_refresh_ = false;
       if (sync_drive_index()) {
         refresh_remote_backups_view();
-        if (sort_mode_ == SaveSortMode::LastSynced) {
+        if (sort_mode_ == SaveSortMode::LastBackup) {
           apply_sort_and_rebuild();
         }
         set_status(StatusKind::Success, "Google Drive connected.");

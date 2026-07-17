@@ -18,15 +18,15 @@ Made for people with more than one Vita (or a PS TV) who want their saves to fol
 - lets you label a backup ("before boss", "100% save") with the on-screen keyboard, so you can
   tell snapshots apart; the label follows the backup to Drive
 - shows your games in a grid with real titles and icons, grouped into Vita / Homebrew / PSP tabs
-- sorts by name, by last saved, or by last synced (whatever was uploaded most recently,
-  from any device, bubbles to the top)
+- sorts by name, by latest backup (whatever was backed up most recently, from any device,
+  bubbles to the top), or by last saved
 - signs in to Google by scanning a QR code with your phone - no typing on the Vita, and you
   stay signed in until you disconnect
 - keeps multiple snapshots per game, so you can go back to an older save at any time
 - names new snapshots from the latest real Vita save-slot time when the game provides it, instead
   of the time Save Keeper happened to run
 - shows the title, subtitle, description, and date of every Vita slot in a snapshot: focus a
-  backup and hold Triangle. Backups and restores still operate on the whole save, not one slot
+  backup and press Triangle. Backups and restores still operate on the whole save, not one slot
 - before a restore overwrites anything, the current save is snapshotted automatically
   (shown as `[AUTO]`), unless an identical backup already exists
 
@@ -73,8 +73,8 @@ The app can only see files it created itself. It cannot read anything else in yo
 | Cross | create a backup (on "New Backup") or restore the selected one (press twice) |
 | Select | upload a card-only backup, or download a Drive-only one; hold to back up & upload the whole tab |
 | Start | delete the selected backup - for one that is on both sides, choose card, Drive, or both |
-| Square | change sorting (by name, last saved, or last synced); hold to label the selected backup |
-| Triangle | connect/re-sync Google Drive; hold on a backup to view its save-slot details |
+| Square | change sorting (by name, latest backup, or last saved); hold to label the selected backup |
+| Triangle | view the focused save's slot details; hold to connect Google Drive or re-sync its backup list |
 | Circle | cancel a pending confirmation or the Google sign-in |
 
 On Japanese-region consoles Cross and Circle swap automatically, following the system setting.
@@ -99,8 +99,15 @@ the local backups (compared by content, not by dates), an `[AUTO]` snapshot is c
 Slot details are stored in a small optional JSON companion next to each ZIP, locally and on
 Drive. The ZIP is always authoritative: a missing or damaged JSON file never hides a backup and
 never prevents upload, download, restore, labeling, or deletion. Save Keeper reads details lazily
-when you hold Triangle, and can recover them from `sce_sys/sdslot.dat` inside older local ZIPs
+when you press Triangle, and can recover them from `sce_sys/sdslot.dat` inside older local ZIPs
 without rewriting those ZIPs. Existing 1.0 backups keep their original names and work unchanged.
+
+Reading slot times out of a retail (PFS-encrypted) save needs a kernel mount. When that mount is
+unavailable Save Keeper falls back to the newest save-file time, so nothing breaks - the slot time
+is just approximate rather than exact. Recovering slot details from an already-encrypted backup
+extracts it into `ur0:user/00/savedata` first, so that step needs enough free space on `ur0:` for
+the save; it is skipped when the save is larger than the space available there, and the ZIP itself
+is never touched.
 
 ## Where things are stored
 

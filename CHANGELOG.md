@@ -9,7 +9,7 @@ All notable changes to Save Keeper are documented here. The format follows
 ### Added
 - new snapshots use the latest actual Vita save-slot date in their filename. If a game does not
   expose slot data, Save Keeper falls back to the newest save file time and finally the backup time
-- hold Triangle on a snapshot to open a full-screen slot browser with each slot's date, title,
+- press Triangle on a snapshot to open a full-screen slot browser with each slot's date, title,
   subtitle, and description
 - optional JSON metadata companions sync with each ZIP on Google Drive. They are loaded only when
   details are requested, so the normal backup index stays lightweight
@@ -32,6 +32,8 @@ All notable changes to Save Keeper are documented here. The format follows
   Cloud only, or both
 - Drive folders now carry the game's title (for example `PCSB00456 FEZ`), so backups are
   browsable in the Google Drive web UI
+- sorting now cycles name, latest backup, then last saved, so the mode that reads every save's
+  slot data comes last; the sort choice saved by older versions still loads
 - footer button hints, hold-gesture cues, and status messages cleaned up throughout
 
 ## [1.0.0] - 2026-07-05

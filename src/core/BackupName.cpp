@@ -1,5 +1,7 @@
 #include "core/BackupName.hpp"
 
+#include "core/CalendarUtil.hpp"
+
 #include <cctype>
 #include <iomanip>
 #include <sstream>
@@ -39,23 +41,9 @@ int parse_digits(const std::string &text, std::size_t offset, std::size_t count)
   return value;
 }
 
-bool is_leap_year(int year) {
-  return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-}
-
 bool valid_timestamp(const BackupTimestamp &value) {
-  static const int days_per_month[] = {31, 28, 31, 30, 31, 30,
-                                       31, 31, 30, 31, 30, 31};
-  if (value.year < 1 || value.year > 9999 || value.month < 1 || value.month > 12 ||
-      value.hour < 0 || value.hour > 23 || value.minute < 0 || value.minute > 59 ||
-      value.second < 0 || value.second > 59) {
-    return false;
-  }
-  int days = days_per_month[value.month - 1];
-  if (value.month == 2 && is_leap_year(value.year)) {
-    ++days;
-  }
-  return value.day >= 1 && value.day <= days;
+  return is_valid_calendar_datetime(value.year, value.month, value.day, value.hour, value.minute,
+                                    value.second);
 }
 
 std::size_t canonical_identity_length(const std::string &plain) {

@@ -58,8 +58,10 @@ private:
   void load_settings();
   void save_settings();
   void rebuild_visible_saves();
+  void schedule_selected_save_time_resolve();
   void resolve_selected_save_time();
-  void resolve_all_save_times();
+  // Returns false if the user canceled (Square) mid-read, so the caller can keep the name order.
+  bool resolve_all_save_times();
   bool resolve_save_time(SaveRecord *save);
   std::size_t category_count(SaveCategory category) const;
   const SaveRecord *selected_save_record() const;
@@ -117,6 +119,7 @@ private:
                                                           const std::string &archive_name,
                                                           const std::string &archive_file_id);
   void open_save_details();
+  void request_save_details();
   void repair_remote_backup_metadata(const SaveRecord &save, const BackupRow &row,
                                      bool replace_unusable = false);
   bool remote_backup_exists(const std::string &save_id, const std::string &backup_name) const;
@@ -172,6 +175,15 @@ private:
   // Set when sign-in completes so the first Drive listing runs one frame later, after the
   // "connected" state has been drawn, instead of freezing the sign-in screen.
   bool pending_remote_refresh_{};
+  // True only when both mount-bridge modules loaded at startup. Gates the kernel syscall so slot
+  // resolution degrades to the AppMgr mount (and then save-file times) when the bridge is absent.
+  bool mount_bridge_ready_{};
+  // Countdown (frames) until the focused save's mount-only time is read; -1 when nothing pending.
+  // Reset on every navigation so scrolling debounces the blocking mount. See the main loop tick.
+  int pending_time_resolve_frames_{-1};
+  // Triangle pressed on the live-save row while its time was still resolving: open Save Details as
+  // soon as the resolve lands instead of swallowing the press. Any other input cancels it.
+  bool details_open_pending_{};
   // Details is a separate input/rendering mode. Keeping its state here lets Ui stay I/O-free.
   SlotDetailsState slot_details_;
   bool enter_is_cross_{true};
