@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/SaveSlotMetadata.hpp"
+#include "core/SaveTimeCache.hpp"
 
 #include <string>
 
@@ -29,6 +30,9 @@ struct SaveRecord {
   // PFS bookkeeping files have unrelated modification times. Vita code resolves these saves once
   // through a decrypted mount before exposing or sorting by their actual slot time.
   bool save_time_requires_mount{};
+  // Stat-level fingerprint of the save folder, filled at scan time for mount-requiring saves so
+  // a cached mount-resolved time can be trusted while the folder is unchanged.
+  SaveFingerprint fingerprint;
 };
 
 } // namespace vsm

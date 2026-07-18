@@ -65,6 +65,8 @@ SaveMetadata resolve_save_metadata(const std::string &save_path,
                                    const SaveDateTime &backup_clock);
 SaveDateTime current_local_datetime();
 std::string format_save_datetime(const SaveDateTime &value);
+// Strict "YYYY-MM-DDTHH:MM:SS" with calendar validation; the format format_save_datetime writes.
+bool parse_save_datetime(const std::string &text, SaveDateTime *value);
 long long save_datetime_to_local_epoch(const SaveDateTime &value);
 std::string serialize_save_metadata_json(const std::string &identity,
                                          const SaveMetadata &metadata);

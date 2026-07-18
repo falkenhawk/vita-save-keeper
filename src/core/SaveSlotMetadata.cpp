@@ -434,6 +434,10 @@ std::string format_save_datetime(const SaveDateTime &value) {
   return buffer;
 }
 
+bool parse_save_datetime(const std::string &text, SaveDateTime *value) {
+  return parse_datetime_string(text, value);
+}
+
 long long save_datetime_to_local_epoch(const SaveDateTime &value) {
   std::tm local {};
   local.tm_year = value.year - 1900;

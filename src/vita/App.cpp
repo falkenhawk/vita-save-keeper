@@ -48,6 +48,7 @@ constexpr const char *kBackupRoot = "ux0:data/save-keeper/backups";
 constexpr const char *kGoogleClientPath = "ux0:data/save-keeper/google-client.json";
 constexpr const char *kGoogleTokenPath = "ux0:data/save-keeper/google-token.json";
 constexpr const char *kSettingsPath = "ux0:data/save-keeper/settings.txt";
+constexpr const char *kSaveTimeCachePath = "ux0:data/save-keeper/save-times.json";
 constexpr const char *kMountKernelPath =
     "ux0:app/SVK000001/sce_sys/save-data-kernel.skprx";
 constexpr const char *kMountUserPath = "ux0:app/SVK000001/sce_sys/save-data-user.suprx";
@@ -453,7 +454,54 @@ bool App::resolve_save_time(SaveRecord *save) {
   }
   const SaveMetadata metadata =
       resolve_live_save_metadata(save->path, {}, true, mount_bridge_ready_);
-  return apply_mounted_save_time(save, metadata);
+  const bool resolved = apply_mounted_save_time(save, metadata);
+  // Cache every outcome reached with a healthy mount bridge - an exact slot time, a filesystem
+  // fallback (games with no slot table), and even "no readable time at all" - so none of them is
+  // re-derived every launch. Skip caching when the bridge is down: that is the one failure that
+  // can heal without the save folder changing, so those saves must retry next launch.
+  if (mount_bridge_ready_) {
+    // Fingerprint after the mount, so bookkeeping the mount itself touched is part of the stored
+    // state and the next scan sees an unchanged folder.
+    save->fingerprint = compute_save_fingerprint(save->path);
+    if (save->fingerprint.ok) {
+      save_time_cache_.entries[save->id] = {save->fingerprint, resolved, save->saved_at};
+      save_time_cache_dirty_ = true;
+    }
+  }
+  return resolved;
+}
+
+void App::apply_save_time_cache() {
+  for (SaveRecord &save : saves_) {
+    if (!save.save_time_requires_mount || !save.fingerprint.ok) {
+      continue;
+    }
+    const auto entry = save_time_cache_.entries.find(save.id);
+    if (entry == save_time_cache_.entries.end() ||
+        !entry->second.fingerprint.matches(save.fingerprint)) {
+      continue;
+    }
+    save.save_time_requires_mount = false;
+    if (entry->second.has_time) {
+      save.saved_at = entry->second.saved_at;
+      save.saved_at_epoch = save_datetime_to_local_epoch(entry->second.saved_at);
+      save.save_time_known = true;
+    } else {
+      // Cached "no readable time": show unknown without re-mounting an unchanged save.
+      save.save_time_known = false;
+    }
+  }
+}
+
+void App::flush_save_time_cache() {
+  if (!save_time_cache_dirty_) {
+    return;
+  }
+  // Best effort: a failed write only means these times are read through a mount again next launch.
+  std::string error;
+  if (write_save_time_cache_atomic(kSaveTimeCachePath, save_time_cache_, &error)) {
+    save_time_cache_dirty_ = false;
+  }
 }
 
 void App::schedule_selected_save_time_resolve() {
@@ -482,6 +530,7 @@ void App::resolve_selected_save_time() {
   // further mounts. The grid freezes briefly during the read, which the debounce keeps to only the
   // save the user settles on.
   resolve_save_time(&save);
+  flush_save_time_cache();
 }
 
 bool App::resolve_all_save_times() {
@@ -528,6 +577,8 @@ bool App::resolve_all_save_times() {
         sceKernelDelayThread(16 * 1000);
         sceCtrlPeekBufferPositive(0, &pad, 1);
       } while ((pad.buttons & SCE_CTRL_SQUARE) != 0);
+      // The times read before the cancel are still valid; keep them for the next launch.
+      flush_save_time_cache();
       return false;
     }
     ui_.draw_busy("Reading save times", static_cast<long long>(done),
@@ -535,6 +586,7 @@ bool App::resolve_all_save_times() {
     resolve_save_time(&save);
     ++done;
   }
+  flush_save_time_cache();
   return true;
 }
 
@@ -1042,12 +1094,41 @@ void App::handle_restore() {
   });
   restore_confirmation_pending_ = false;
   if (result.ok) {
+    // The live folder now holds different content; drop the cached time and re-read so the grid
+    // does not keep showing the pre-restore save time.
+    invalidate_save_time(save);
+    schedule_selected_save_time_resolve();
     set_status(StatusKind::Success,
                ui_.compose_status_with_name(
                    remote_restore ? "Downloaded and restored " : "Restored ",
                    display_backup_name(backup_name), "."));
   } else {
     set_status(StatusKind::Error, "Restore failed: " + result.error);
+  }
+}
+
+void App::invalidate_save_time(const SaveRecord &restored) {
+  save_time_cache_.entries.erase(restored.id);
+  save_time_cache_dirty_ = true;
+  flush_save_time_cache();
+  for (SaveRecord &record : saves_) {
+    if (record.id != restored.id || record.platform != restored.platform) {
+      continue;
+    }
+    record.save_time_requires_mount =
+        record.platform != SavePlatform::Psp && save_directory_has_pfs_metadata(record.path);
+    if (record.save_time_requires_mount) {
+      // Encrypted again after the restore: the focused-save debounce (scheduled by the caller)
+      // re-reads it through a mount and refills the cache.
+      record.save_time_known = false;
+      record.fingerprint = compute_save_fingerprint(record.path);
+    } else {
+      const SaveMetadata metadata = resolve_save_metadata(record.path, current_local_datetime());
+      record.saved_at = metadata.saved_at;
+      record.saved_at_epoch = save_datetime_to_local_epoch(metadata.saved_at);
+      record.save_time_known = metadata.source != SaveTimeSource::BackupClock;
+    }
+    break;
   }
 }
 
@@ -2530,6 +2611,11 @@ int App::run() {
   if (!metadata_result.ok && !metadata_result.error.empty()) {
     set_status(StatusKind::Info, "Using save-folder metadata: " + metadata_result.error);
   }
+  // Cached mount-resolved times: every save whose folder fingerprint is unchanged since its time
+  // was last read skips the mount entirely, so the "Reading save times" pass below only touches
+  // games that were actually played (or restored) since the previous launch.
+  save_time_cache_ = read_save_time_cache(kSaveTimeCachePath);
+  apply_save_time_cache();
   load_settings();
   if (save_sort_requires_all_times(sort_mode_) && !resolve_all_save_times()) {
     // Canceled the startup read (the saved sort was Last Saved); fall back to name.

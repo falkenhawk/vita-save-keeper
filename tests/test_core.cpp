@@ -910,6 +910,105 @@ void test_detail_view_sizes_from_folder_and_archive() {
   std::filesystem::remove_all(base);
 }
 
+void test_save_fingerprint_reflects_folder_content() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-fingerprint-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "save" / "sce_sys");
+  {
+    std::ofstream(base / "save" / "data.bin", std::ios::binary) << "hello";               // 5
+    std::ofstream(base / "save" / "sce_sys" / "sdslot.dat", std::ios::binary) << "0123";  // 4
+  }
+
+  const vsm::SaveFingerprint fingerprint = vsm::compute_save_fingerprint((base / "save").string());
+  EXPECT_TRUE(fingerprint.ok);
+  EXPECT_EQ(fingerprint.file_count, 2LL);
+  EXPECT_EQ(fingerprint.total_bytes, 9LL);
+  EXPECT_TRUE(fingerprint.newest_mtime > 0);
+  EXPECT_TRUE(fingerprint.matches(vsm::compute_save_fingerprint((base / "save").string())));
+
+  // Content growth changes the fingerprint even when the mtime granularity hides the rewrite.
+  { std::ofstream(base / "save" / "data.bin", std::ios::binary) << "hello!"; }
+  const vsm::SaveFingerprint changed = vsm::compute_save_fingerprint((base / "save").string());
+  EXPECT_TRUE(changed.ok);
+  EXPECT_TRUE(!fingerprint.matches(changed));
+
+  // Missing and empty folders never produce a matchable fingerprint.
+  const vsm::SaveFingerprint missing = vsm::compute_save_fingerprint((base / "nope").string());
+  EXPECT_TRUE(!missing.ok);
+  EXPECT_TRUE(!missing.matches(missing));
+
+  std::filesystem::remove_all(base);
+}
+
+void test_save_time_cache_roundtrip_and_rejects_bad_input() {
+  vsm::SaveTimeCache cache;
+  cache.entries["PCSG00352"] = {{true, 1783382228LL, 412LL, 5767168LL},
+                                true,
+                                {2026, 7, 6, 13, 37, 8}};
+  // A save that resolved to no readable time: cached without a savedAt so it is not re-mounted
+  // every launch just to learn "unknown" again.
+  cache.entries["PCSB00466"] = {{true, 1579216248LL, 4LL, 65536LL}, false, {}};
+
+  vsm::SaveTimeCache parsed;
+  EXPECT_TRUE(vsm::parse_save_time_cache(vsm::serialize_save_time_cache(cache), &parsed));
+  EXPECT_EQ(parsed.entries.size(), static_cast<std::size_t>(2));
+  const vsm::SaveTimeCacheEntry &entry = parsed.entries["PCSG00352"];
+  EXPECT_TRUE(entry.fingerprint.matches(cache.entries["PCSG00352"].fingerprint));
+  EXPECT_TRUE(entry.has_time);
+  EXPECT_EQ(vsm::format_save_datetime(entry.saved_at), "2026-07-06T13:37:08");
+  const vsm::SaveTimeCacheEntry &no_time = parsed.entries["PCSB00466"];
+  EXPECT_TRUE(!no_time.has_time);
+  EXPECT_TRUE(no_time.fingerprint.matches(cache.entries["PCSB00466"].fingerprint));
+
+  // Corrupt document or unknown version: reject the whole file (the cache simply rebuilds).
+  EXPECT_TRUE(!vsm::parse_save_time_cache("not json", &parsed));
+  EXPECT_TRUE(parsed.entries.empty());
+  EXPECT_TRUE(!vsm::parse_save_time_cache("{\"version\":99,\"entries\":{}}", &parsed));
+
+  // A malformed entry is skipped without discarding its healthy neighbors.
+  EXPECT_TRUE(vsm::parse_save_time_cache(
+      "{\"version\":1,\"entries\":{"
+      "\"BAD001\":{\"newestMtime\":1,\"fileCount\":2},"
+      "\"BAD002\":{\"newestMtime\":1,\"fileCount\":2,\"totalBytes\":3,"
+      "\"savedAt\":\"2026-13-40T99:99:99\"},"
+      "\"GOOD01\":{\"newestMtime\":1,\"fileCount\":2,\"totalBytes\":3,"
+      "\"savedAt\":\"2026-07-06T13:37:08\"}}}",
+      &parsed));
+  EXPECT_EQ(parsed.entries.size(), static_cast<std::size_t>(1));
+  EXPECT_TRUE(parsed.entries.find("GOOD01") != parsed.entries.end());
+}
+
+void test_scan_fingerprints_only_mount_requiring_saves() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-scan-fingerprint-test";
+  std::filesystem::remove_all(base);
+  // PCSE88888 mirrors a retail PFS save (sce_pfs marker); BHBB00001 is a plain homebrew save.
+  std::filesystem::create_directories(base / "vita" / "PCSE88888" / "sce_pfs");
+  std::filesystem::create_directories(base / "vita" / "PCSE88888" / "sce_sys");
+  std::filesystem::create_directories(base / "vita" / "BHBB00001");
+  {
+    std::ofstream(base / "vita" / "PCSE88888" / "sce_sys" / "keystone", std::ios::binary) << "k";
+    std::ofstream(base / "vita" / "BHBB00001" / "save.dat", std::ios::binary) << "homebrew";
+  }
+
+  const std::vector<vsm::SaveRecord> saves = vsm::scan_save_roots(
+      {{vsm::SavePlatform::Vita, (base / "vita").string()}}, {}, {});
+  EXPECT_EQ(saves.size(), static_cast<std::size_t>(2));
+  for (const vsm::SaveRecord &save : saves) {
+    if (save.id == "PCSE88888") {
+      EXPECT_TRUE(save.save_time_requires_mount);
+      EXPECT_TRUE(save.fingerprint.ok);
+      EXPECT_EQ(save.fingerprint.file_count, 1LL);
+    } else {
+      EXPECT_TRUE(!save.save_time_requires_mount);
+      EXPECT_TRUE(!save.fingerprint.ok);
+    }
+  }
+
+  std::filesystem::remove_all(base);
+}
+
 void test_backup_archive_reads_bounded_sdslot_entry_without_restoring() {
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() / "save-keeper-archive-entry-test";
@@ -1881,6 +1980,9 @@ int main() {
   test_grid_window_scrolls_only_when_selection_leaves_view();
   test_backup_archive_creates_timestamped_zip_snapshot();
   test_detail_view_sizes_from_folder_and_archive();
+  test_save_fingerprint_reflects_folder_content();
+  test_save_time_cache_roundtrip_and_rejects_bad_input();
+  test_scan_fingerprints_only_mount_requiring_saves();
   test_backup_archive_reads_bounded_sdslot_entry_without_restoring();
   test_legacy_zip_metadata_can_be_recovered_without_rewriting_the_archive();
   test_backup_archive_extracts_to_isolated_inspection_directory_and_cleans_up();

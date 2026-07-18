@@ -1,5 +1,7 @@
 #include "core/SaveScanner.hpp"
 
+#include "core/SaveTimeCache.hpp"
+
 #include "core/PathUtil.hpp"
 #include "core/SaveSlotMetadata.hpp"
 #include "core/SfoParser.hpp"
@@ -281,6 +283,10 @@ std::vector<SaveRecord> scan_save_roots(
       save.saved_at = metadata.saved_at;
       save.saved_at_epoch = save_datetime_to_local_epoch(metadata.saved_at);
       save.save_time_known = metadata.source != SaveTimeSource::BackupClock;
+    } else {
+      // Stat-only fingerprint for the save-time cache lookup. Actual times for these saves come
+      // from a mount (cached or live), never from these encrypted files' mtimes.
+      save.fingerprint = compute_save_fingerprint(save.path);
     }
     apply_sfo_metadata(&save);
     saves.push_back(std::move(save));

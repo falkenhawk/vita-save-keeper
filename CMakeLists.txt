@@ -34,6 +34,7 @@ add_library(vsm_core
   src/core/SaveCategory.cpp
   src/core/SaveScanner.cpp
   src/core/SaveSlotMetadata.cpp
+  src/core/SaveTimeCache.cpp
   src/core/Selection.cpp
   src/core/SfoParser.cpp
   src/core/SyncPlan.cpp

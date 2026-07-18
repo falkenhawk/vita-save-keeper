@@ -8,6 +8,7 @@
 #include "core/SaveRecord.hpp"
 #include "core/SaveScanner.hpp"
 #include "core/SaveSlotMetadata.hpp"
+#include "core/SaveTimeCache.hpp"
 #include "core/SyncPlan.hpp"
 #include "vita/net/HttpClient.hpp"
 #include "vita/ui/Ui.hpp"
@@ -66,6 +67,13 @@ private:
   // Returns false if the user canceled (Square) mid-read, so the caller can keep the name order.
   bool resolve_all_save_times();
   bool resolve_save_time(SaveRecord *save);
+  // Fills save times from save_time_cache_ for every save whose folder fingerprint still matches,
+  // clearing save_time_requires_mount so those saves skip the mount entirely.
+  void apply_save_time_cache();
+  void flush_save_time_cache();
+  // After a restore rewrote the live folder: drop the cache entry and re-derive the record's time
+  // state so the grid never keeps showing the pre-restore save time.
+  void invalidate_save_time(const SaveRecord &restored);
   std::size_t category_count(SaveCategory category) const;
   const SaveRecord *selected_save_record() const;
   void cancel_restore_confirmation();
@@ -182,6 +190,10 @@ private:
   // True only when both mount-bridge modules loaded at startup. Gates the kernel syscall so slot
   // resolution degrades to the AppMgr mount (and then save-file times) when the bridge is absent.
   bool mount_bridge_ready_{};
+  // Mount-resolved save times keyed by save id, trusted while each save folder's fingerprint is
+  // unchanged. Loaded once at startup; dirty entries are flushed after each resolve batch.
+  SaveTimeCache save_time_cache_;
+  bool save_time_cache_dirty_{};
   // Countdown (frames) until the focused save's mount-only time is read; -1 when nothing pending.
   // Reset on every navigation so scrolling debounces the blocking mount. See the main loop tick.
   int pending_time_resolve_frames_{-1};
