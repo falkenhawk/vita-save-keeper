@@ -143,6 +143,69 @@ int text_width(const FontSet &fonts, unsigned int size, const char *text) {
   return font ? vita2d_font_text_width(font, size, text) : 0;
 }
 
+// The Latin font's digits are proportional ('4' is a few pixels wider than '3'), so identical
+// "YYYY-MM-DD HH:MM:SS" patterns stacked in the slot list end up with ragged left edges and
+// wobbling interior columns. draw_datetime_tabular draws every digit centered in a fixed cell
+// (the widest digit's advance) so each timestamp lays out identically and columns align.
+//
+// Advances are measured in context - width("0c0") - width("00") - because a lone glyph's width
+// includes both side bearings, which do not apply between characters; cells sized that way came
+// out ~2px too wide and the dates looked letter-spaced. Cached because fonts never change after
+// init and this runs for every visible slot row each frame.
+struct TabularMetrics {
+  int advance[128] {};
+  int cell {};
+};
+
+int tabular_advance(const FontSet &fonts, unsigned int size, TabularMetrics *metrics, char c) {
+  const unsigned char index = static_cast<unsigned char>(c);
+  if (index >= 128) {
+    // Timestamps are pure ASCII; anything else falls back to the lone-glyph width.
+    const char one[2] = {c, '\0'};
+    return text_width(fonts, size, one);
+  }
+  if (metrics->advance[index] == 0) {
+    const char pair[3] = {'0', '0', '\0'};
+    const char triple[4] = {'0', c, '0', '\0'};
+    metrics->advance[index] =
+        std::max(1, text_width(fonts, size, triple) - text_width(fonts, size, pair));
+  }
+  return metrics->advance[index];
+}
+
+TabularMetrics &tabular_metrics(const FontSet &fonts, unsigned int size) {
+  static TabularMetrics cache[FontSet::kMaxSize];
+  TabularMetrics &metrics = cache[size < FontSet::kMaxSize ? size : 0];
+  if (metrics.cell == 0) {
+    // '0' is the canonical tabular width. This font's digit advances genuinely range ~7-10px, so
+    // sizing cells to the widest digit letter-spaced every date; in a '0'-wide cell the odd wider
+    // digit just tucks in (glyph ink is narrower than its advance) and the tracking stays natural.
+    metrics.cell = tabular_advance(fonts, size, &metrics, '0');
+  }
+  return metrics;
+}
+
+void draw_datetime_tabular(const FontSet &fonts, int right_x, int y, unsigned int color,
+                           unsigned int size, const std::string &text) {
+  TabularMetrics &metrics = tabular_metrics(fonts, size);
+  int total = 0;
+  for (const char c : text) {
+    total += (c >= '0' && c <= '9') ? metrics.cell : tabular_advance(fonts, size, &metrics, c);
+  }
+  int x = right_x - total;
+  for (const char c : text) {
+    const char one[2] = {c, '\0'};
+    const int advance = tabular_advance(fonts, size, &metrics, c);
+    if (c >= '0' && c <= '9') {
+      draw_text(fonts, x + (metrics.cell - advance) / 2, y, color, size, one);
+      x += metrics.cell;
+    } else {
+      draw_text(fonts, x, y, color, size, one);
+      x += advance;
+    }
+  }
+}
+
 const char *platform_label(SavePlatform platform) {
   switch (platform) {
   case SavePlatform::Vita:
@@ -832,8 +895,8 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross) {
       draw_text(fonts_, 32, y + 24, focused ? kColorText : kColorMuted, kTextSizeSmall,
                 slot_label);
       const std::string slot_date = format_save_datetime_spaced(slot.modified_at);
-      draw_text(fonts_, 276 - measure_text(kTextSizeTiny, slot_date.c_str()), y + 23,
-                focused ? kColorText : kColorIdleDot, kTextSizeTiny, slot_date.c_str());
+      draw_datetime_tabular(fonts_, 276, y + 23, focused ? kColorText : kColorIdleDot,
+                            kTextSizeTiny, slot_date);
     }
   }
 
@@ -865,8 +928,8 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross) {
     std::snprintf(slot_label, sizeof(slot_label), "Slot %03u", slot.id);
     draw_text(fonts_, kRightX, 82, kColorAccent, kTextSizeNormal, slot_label);
     const std::string slot_time = format_save_datetime_spaced(slot.modified_at);
-    draw_text(fonts_, 926 - measure_text(kTextSizeSmall, slot_time.c_str()), 82, kColorText,
-              kTextSizeSmall, slot_time.c_str());
+    // Tabular so the date does not shift sideways as the selection moves between slots.
+    draw_datetime_tabular(fonts_, 926, 82, kColorText, kTextSizeSmall, slot_time);
     vita2d_draw_line(kRightX, 96, 926, 96, RGBA8(255, 255, 255, 20));
 
     draw_text(fonts_, kRightX, 128, kColorMuted, kTextSizeTiny, "TITLE");
