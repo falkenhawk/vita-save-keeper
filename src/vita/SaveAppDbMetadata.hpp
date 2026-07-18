@@ -8,6 +8,10 @@
 
 namespace vsm::vita {
 
+// The system database titles and icons are read from. Its file stamp (mtime+size) doubles as
+// the title cache's freshness signal: installs, updates, and deletions rewrite this file.
+constexpr const char *kSystemAppDbPath = "ur0:shell/db/app.db";
+
 struct AppDbMetadataResult {
   bool ok{};
   std::string error;

@@ -979,7 +979,7 @@ void test_save_time_cache_roundtrip_and_rejects_bad_input() {
   EXPECT_TRUE(parsed.entries.find("GOOD01") != parsed.entries.end());
 }
 
-void test_scan_fingerprints_only_mount_requiring_saves() {
+void test_scan_fingerprints_every_save_and_flags_mount_requiring_ones() {
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() / "save-keeper-scan-fingerprint-test";
   std::filesystem::remove_all(base);
@@ -996,16 +996,113 @@ void test_scan_fingerprints_only_mount_requiring_saves() {
       {{vsm::SavePlatform::Vita, (base / "vita").string()}}, {}, {});
   EXPECT_EQ(saves.size(), static_cast<std::size_t>(2));
   for (const vsm::SaveRecord &save : saves) {
+    EXPECT_TRUE(save.fingerprint.ok);
+    EXPECT_EQ(save.fingerprint.file_count, 1LL);
     if (save.id == "PCSE88888") {
       EXPECT_TRUE(save.save_time_requires_mount);
-      EXPECT_TRUE(save.fingerprint.ok);
-      EXPECT_EQ(save.fingerprint.file_count, 1LL);
     } else {
       EXPECT_TRUE(!save.save_time_requires_mount);
-      EXPECT_TRUE(!save.fingerprint.ok);
+      EXPECT_TRUE(save.save_time_known);
     }
+    EXPECT_TRUE(!save.title_from_cache);
   }
 
+  std::filesystem::remove_all(base);
+}
+
+void test_scan_consumes_time_and_title_caches_when_fingerprints_match() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-scan-cache-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "vita" / "BHBB00001");
+  { std::ofstream(base / "vita" / "BHBB00001" / "save.dat", std::ios::binary) << "homebrew"; }
+  const std::vector<vsm::SaveRoot> roots = {
+      {vsm::SavePlatform::Vita, (base / "vita").string()}};
+
+  // First scan derives everything and gives us the fingerprint to build cache entries from.
+  const std::vector<vsm::SaveRecord> cold = vsm::scan_save_roots(roots, {}, {});
+  EXPECT_EQ(cold.size(), static_cast<std::size_t>(1));
+
+  vsm::SaveTimeCache times;
+  times.entries["BHBB00001"] = {cold[0].fingerprint, true, {2026, 7, 1, 12, 0, 0}};
+  vsm::SaveTitleCache titles;
+  titles.entries["BHBB00001"] = {false, cold[0].fingerprint, "Cached Homebrew", "BHBB00001",
+                                 "cached-icon.png"};
+
+  // A cached save must not invoke the metadata resolver at all, and the cached title must win
+  // (distinct from anything the folder could produce - there is no param.sfo in it).
+  std::size_t resolver_calls = 0;
+  const auto counting_resolver = [&](const std::string &path,
+                                     const vsm::SaveDateTime &clock) {
+    ++resolver_calls;
+    return vsm::resolve_save_metadata(path, clock);
+  };
+  const std::vector<vsm::SaveRecord> warm =
+      vsm::scan_save_roots(roots, {}, counting_resolver, &times, &titles);
+  EXPECT_EQ(resolver_calls, static_cast<std::size_t>(0));
+  EXPECT_EQ(warm.size(), static_cast<std::size_t>(1));
+  EXPECT_TRUE(warm[0].save_time_known);
+  EXPECT_EQ(vsm::format_save_datetime(warm[0].saved_at), "2026-07-01T12:00:00");
+  EXPECT_TRUE(warm[0].title_from_cache);
+  EXPECT_EQ(warm[0].display_name, "Cached Homebrew");
+  EXPECT_EQ(warm[0].icon_path, "cached-icon.png");
+
+  // Touch the save: both caches must be bypassed again.
+  { std::ofstream(base / "vita" / "BHBB00001" / "save.dat", std::ios::binary) << "homebrew!!"; }
+  const std::vector<vsm::SaveRecord> changed =
+      vsm::scan_save_roots(roots, {}, counting_resolver, &times, &titles);
+  EXPECT_EQ(resolver_calls, static_cast<std::size_t>(1));
+  EXPECT_TRUE(!changed[0].title_from_cache);
+  EXPECT_EQ(changed[0].display_name, "BHBB00001");
+
+  // An app-database entry ignores the fingerprint: it stays valid until the db stamp changes,
+  // which the caller checks before passing the cache in.
+  titles.entries["BHBB00001"].from_app_db = true;
+  const std::vector<vsm::SaveRecord> db_titled =
+      vsm::scan_save_roots(roots, {}, counting_resolver, &times, &titles);
+  EXPECT_TRUE(db_titled[0].title_from_cache);
+  EXPECT_TRUE(db_titled[0].title_from_app_db);
+  EXPECT_EQ(db_titled[0].display_name, "Cached Homebrew");
+
+  std::filesystem::remove_all(base);
+}
+
+void test_save_title_cache_roundtrip_and_stat_stamp() {
+  vsm::SaveTitleCache cache;
+  cache.app_db_mtime = 1784300000LL;
+  cache.app_db_size = 9437184LL;
+  cache.entries["PCSB01084"] = {true, {true, 1LL, 2LL, 3LL}, "Papers, Please", "PCSB01084",
+                                "ur0:appmeta/PCSB01084/icon0.png"};
+  cache.entries["ULUS10336"] = {false, {true, 4LL, 5LL, 6LL}, "Patapon 2", "ULUS10336",
+                                "ICON0.PNG"};
+
+  vsm::SaveTitleCache parsed;
+  EXPECT_TRUE(vsm::parse_save_title_cache(vsm::serialize_save_title_cache(cache), &parsed));
+  EXPECT_EQ(parsed.app_db_mtime, cache.app_db_mtime);
+  EXPECT_EQ(parsed.app_db_size, cache.app_db_size);
+  EXPECT_EQ(parsed.entries.size(), static_cast<std::size_t>(2));
+  EXPECT_TRUE(parsed.entries["PCSB01084"].from_app_db);
+  EXPECT_EQ(parsed.entries["PCSB01084"].display_name, "Papers, Please");
+  EXPECT_TRUE(!parsed.entries["ULUS10336"].from_app_db);
+  EXPECT_TRUE(parsed.entries["ULUS10336"].fingerprint.matches(
+      cache.entries["ULUS10336"].fingerprint));
+
+  EXPECT_TRUE(!vsm::parse_save_title_cache("not json", &parsed));
+  EXPECT_TRUE(parsed.entries.empty());
+  EXPECT_TRUE(!vsm::parse_save_title_cache(
+      "{\"version\":99,\"appDbMtime\":1,\"appDbSize\":2,\"entries\":{}}", &parsed));
+
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-stamp-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base);
+  { std::ofstream(base / "app.db", std::ios::binary) << "0123456789"; }
+  long long mtime = 0;
+  long long size = 0;
+  EXPECT_TRUE(vsm::stat_file_stamp((base / "app.db").string(), &mtime, &size));
+  EXPECT_EQ(size, 10LL);
+  EXPECT_TRUE(mtime > 0);
+  EXPECT_TRUE(!vsm::stat_file_stamp((base / "missing.db").string(), &mtime, &size));
   std::filesystem::remove_all(base);
 }
 
@@ -1982,7 +2079,9 @@ int main() {
   test_detail_view_sizes_from_folder_and_archive();
   test_save_fingerprint_reflects_folder_content();
   test_save_time_cache_roundtrip_and_rejects_bad_input();
-  test_scan_fingerprints_only_mount_requiring_saves();
+  test_scan_fingerprints_every_save_and_flags_mount_requiring_ones();
+  test_scan_consumes_time_and_title_caches_when_fingerprints_match();
+  test_save_title_cache_roundtrip_and_stat_stamp();
   test_backup_archive_reads_bounded_sdslot_entry_without_restoring();
   test_legacy_zip_metadata_can_be_recovered_without_rewriting_the_archive();
   test_backup_archive_extracts_to_isolated_inspection_directory_and_cleans_up();

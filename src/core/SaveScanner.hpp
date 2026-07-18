@@ -32,10 +32,17 @@ using SaveMetadataResolver =
 // percentage while scanning. The total is known up front from the directory listing.
 using SaveScanProgress = std::function<void(std::size_t done, std::size_t total)>;
 
+// time_cache and title_cache are optional accelerators: a save whose folder fingerprint matches
+// its time entry skips the metadata resolver, and one whose title entry is valid (see
+// SaveTitleCacheEntry) skips the param.sfo reads, with title_from_cache set so the caller knows
+// the app-database pass is not needed for it. The scan never writes the caches; callers rebuild
+// entries from the returned records.
 std::vector<SaveRecord> scan_save_roots(
     const std::vector<SaveRoot> &roots,
     const SaveScanProgress &on_progress = {},
-    const SaveMetadataResolver &resolve_metadata = {});
+    const SaveMetadataResolver &resolve_metadata = {},
+    const SaveTimeCache *time_cache = nullptr,
+    const SaveTitleCache *title_cache = nullptr);
 // Applies a save time resolved through the live mount: a real Vita slot time when the save has
 // slots, otherwise the newest-file time as an approximate fallback. Only a backup-clock (no
 // observed time) result is rejected, leaving the save time unknown. Matches what the details

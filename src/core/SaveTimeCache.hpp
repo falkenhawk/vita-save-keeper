@@ -54,4 +54,38 @@ SaveTimeCache read_save_time_cache(const std::string &path);
 bool write_save_time_cache_atomic(const std::string &path, const SaveTimeCache &cache,
                                   std::string *error);
 
+// Cache of each save's resolved title metadata, so a warm scan skips the param.sfo reads and the
+// system app-database query entirely. Two freshness rules, matched to where a value comes from:
+// entries resolved from the app database stay valid while the database file's stamp (mtime+size)
+// is unchanged - installs, updates, and deletions rewrite it - and entries resolved from a save's
+// own param.sfo stay valid while the save folder's fingerprint matches, since that sfo lives
+// inside the folder. Icon content is read from disk every session; only the path is cached.
+struct SaveTitleCacheEntry {
+  bool from_app_db{};
+  // Freshness key for sfo-derived entries; ignored when from_app_db.
+  SaveFingerprint fingerprint;
+  std::string display_name;
+  std::string title_id;
+  std::string icon_path;
+};
+
+struct SaveTitleCache {
+  // Stamp of the system app database the entries were built against; 0/0 when never queried.
+  long long app_db_mtime{};
+  long long app_db_size{};
+  std::map<std::string, SaveTitleCacheEntry> entries;
+};
+
+constexpr int kSaveTitleCacheVersion = 1;
+
+std::string serialize_save_title_cache(const SaveTitleCache &cache);
+bool parse_save_title_cache(const std::string &json, SaveTitleCache *cache);
+SaveTitleCache read_save_title_cache(const std::string &path);
+bool write_save_title_cache_atomic(const std::string &path, const SaveTitleCache &cache,
+                                   std::string *error);
+
+// mtime and byte size of one file; false when it cannot be stat'ed. The app-database stamp and
+// similar freshness checks use this.
+bool stat_file_stamp(const std::string &path, long long *mtime, long long *size);
+
 } // namespace vsm

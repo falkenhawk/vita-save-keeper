@@ -30,9 +30,16 @@ struct SaveRecord {
   // PFS bookkeeping files have unrelated modification times. Vita code resolves these saves once
   // through a decrypted mount before exposing or sorting by their actual slot time.
   bool save_time_requires_mount{};
-  // Stat-level fingerprint of the save folder, filled at scan time for mount-requiring saves so
-  // a cached mount-resolved time can be trusted while the folder is unchanged.
+  // Stat-level fingerprint of the save folder, filled at scan time for every save. It is the
+  // freshness key for cached times and sfo-derived titles: both can be trusted while it matches.
   SaveFingerprint fingerprint;
+  // True when the scan filled the title fields from the title cache; such a save does not need
+  // the app-database pass this launch.
+  bool title_from_cache{};
+  // True when the display name/icon came from the system app database (set by the db pass, or
+  // restored from a cache entry). Decides a rebuilt cache entry's freshness rule: db-derived
+  // entries follow the database stamp, sfo-derived ones follow the folder fingerprint.
+  bool title_from_app_db{};
 };
 
 } // namespace vsm

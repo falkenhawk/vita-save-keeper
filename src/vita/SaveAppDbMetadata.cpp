@@ -23,10 +23,6 @@ namespace {
 
 constexpr int kSqliteOk = 0;
 constexpr int kSqliteOpenReadonly = 0x00000001;
-// Sony's system application registry, maintained by SceShell. Save Keeper only reads it to map
-// save directory names to installed game titles and icons; the app's own files live under
-// ux0:data/save-keeper instead.
-constexpr const char *kSystemAppDbPath = "ur0:shell/db/app.db";
 
 struct AppDbTitle {
   std::string title_id;
@@ -99,6 +95,9 @@ void apply_title_metadata(const AppDbTitle &title, SaveRecord *save) {
   if (!title.icon_path.empty()) {
     save->icon_path = title.icon_path;
   }
+  // The title cache keys this entry's freshness to the app-database stamp instead of the save
+  // folder fingerprint.
+  save->title_from_app_db = true;
 }
 
 std::string format_sqlite_open_error(int result_code, sqlite3 *database) {

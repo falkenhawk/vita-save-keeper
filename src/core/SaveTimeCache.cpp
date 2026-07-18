@@ -133,30 +133,11 @@ bool parse_save_time_cache(const std::string &json, SaveTimeCache *cache) {
   return true;
 }
 
-SaveTimeCache read_save_time_cache(const std::string &path) {
-  SaveTimeCache cache;
-  FILE *file = std::fopen(path.c_str(), "rb");
-  if (!file) {
-    return cache;
-  }
-  std::string json;
-  char buffer[4096];
-  std::size_t read = 0;
-  while ((read = std::fread(buffer, 1, sizeof(buffer), file)) > 0) {
-    json.append(buffer, read);
-    if (json.size() > kMaxSaveTimeCacheSize) {
-      std::fclose(file);
-      return cache;
-    }
-  }
-  std::fclose(file);
-  parse_save_time_cache(json, &cache);
-  return cache;
-}
+namespace {
 
-bool write_save_time_cache_atomic(const std::string &path, const SaveTimeCache &cache,
-                                  std::string *error) {
-  const std::string json = serialize_save_time_cache(cache);
+// Temp file then rename, same as the metadata sidecars: a reader never sees a half-written
+// cache, and durability across a power cut is not worth an fsync - the caches rebuild themselves.
+bool write_json_atomic(const std::string &path, const std::string &json, std::string *error) {
   if (json.size() > kMaxSaveTimeCacheSize) {
     if (error) *error = "cache too large";
     return false;
@@ -167,8 +148,6 @@ bool write_save_time_cache_atomic(const std::string &path, const SaveTimeCache &
     if (error) *error = "could not create cache file";
     return false;
   }
-  // Temp file then rename, same as the metadata sidecars: a reader never sees a half-written
-  // cache, and durability across a power cut is not worth an fsync - the cache rebuilds itself.
   bool wrote = std::fwrite(json.data(), 1, json.size(), file) == json.size();
   wrote = std::fflush(file) == 0 && wrote;
   wrote = std::fclose(file) == 0 && wrote;
@@ -183,6 +162,148 @@ bool write_save_time_cache_atomic(const std::string &path, const SaveTimeCache &
     return false;
   }
   if (error) error->clear();
+  return true;
+}
+
+std::string read_bounded_file(const std::string &path) {
+  std::string content;
+  FILE *file = std::fopen(path.c_str(), "rb");
+  if (!file) {
+    return content;
+  }
+  char buffer[4096];
+  std::size_t read = 0;
+  while ((read = std::fread(buffer, 1, sizeof(buffer), file)) > 0) {
+    content.append(buffer, read);
+    if (content.size() > kMaxSaveTimeCacheSize) {
+      content.clear();
+      break;
+    }
+  }
+  std::fclose(file);
+  return content;
+}
+
+} // namespace
+
+SaveTimeCache read_save_time_cache(const std::string &path) {
+  SaveTimeCache cache;
+  parse_save_time_cache(read_bounded_file(path), &cache);
+  return cache;
+}
+
+bool write_save_time_cache_atomic(const std::string &path, const SaveTimeCache &cache,
+                                  std::string *error) {
+  return write_json_atomic(path, serialize_save_time_cache(cache), error);
+}
+
+std::string serialize_save_title_cache(const SaveTitleCache &cache) {
+  picojson::object root;
+  root["version"] = picojson::value(static_cast<double>(kSaveTitleCacheVersion));
+  root["appDbMtime"] = picojson::value(static_cast<double>(cache.app_db_mtime));
+  root["appDbSize"] = picojson::value(static_cast<double>(cache.app_db_size));
+  picojson::object entries;
+  for (const auto &item : cache.entries) {
+    const SaveTitleCacheEntry &entry = item.second;
+    picojson::object object;
+    object["fromAppDb"] = picojson::value(entry.from_app_db);
+    object["newestMtime"] =
+        picojson::value(static_cast<double>(entry.fingerprint.newest_mtime));
+    object["fileCount"] = picojson::value(static_cast<double>(entry.fingerprint.file_count));
+    object["totalBytes"] = picojson::value(static_cast<double>(entry.fingerprint.total_bytes));
+    object["displayName"] = picojson::value(entry.display_name);
+    object["titleId"] = picojson::value(entry.title_id);
+    object["iconPath"] = picojson::value(entry.icon_path);
+    entries[item.first] = picojson::value(std::move(object));
+  }
+  root["entries"] = picojson::value(std::move(entries));
+  return picojson::value(std::move(root)).serialize(true);
+}
+
+bool parse_save_title_cache(const std::string &json, SaveTitleCache *cache) {
+  *cache = {};
+  picojson::value root;
+  const std::string parse_error = picojson::parse(root, json);
+  if (!parse_error.empty() || !root.is<picojson::object>()) {
+    return false;
+  }
+  const picojson::object &root_object = root.get<picojson::object>();
+  const auto root_number = [&root_object](const char *key, long long *value) {
+    const auto found = root_object.find(key);
+    if (found == root_object.end() || !found->second.is<double>()) {
+      return false;
+    }
+    *value = static_cast<long long>(found->second.get<double>());
+    return true;
+  };
+  long long version = 0;
+  if (!root_number("version", &version) || version != kSaveTitleCacheVersion ||
+      !root_number("appDbMtime", &cache->app_db_mtime) ||
+      !root_number("appDbSize", &cache->app_db_size)) {
+    *cache = {};
+    return false;
+  }
+  const auto entries = root_object.find("entries");
+  if (entries == root_object.end() || !entries->second.is<picojson::object>()) {
+    *cache = {};
+    return false;
+  }
+  for (const auto &item : entries->second.get<picojson::object>()) {
+    if (!item.second.is<picojson::object>()) {
+      continue;
+    }
+    const picojson::object &object = item.second.get<picojson::object>();
+    const auto number = [&object](const char *key, long long *value) {
+      const auto found = object.find(key);
+      if (found == object.end() || !found->second.is<double>()) {
+        return false;
+      }
+      *value = static_cast<long long>(found->second.get<double>());
+      return *value >= 0;
+    };
+    const auto text = [&object](const char *key, std::string *value) {
+      const auto found = object.find(key);
+      if (found == object.end() || !found->second.is<std::string>()) {
+        return false;
+      }
+      *value = found->second.get<std::string>();
+      return true;
+    };
+    SaveTitleCacheEntry entry;
+    entry.fingerprint.ok = true;
+    const auto from_db = object.find("fromAppDb");
+    if (from_db == object.end() || !from_db->second.is<bool>() ||
+        !number("newestMtime", &entry.fingerprint.newest_mtime) ||
+        !number("fileCount", &entry.fingerprint.file_count) ||
+        !number("totalBytes", &entry.fingerprint.total_bytes) ||
+        !text("displayName", &entry.display_name) || !text("titleId", &entry.title_id) ||
+        !text("iconPath", &entry.icon_path)) {
+      continue;
+    }
+    entry.from_app_db = from_db->second.get<bool>();
+    cache->entries[item.first] = std::move(entry);
+  }
+  return true;
+}
+
+SaveTitleCache read_save_title_cache(const std::string &path) {
+  SaveTitleCache cache;
+  parse_save_title_cache(read_bounded_file(path), &cache);
+  return cache;
+}
+
+bool write_save_title_cache_atomic(const std::string &path, const SaveTitleCache &cache,
+                                   std::string *error) {
+  return write_json_atomic(path, serialize_save_title_cache(cache), error);
+}
+
+bool stat_file_stamp(const std::string &path, long long *mtime, long long *size) {
+  struct stat info {};
+  if (stat(path.c_str(), &info) != 0 || !S_ISREG(info.st_mode)) {
+    return false;
+  }
+  if (mtime) *mtime = static_cast<long long>(info.st_mtime);
+  if (size) *size = static_cast<long long>(info.st_size);
   return true;
 }
 

@@ -49,6 +49,7 @@ constexpr const char *kGoogleClientPath = "ux0:data/save-keeper/google-client.js
 constexpr const char *kGoogleTokenPath = "ux0:data/save-keeper/google-token.json";
 constexpr const char *kSettingsPath = "ux0:data/save-keeper/settings.txt";
 constexpr const char *kSaveTimeCachePath = "ux0:data/save-keeper/save-times.json";
+constexpr const char *kSaveTitleCachePath = "ux0:data/save-keeper/save-titles.json";
 constexpr const char *kMountKernelPath =
     "ux0:app/SVK000001/sce_sys/save-data-kernel.skprx";
 constexpr const char *kMountUserPath = "ux0:app/SVK000001/sce_sys/save-data-user.suprx";
@@ -502,6 +503,49 @@ void App::flush_save_time_cache() {
   if (write_save_time_cache_atomic(kSaveTimeCachePath, save_time_cache_, &error)) {
     save_time_cache_dirty_ = false;
   }
+}
+
+void App::store_scanned_save_times() {
+  // Times the scan derived without a mount (plain saves: sdslot or file times) join the cache so
+  // the next scan can skip even those reads while the folder is unchanged.
+  for (const SaveRecord &save : saves_) {
+    if (save.save_time_requires_mount || !save.fingerprint.ok) {
+      continue;
+    }
+    SaveTimeCacheEntry &entry = save_time_cache_.entries[save.id];
+    if (entry.fingerprint.matches(save.fingerprint) && entry.has_time == save.save_time_known) {
+      continue;
+    }
+    entry.fingerprint = save.fingerprint;
+    entry.has_time = save.save_time_known;
+    entry.saved_at = save.saved_at;
+    save_time_cache_dirty_ = true;
+  }
+  flush_save_time_cache();
+}
+
+void App::rebuild_save_title_cache(long long app_db_mtime, long long app_db_size) {
+  SaveTitleCache rebuilt;
+  rebuilt.app_db_mtime = app_db_mtime;
+  rebuilt.app_db_size = app_db_size;
+  for (const SaveRecord &save : saves_) {
+    SaveTitleCacheEntry entry;
+    entry.from_app_db = save.title_from_app_db;
+    entry.fingerprint = save.fingerprint;
+    entry.display_name = save.display_name;
+    entry.title_id = save.title_id;
+    entry.icon_path = save.icon_path;
+    rebuilt.entries[save.id] = std::move(entry);
+  }
+  // Serialized comparison doubles as the dirty check; skipping identical writes spares the flash
+  // on the common boot where nothing changed.
+  const std::string serialized = serialize_save_title_cache(rebuilt);
+  if (serialized == serialize_save_title_cache(save_title_cache_)) {
+    return;
+  }
+  save_title_cache_ = std::move(rebuilt);
+  std::string error;
+  write_save_title_cache_atomic(kSaveTitleCachePath, save_title_cache_, &error);
 }
 
 void App::schedule_selected_save_time_resolve() {
@@ -2597,24 +2641,51 @@ int App::run() {
   // count) so the bar opens at 0% rather than flashing an indeterminate sweep before it fills.
   ui_.draw_busy("Loading saves", 0, 1);
 
+  // Both scan caches load before the scan so it can consume them: times and titles are trusted
+  // while each save folder's fingerprint (and, for app-database titles, the database stamp) is
+  // unchanged, so a warm start skips the sdslot/sfo reads and the sqlite query entirely.
+  save_time_cache_ = read_save_time_cache(kSaveTimeCachePath);
+  save_title_cache_ = read_save_title_cache(kSaveTitleCachePath);
+  long long app_db_mtime = 0;
+  long long app_db_size = 0;
+  const bool app_db_stamped = stat_file_stamp(kSystemAppDbPath, &app_db_mtime, &app_db_size);
+  const bool titles_fresh = app_db_stamped && app_db_mtime == save_title_cache_.app_db_mtime &&
+                            app_db_size == save_title_cache_.app_db_size;
+
   // Scan once at startup for the foundation build. Later actions that create, restore, or delete a
   // save will refresh this list explicitly so the UI does not rescan storage every frame.
+  // The title cache is always consulted: it spares the per-save param.sfo probes either way. The
+  // stamp only decides whether the app-database query can be skipped - and the stamp read can
+  // itself fail (ur0:shell is not statable by an unprivileged app even though the vendored sqlite
+  // VFS can read the db), in which case the query simply runs every boot and refreshes any
+  // db-derived title the scan reused, before the first frame is drawn.
   saves_ = scan_save_roots(default_save_roots(),
                            [this](std::size_t done, std::size_t total) {
                              ui_.draw_busy("Loading saves", static_cast<long long>(done),
                                            static_cast<long long>(total));
-                           });
-  // The app-database query (titles, icons) has no known row count, so it stays a pulse after the
-  // determinate scan above; repaint a frame every few rows so it does not look frozen.
-  const AppDbMetadataResult metadata_result =
-      apply_app_db_metadata(&saves_, [this] { ui_.draw_busy("Loading saves", 0, -1); });
-  if (!metadata_result.ok && !metadata_result.error.empty()) {
-    set_status(StatusKind::Info, "Using save-folder metadata: " + metadata_result.error);
+                           },
+                           {}, &save_time_cache_, &save_title_cache_);
+
+  // The app-database query (titles, icons) runs only when it can matter: the database changed
+  // since the cache was built, or a save appeared that the cache does not cover. It has no known
+  // row count, so it stays a pulse; repaint a frame every few rows so it does not look frozen.
+  bool need_app_db = !titles_fresh;
+  for (const SaveRecord &save : saves_) {
+    if (save.platform != SavePlatform::Psp && !save.title_from_cache) {
+      need_app_db = true;
+      break;
+    }
   }
-  // Cached mount-resolved times: every save whose folder fingerprint is unchanged since its time
-  // was last read skips the mount entirely, so the "Reading save times" pass below only touches
-  // games that were actually played (or restored) since the previous launch.
-  save_time_cache_ = read_save_time_cache(kSaveTimeCachePath);
+  if (need_app_db) {
+    const AppDbMetadataResult metadata_result =
+        apply_app_db_metadata(&saves_, [this] { ui_.draw_busy("Loading saves", 0, -1); });
+    if (!metadata_result.ok && !metadata_result.error.empty()) {
+      set_status(StatusKind::Info, "Using save-folder metadata: " + metadata_result.error);
+    }
+  }
+  rebuild_save_title_cache(app_db_stamped ? app_db_mtime : 0,
+                           app_db_stamped ? app_db_size : 0);
+  store_scanned_save_times();
   apply_save_time_cache();
   load_settings();
   if (save_sort_requires_all_times(sort_mode_) && !resolve_all_save_times()) {
@@ -2720,7 +2791,8 @@ int App::run() {
         sceKernelDelayThread(kFrameDelayUs);
         continue;
       }
-      if ((pressed & backup_button) != 0 &&
+      // Select mirrors the overview, where it downloads a Cloud-only backup to the card.
+      if ((pressed & SCE_CTRL_SELECT) != 0 &&
           slot_details_.download_to_inspect_available) {
         download_and_inspect_selected_backup();
         previous_buttons = buttons;

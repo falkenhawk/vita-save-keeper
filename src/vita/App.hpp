@@ -71,6 +71,11 @@ private:
   // clearing save_time_requires_mount so those saves skip the mount entirely.
   void apply_save_time_cache();
   void flush_save_time_cache();
+  // Adds the scan's mount-free time results to the cache and flushes it.
+  void store_scanned_save_times();
+  // Rebuilds the title cache from the scanned records against the given app-database stamp,
+  // writing only when something actually changed.
+  void rebuild_save_title_cache(long long app_db_mtime, long long app_db_size);
   // After a restore rewrote the live folder: drop the cache entry and re-derive the record's time
   // state so the grid never keeps showing the pre-restore save time.
   void invalidate_save_time(const SaveRecord &restored);
@@ -117,7 +122,6 @@ private:
   void handle_transfer_button();
   bool download_remote_backup_to_card(const SaveRecord &save, const BackupRow &row,
                                       std::string *error);
-  void download_and_inspect_selected_backup();
   BackupUploadResult upload_local_backup(const SaveRecord &save,
                                          const std::string &backup_name);
   // Read a healthy local JSON companion, or rebuild it from sdslot.dat inside an older ZIP.
@@ -130,6 +134,7 @@ private:
   SaveMetadataJsonResult download_remote_backup_metadata(const SaveRecord &save,
                                                           const std::string &archive_name,
                                                           const std::string &archive_file_id);
+  void download_and_inspect_selected_backup();
   void open_save_details();
   void request_save_details();
   void repair_remote_backup_metadata(const SaveRecord &save, const BackupRow &row,
@@ -194,6 +199,9 @@ private:
   // unchanged. Loaded once at startup; dirty entries are flushed after each resolve batch.
   SaveTimeCache save_time_cache_;
   bool save_time_cache_dirty_{};
+  // Title metadata keyed by save id; app-database entries follow the database stamp, sfo-derived
+  // ones the folder fingerprint. Rebuilt (and written only on change) after every scan.
+  SaveTitleCache save_title_cache_;
   // Countdown (frames) until the focused save's mount-only time is read; -1 when nothing pending.
   // Reset on every navigation so scrolling debounces the blocking mount. See the main loop tick.
   int pending_time_resolve_frames_{-1};
