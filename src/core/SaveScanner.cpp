@@ -167,7 +167,7 @@ bool apply_mounted_save_time(SaveRecord *save, const SaveMetadata &metadata) {
 }
 
 void apply_save_sort(std::vector<SaveRecord> *saves, SaveSortMode mode,
-                     const std::map<std::string, std::string> &newest_remote_by_folder) {
+                     const std::map<std::string, std::string> &newest_backup_by_folder) {
   if (!saves) {
     return;
   }
@@ -191,17 +191,17 @@ void apply_save_sort(std::vector<SaveRecord> *saves, SaveSortMode mode,
     return;
   }
 
-  const auto newest_remote = [&](const SaveRecord &save) -> std::string {
+  const auto newest_backup = [&](const SaveRecord &save) -> std::string {
     std::string key = normalize_path_component(save.id);
     if (key.empty()) {
       key = "unknown-save";
     }
-    const auto found = newest_remote_by_folder.find(key);
-    return found == newest_remote_by_folder.end() ? std::string() : found->second;
+    const auto found = newest_backup_by_folder.find(key);
+    return found == newest_backup_by_folder.end() ? std::string() : found->second;
   };
   std::stable_sort(saves->begin(), saves->end(),
                    [&](const SaveRecord &a, const SaveRecord &b) {
-                     return newest_remote(a) > newest_remote(b);
+                     return newest_backup(a) > newest_backup(b);
                    });
 }
 

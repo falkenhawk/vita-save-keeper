@@ -438,19 +438,29 @@ void App::save_settings() {
   write_text_file(kSettingsPath, serialize_app_settings(settings));
 }
 
-std::map<std::string, std::string> App::newest_remote_by_folder() const {
-  // Keyed by the bare save key (what apply_save_sort derives from each save), resolving folders
-  // that carry a game title after the key.
+std::map<std::string, std::string> App::newest_backup_by_folder() const {
+  // Keyed by the bare save key (what apply_save_sort derives from each save). Card and Drive
+  // copies share the timestamped name identity, so one lexical max ranks a card-only backup the
+  // same as a synced one - and works before the Drive index has synced at all.
   std::map<std::string, std::string> newest;
   for (const SaveRecord &save : saves_) {
-    const std::string folder_name = resolved_drive_folder_name(save.id);
-    if (folder_name.empty()) {
-      continue;
+    std::string best;
+    for (const std::string &name : scan_local_backup_names(kBackupRoot, save.id)) {
+      if (name > best) {
+        best = name;
+      }
     }
-    const auto entry = drive_index_.find(folder_name);
-    if (entry != drive_index_.end() && !entry->second.empty()) {
+    const std::string folder_name = resolved_drive_folder_name(save.id);
+    if (!folder_name.empty()) {
+      const auto entry = drive_index_.find(folder_name);
       // Per-save lists are sorted newest first, so the first name is the latest sync point.
-      newest[drive_folder_name_for(save.id)] = entry->second[0].name;
+      if (entry != drive_index_.end() && !entry->second.empty() &&
+          entry->second[0].name > best) {
+        best = entry->second[0].name;
+      }
+    }
+    if (!best.empty()) {
+      newest[drive_folder_name_for(save.id)] = std::move(best);
     }
   }
   return newest;
@@ -652,7 +662,7 @@ void App::apply_sort_and_rebuild() {
     sort_mode_ = SaveSortMode::Name;
     save_settings();
   }
-  apply_save_sort(&saves_, sort_mode_, newest_remote_by_folder());
+  apply_save_sort(&saves_, sort_mode_, newest_backup_by_folder());
   // Remembered per-tab positions point into the old order; the current save is re-located by id
   // instead so the focus survives the re-sort (the grid window follows it on the next frame).
   category_selection_.fill(0);
@@ -2693,7 +2703,8 @@ int App::run() {
     sort_mode_ = SaveSortMode::Name;
     save_settings();
   }
-  apply_save_sort(&saves_, sort_mode_, {});
+  // Local backups rank here already; Drive additions re-sort after the index syncs.
+  apply_save_sort(&saves_, sort_mode_, newest_backup_by_folder());
   // Open on the first tab that actually has saves so the app never starts on an empty grid.
   for (int i = 0; i < kSaveCategoryCount; ++i) {
     if (category_count(static_cast<SaveCategory>(i)) > 0) {

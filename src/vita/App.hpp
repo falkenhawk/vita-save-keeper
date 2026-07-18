@@ -58,7 +58,7 @@ private:
   void move_selected_category(int delta);
   void cycle_sort_mode();
   void apply_sort_and_rebuild();
-  std::map<std::string, std::string> newest_remote_by_folder() const;
+  std::map<std::string, std::string> newest_backup_by_folder() const;
   void load_settings();
   void save_settings();
   void rebuild_visible_saves();
