@@ -53,7 +53,9 @@ constexpr int kVisibleDetailLines = 10;
 std::string format_save_datetime_spaced(const SaveDateTime &value) {
   std::string text = format_save_datetime(value);
   if (text.size() > 10) {
-    text[10] = ' ';
+    // One space reads cramped between the date and time digit blocks - the font's space advance
+    // is roughly half a digit cell - so the separator gets two.
+    text.replace(10, 1, "  ");
   }
   return text;
 }
