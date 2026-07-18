@@ -10,6 +10,9 @@ struct DriveFile {
   std::string name;
   // First entry of the Drive "parents" array; empty when the response did not include parents.
   std::string parent_id;
+  // Drive v3 serializes the int64 "size" as a quoted string; 0 when the response omitted it
+  // (folders, or requests whose fields selector did not ask for size).
+  long long size_bytes{};
 };
 
 struct DriveFileList {

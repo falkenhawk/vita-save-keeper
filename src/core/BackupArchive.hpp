@@ -80,4 +80,10 @@ ArchiveReadResult read_stored_backup_entry(const std::string &archive_path,
                                            const std::string &entry_path,
                                            std::size_t max_size);
 
+// On-demand sizes for the details view; both cheap (stat sums, no PFS mount).
+// compute_folder_size is the total bytes of every regular file under a live save folder;
+// archive_file_size is a backup ZIP's size on disk. Each sets *ok to false when unreadable.
+std::uint64_t compute_folder_size(const std::string &folder_path, bool *ok);
+std::uint64_t archive_file_size(const std::string &archive_path, bool *ok);
+
 } // namespace vsm

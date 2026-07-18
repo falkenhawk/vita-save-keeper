@@ -25,6 +25,9 @@ namespace vsm::vita {
 struct RemoteBackup {
   std::string name;
   std::string file_id;
+  // From the Drive listing; 0 when Drive did not report a size. Lets the details view show a
+  // Cloud-only backup's ZIP size without downloading it.
+  long long size_bytes{};
 };
 
 struct LocalSnapshotResult {
@@ -98,6 +101,7 @@ private:
   std::string selected_backup_name() const;
   void focus_backup_row_by_identity(const std::string &backup_name);
   std::string remote_file_id_for(const std::string &remote_name) const;
+  long long remote_size_for(const std::string &remote_name) const;
   void perform_scoped_delete(bool delete_local, bool delete_remote);
   void begin_label_edit();
   bool rename_remote_backup(const SaveRecord &save, const std::string &remote_name,

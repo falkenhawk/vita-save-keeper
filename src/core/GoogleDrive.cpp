@@ -3,6 +3,7 @@
 #include "core/GoogleAuth.hpp"
 #include "core/PathUtil.hpp"
 
+#include <cstdlib>
 #include <string>
 
 namespace vsm {
@@ -170,7 +171,7 @@ namespace {
 std::string build_paged_listing_query(const std::string &drive_query,
                                       const std::string &page_token) {
   std::string result = "q=" + form_url_encode(drive_query) +
-                       "&fields=" + form_url_encode("nextPageToken,files(id,name,parents)") +
+                       "&fields=" + form_url_encode("nextPageToken,files(id,name,parents,size)") +
                        "&pageSize=1000";
   if (!page_token.empty()) {
     result += "&pageToken=" + form_url_encode(page_token);
@@ -235,6 +236,12 @@ bool parse_drive_file_object(const std::string &object_json, DriveFile *file) {
   // The parents value is an array of quoted ids; the string scanner right after the key picks up
   // the first array element.
   find_json_string_from(object_json, 0, "parents", &file->parent_id, nullptr);
+  // int64 fields arrive as quoted strings in Drive v3 JSON.
+  std::string size_text;
+  if (find_json_string_from(object_json, 0, "size", &size_text, nullptr)) {
+    const long long parsed = std::strtoll(size_text.c_str(), nullptr, 10);
+    file->size_bytes = parsed > 0 ? parsed : 0;
+  }
   return true;
 }
 

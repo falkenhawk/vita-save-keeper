@@ -600,6 +600,103 @@ bool extract_archive_to_directory(FILE *zip, const std::string &destination_path
   }
 }
 
+// Reads the entry list (relative path, CRC32, uncompressed size) from a Save Keeper archive's
+// central directory without decompressing. Our writer emits no archive comment, so the
+// end-of-central-directory record is exactly the final 22 bytes. Returns false for anything that
+// is not one of our readable ZIPs.
+bool read_archive_central_directory(const std::string &archive_path,
+                                    std::vector<ArchiveEntryInfo> *out) {
+  FILE *input = std::fopen(archive_path.c_str(), "rb");
+  if (!input) {
+    return false;
+  }
+  if (std::fseek(input, -22, SEEK_END) != 0) {
+    std::fclose(input);
+    return false;
+  }
+  unsigned char eocd[22];
+  if (!read_bytes(input, eocd, sizeof(eocd)) ||
+      !(eocd[0] == 0x50 && eocd[1] == 0x4b && eocd[2] == 0x05 && eocd[3] == 0x06)) {
+    std::fclose(input);
+    return false;
+  }
+  const std::uint16_t entry_count = static_cast<std::uint16_t>(eocd[10] | (eocd[11] << 8));
+  const std::uint32_t central_offset =
+      static_cast<std::uint32_t>(eocd[16]) | (static_cast<std::uint32_t>(eocd[17]) << 8) |
+      (static_cast<std::uint32_t>(eocd[18]) << 16) | (static_cast<std::uint32_t>(eocd[19]) << 24);
+  if (std::fseek(input, static_cast<long>(central_offset), SEEK_SET) != 0) {
+    std::fclose(input);
+    return false;
+  }
+  std::vector<ArchiveEntryInfo> entries;
+  for (std::uint16_t i = 0; i < entry_count; ++i) {
+    unsigned char header[46];
+    if (!read_bytes(input, header, sizeof(header)) ||
+        !(header[0] == 0x50 && header[1] == 0x4b && header[2] == 0x01 && header[3] == 0x02)) {
+      std::fclose(input);
+      return false;
+    }
+    const auto u32_at = [&header](int offset) {
+      return static_cast<std::uint32_t>(header[offset]) |
+             (static_cast<std::uint32_t>(header[offset + 1]) << 8) |
+             (static_cast<std::uint32_t>(header[offset + 2]) << 16) |
+             (static_cast<std::uint32_t>(header[offset + 3]) << 24);
+    };
+    const auto u16_at = [&header](int offset) {
+      return static_cast<std::uint16_t>(header[offset] | (header[offset + 1] << 8));
+    };
+    const std::uint32_t crc = u32_at(16);
+    const std::uint32_t uncompressed = u32_at(24);
+    const std::uint16_t name_length = u16_at(28);
+    const std::uint16_t extra_length = u16_at(30);
+    const std::uint16_t comment_length = u16_at(32);
+    std::string name(name_length, '\0');
+    if (name_length > 0 && !read_bytes(input, name.data(), name_length)) {
+      std::fclose(input);
+      return false;
+    }
+    if ((extra_length > 0 || comment_length > 0) &&
+        std::fseek(input, extra_length + comment_length, SEEK_CUR) != 0) {
+      std::fclose(input);
+      return false;
+    }
+    entries.push_back({std::move(name), crc, uncompressed});
+  }
+  std::fclose(input);
+  *out = std::move(entries);
+  return true;
+}
+
+// Recursively sums the byte size of every regular file under a directory. Returns false when the
+// directory (or a subdirectory) could not be opened, but still adds whatever it did read.
+bool add_directory_size(const std::string &path, std::uint64_t *total) {
+  DIR *dir = opendir(path.c_str());
+  if (!dir) {
+    return false;
+  }
+  bool ok = true;
+  while (dirent *entry = readdir(dir)) {
+    if (is_dot_entry(entry->d_name)) {
+      continue;
+    }
+    const std::string child = join_path(path, entry->d_name);
+    struct stat info;
+    if (!stat_path(child, &info)) {
+      ok = false;
+      continue;
+    }
+    if (S_ISDIR(info.st_mode)) {
+      if (!add_directory_size(child, total)) {
+        ok = false;
+      }
+    } else if (S_ISREG(info.st_mode)) {
+      *total += static_cast<std::uint64_t>(info.st_size);
+    }
+  }
+  closedir(dir);
+  return ok;
+}
+
 } // namespace
 
 BackupResult create_backup_archive(const BackupRequest &request) {
@@ -748,75 +845,11 @@ std::vector<ArchiveEntryInfo> compute_folder_entries(const std::string &folder_p
 
 bool entries_match_backup_archive(const std::vector<ArchiveEntryInfo> &folder_entries,
                                   const std::string &archive_path) {
-  FILE *input = std::fopen(archive_path.c_str(), "rb");
-  if (!input) {
-    return false;
-  }
-
-  // Our writer emits no archive comment, so the end-of-central-directory record is exactly the
-  // final 22 bytes.
-  if (std::fseek(input, -22, SEEK_END) != 0) {
-    std::fclose(input);
-    return false;
-  }
-  unsigned char eocd[22];
-  if (!read_bytes(input, eocd, sizeof(eocd)) ||
-      !(eocd[0] == 0x50 && eocd[1] == 0x4b && eocd[2] == 0x05 && eocd[3] == 0x06)) {
-    std::fclose(input);
-    return false;
-  }
-  const std::uint16_t entry_count =
-      static_cast<std::uint16_t>(eocd[10] | (eocd[11] << 8));
-  const std::uint32_t central_offset =
-      static_cast<std::uint32_t>(eocd[16]) | (static_cast<std::uint32_t>(eocd[17]) << 8) |
-      (static_cast<std::uint32_t>(eocd[18]) << 16) |
-      (static_cast<std::uint32_t>(eocd[19]) << 24);
-
-  if (entry_count != folder_entries.size()) {
-    std::fclose(input);
-    return false;
-  }
-
   std::vector<ArchiveEntryInfo> archive_entries;
-  if (std::fseek(input, static_cast<long>(central_offset), SEEK_SET) != 0) {
-    std::fclose(input);
+  if (!read_archive_central_directory(archive_path, &archive_entries) ||
+      archive_entries.size() != folder_entries.size()) {
     return false;
   }
-  for (std::uint16_t i = 0; i < entry_count; ++i) {
-    unsigned char header[46];
-    if (!read_bytes(input, header, sizeof(header)) ||
-        !(header[0] == 0x50 && header[1] == 0x4b && header[2] == 0x01 && header[3] == 0x02)) {
-      std::fclose(input);
-      return false;
-    }
-    const auto u32_at = [&header](int offset) {
-      return static_cast<std::uint32_t>(header[offset]) |
-             (static_cast<std::uint32_t>(header[offset + 1]) << 8) |
-             (static_cast<std::uint32_t>(header[offset + 2]) << 16) |
-             (static_cast<std::uint32_t>(header[offset + 3]) << 24);
-    };
-    const auto u16_at = [&header](int offset) {
-      return static_cast<std::uint16_t>(header[offset] | (header[offset + 1] << 8));
-    };
-    const std::uint32_t crc = u32_at(16);
-    const std::uint32_t uncompressed = u32_at(24);
-    const std::uint16_t name_length = u16_at(28);
-    const std::uint16_t extra_length = u16_at(30);
-    const std::uint16_t comment_length = u16_at(32);
-
-    std::string name(name_length, '\0');
-    if (name_length > 0 && !read_bytes(input, name.data(), name_length)) {
-      std::fclose(input);
-      return false;
-    }
-    if ((extra_length > 0 || comment_length > 0) &&
-        std::fseek(input, extra_length + comment_length, SEEK_CUR) != 0) {
-      std::fclose(input);
-      return false;
-    }
-    archive_entries.push_back({std::move(name), crc, uncompressed});
-  }
-  std::fclose(input);
 
   // collect_files walks children in sorted order on both sides, but sort defensively so the
   // comparison never depends on traversal details.
@@ -834,6 +867,24 @@ bool entries_match_backup_archive(const std::vector<ArchiveEntryInfo> &folder_en
     }
   }
   return true;
+}
+
+std::uint64_t compute_folder_size(const std::string &folder_path, bool *ok) {
+  std::uint64_t total = 0;
+  const bool walked = add_directory_size(folder_path, &total);
+  if (ok) {
+    *ok = walked;
+  }
+  return total;
+}
+
+std::uint64_t archive_file_size(const std::string &archive_path, bool *ok) {
+  struct stat info;
+  const bool got = stat_path(archive_path, &info) && S_ISREG(info.st_mode);
+  if (ok) {
+    *ok = got;
+  }
+  return got ? static_cast<std::uint64_t>(info.st_size) : 0;
 }
 
 ArchiveReadResult read_stored_backup_entry(const std::string &archive_path,

@@ -8,6 +8,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <string>
 #include <vector>
@@ -30,6 +31,15 @@ struct SlotDetailsState {
   std::string unavailable_message;
   std::string warning_message;
   bool download_to_inspect_available{};
+  // One size per view, computed on demand when it opens so the grid never pays for it.
+  // save_bytes is the live save's on-disk footprint ("New Backup" row); archive_bytes is a
+  // snapshot's ZIP file size (local stat, or the Drive-reported size for a Cloud-only copy).
+  // The ZIP stores entries uncompressed, so a separate content size would differ from the file
+  // size only by header overhead. Each *_known is false when unreadable or not applicable.
+  std::uint64_t save_bytes{};
+  bool save_bytes_known{};
+  std::uint64_t archive_bytes{};
+  bool archive_bytes_known{};
 };
 
 // Grid width of the save panel; D-pad up/down moves by one full row, so the input handler in App

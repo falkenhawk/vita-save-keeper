@@ -58,6 +58,30 @@ std::string format_save_datetime_spaced(const SaveDateTime &value) {
   return text;
 }
 
+// Human-readable byte size for the details pane: whole bytes under 1 KB, otherwise one decimal
+// in binary (1024-based) KB/MB/GB.
+std::string format_bytes(std::uint64_t bytes) {
+  constexpr double kUnit = 1024.0;
+  if (bytes < 1024) {
+    return std::to_string(bytes) + " B";
+  }
+  static const char *const kSuffixes[] = {"KB", "MB", "GB", "TB"};
+  double value = static_cast<double>(bytes);
+  int index = -1;
+  do {
+    value /= kUnit;
+    ++index;
+  } while (value >= kUnit && index < 3);
+  // %.1f rounds, so 1023.96 KB would print as "1024.0 KB"; roll such values into the next unit.
+  if (value >= kUnit - 0.05 && index < 3) {
+    value /= kUnit;
+    ++index;
+  }
+  char text[32];
+  std::snprintf(text, sizeof(text), "%.1f %s", value, kSuffixes[index]);
+  return text;
+}
+
 // A small rotating-dot circle spinner for a value still resolving (a save time read through a
 // mount). Eight dots sit on a fixed ring; a bright head sweeps around with the trailing dots
 // fading behind it. Driven by the per-frame counter, ~1.9 revolutions/second.
@@ -749,24 +773,55 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross) {
   if (state.metadata.saved_at.year > 0) {
     saved_display = format_save_datetime_spaced(state.metadata.saved_at);
   }
-  vita2d_draw_rectangle(18, 72, kLeftCardWidth, 68, kColorPanelAlt);
+  // Summary card: the last save time, then whichever on-demand size rows apply. The card height
+  // and the slot list below it shift down with the number of size rows so nothing overlaps.
+  struct StatRow {
+    const char *label;
+    std::string value;
+  };
+  std::vector<StatRow> stats;
+  if (state.save_bytes_known) {
+    stats.push_back({"SAVE SIZE", format_bytes(state.save_bytes)});
+  }
+  if (state.archive_bytes_known) {
+    stats.push_back({"BACKUP FILE SIZE", format_bytes(state.archive_bytes)});
+  }
+
+  const int card_right = 18 + kLeftCardWidth - 16;
+  const int card_h = stats.empty() ? 68 : 76 + static_cast<int>(stats.size()) * 24;
+  vita2d_draw_rectangle(18, 72, kLeftCardWidth, card_h, kColorPanelAlt);
   draw_text(fonts_, 34, 98, kColorMuted, kTextSizeTiny, "LAST SAVE TIME");
   draw_text(fonts_, 34, 124, kColorText, kTextSizeNormal, saved_display.c_str());
+  if (!stats.empty()) {
+    vita2d_draw_line(34, 140, card_right, 140, RGBA8(255, 255, 255, 18));
+    for (std::size_t i = 0; i < stats.size(); ++i) {
+      const int row_y = 162 + static_cast<int>(i) * 24;
+      draw_text(fonts_, 34, row_y, kColorMuted, kTextSizeTiny, stats[i].label);
+      draw_text(fonts_, card_right - measure_text(kTextSizeSmall, stats[i].value.c_str()), row_y,
+                kColorText, kTextSizeSmall, stats[i].value.c_str());
+    }
+  }
 
-  draw_text(fonts_, 18, 164, kColorMuted, kTextSizeTiny, "SLOTS");
+  const int slots_heading_y = 72 + card_h + 24;
+  const int slots_list_y = slots_heading_y + 12;
+  draw_text(fonts_, 18, slots_heading_y, kColorMuted, kTextSizeTiny, "SLOTS");
   if (state.metadata.slots.empty()) {
-    draw_text(fonts_, 34, 198, kColorMuted, kTextSizeSmall, "No slot details");
+    draw_text(fonts_, 34, slots_list_y + 22, kColorMuted, kTextSizeSmall, "No slot details");
   } else {
-    constexpr std::size_t kVisibleSlots = 7;
+    // Fit as many slot rows as the space between the summary card and the footer allows. Rows are
+    // 36 tall on a 42 pitch and the footer starts at 508, so the last top must satisfy
+    // y + 36 <= 508, giving (514 - slots_list_y) / 42 rows; 7 is the no-stats parity cap.
+    const std::size_t visible_slots =
+        static_cast<std::size_t>(std::max(1, std::min(7, (514 - slots_list_y) / 42)));
     const std::size_t selected =
         std::min(state.selected_slot, state.metadata.slots.size() - 1);
-    const std::size_t top = selected >= kVisibleSlots ? selected - kVisibleSlots + 1 : 0;
+    const std::size_t top = selected >= visible_slots ? selected - visible_slots + 1 : 0;
     const std::size_t count =
-        std::min(kVisibleSlots, state.metadata.slots.size() - top);
+        std::min(visible_slots, state.metadata.slots.size() - top);
     for (std::size_t i = 0; i < count; ++i) {
       const SaveSlotMetadata &slot = state.metadata.slots[top + i];
       const bool focused = top + i == selected;
-      const int y = 176 + static_cast<int>(i) * 42;
+      const int y = slots_list_y + static_cast<int>(i) * 42;
       vita2d_draw_rectangle(18, y, kLeftCardWidth, 36,
                             focused ? kColorAccentSoft : RGBA8(255, 255, 255, 10));
       if (focused) {

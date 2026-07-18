@@ -864,6 +864,52 @@ void test_backup_archive_creates_timestamped_zip_snapshot() {
   std::filesystem::remove_all(base);
 }
 
+void test_detail_view_sizes_from_folder_and_archive() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-size-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source" / "sce_sys");
+  std::filesystem::create_directories(base / "source" / "save");
+  std::filesystem::create_directories(base / "backups");
+  {
+    std::ofstream(base / "source" / "data.bin", std::ios::binary) << "hello";              // 5
+    std::ofstream(base / "source" / "sce_sys" / "icon0.png", std::ios::binary) << "icon!"; // 5
+    std::ofstream(base / "source" / "save" / "slot0", std::ios::binary) << "0123456789";   // 10
+  }
+  // The live-save size is the recursive on-disk total of every regular file.
+  bool folder_ok = false;
+  EXPECT_EQ(vsm::compute_folder_size((base / "source").string(), &folder_ok),
+            static_cast<std::uint64_t>(20));
+  EXPECT_TRUE(folder_ok);
+
+  const vsm::BackupResult backup = vsm::create_backup_archive({
+      (base / "source").string(),
+      (base / "backups").string(),
+      "PCSE00042",
+      {2026, 7, 17, 12, 0, 0},
+  });
+  EXPECT_TRUE(backup.ok);
+
+  bool zip_ok = false;
+  const std::uint64_t zip_bytes = vsm::archive_file_size(backup.archive_path, &zip_ok);
+  EXPECT_TRUE(zip_ok);
+  // Store-method entries: the ZIP is the content plus per-entry header overhead, never smaller.
+  EXPECT_TRUE(zip_bytes > 20);
+  EXPECT_EQ(zip_bytes,
+            static_cast<std::uint64_t>(std::filesystem::file_size(backup.archive_path)));
+
+  // Unreadable paths report failure instead of a misleading zero.
+  bool missing_ok = true;
+  EXPECT_EQ(vsm::compute_folder_size((base / "nope").string(), &missing_ok),
+            static_cast<std::uint64_t>(0));
+  EXPECT_TRUE(!missing_ok);
+  bool no_zip_ok = true;
+  vsm::archive_file_size((base / "nope.zip").string(), &no_zip_ok);
+  EXPECT_TRUE(!no_zip_ok);
+
+  std::filesystem::remove_all(base);
+}
+
 void test_backup_archive_reads_bounded_sdslot_entry_without_restoring() {
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() / "save-keeper-archive-entry-test";
@@ -1416,11 +1462,11 @@ void test_google_drive_builds_list_children_query() {
 void test_google_drive_builds_paged_index_queries() {
   EXPECT_EQ(vsm::build_drive_list_all_folders_query(""),
             "q=mimeType%3D%27application%2Fvnd.google-apps.folder%27%20and%20trashed%3Dfalse"
-            "&fields=nextPageToken%2Cfiles%28id%2Cname%2Cparents%29&pageSize=1000");
+            "&fields=nextPageToken%2Cfiles%28id%2Cname%2Cparents%2Csize%29&pageSize=1000");
   EXPECT_EQ(vsm::build_drive_list_all_files_query("token-1"),
             "q=mimeType%21%3D%27application%2Fvnd.google-apps.folder%27%20and%20name%20contains"
             "%20%27.zip%27%20and%20trashed%3Dfalse"
-            "&fields=nextPageToken%2Cfiles%28id%2Cname%2Cparents%29&pageSize=1000"
+            "&fields=nextPageToken%2Cfiles%28id%2Cname%2Cparents%2Csize%29&pageSize=1000"
             "&pageToken=token-1");
 }
 
@@ -1430,7 +1476,8 @@ void test_google_drive_parses_parents_and_page_token() {
   const vsm::DriveFileList files = vsm::parse_drive_file_list(
       "{\n \"nextPageToken\": \"tok-2\",\n \"files\": [\n"
       "  {\n   \"parents\": [\n    \"folder-a\"\n   ],\n"
-      "   \"id\": \"zip-1\",\n   \"name\": \"2026-07-03 23-19.zip\"\n  },\n"
+      "   \"id\": \"zip-1\",\n   \"name\": \"2026-07-03 23-19.zip\",\n"
+      "   \"size\": \"3005056\"\n  },\n"
       "  {\n   \"id\": \"orphan\",\n   \"name\": \"loose.zip\"\n  },\n"
       "  {\n   \"id\": \"zip-2\",\n   \"name\": \"2026-07-01 10-00.zip\",\n"
       "   \"parents\": [\n    \"folder-b\"\n   ]\n  }\n ]\n}\n");
@@ -1441,7 +1488,10 @@ void test_google_drive_parses_parents_and_page_token() {
   EXPECT_EQ(files.files[0].id, "zip-1");
   EXPECT_EQ(files.files[0].name, "2026-07-03 23-19.zip");
   EXPECT_EQ(files.files[0].parent_id, "folder-a");
+  // Drive v3 serializes int64 size as a quoted string; absent size stays 0.
+  EXPECT_EQ(files.files[0].size_bytes, 3005056LL);
   EXPECT_EQ(files.files[1].parent_id, "");
+  EXPECT_EQ(files.files[1].size_bytes, 0LL);
   EXPECT_EQ(files.files[2].id, "zip-2");
   EXPECT_EQ(files.files[2].parent_id, "folder-b");
 }
@@ -1830,6 +1880,7 @@ int main() {
   test_selection_wraps_and_handles_empty_lists();
   test_grid_window_scrolls_only_when_selection_leaves_view();
   test_backup_archive_creates_timestamped_zip_snapshot();
+  test_detail_view_sizes_from_folder_and_archive();
   test_backup_archive_reads_bounded_sdslot_entry_without_restoring();
   test_legacy_zip_metadata_can_be_recovered_without_rewriting_the_archive();
   test_backup_archive_extracts_to_isolated_inspection_directory_and_cleans_up();

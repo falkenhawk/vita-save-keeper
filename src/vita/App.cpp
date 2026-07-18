@@ -51,6 +51,9 @@ constexpr const char *kSettingsPath = "ux0:data/save-keeper/settings.txt";
 constexpr const char *kMountKernelPath =
     "ux0:app/SVK000001/sce_sys/save-data-kernel.skprx";
 constexpr const char *kMountUserPath = "ux0:app/SVK000001/sce_sys/save-data-user.suprx";
+// download_remote_backup_metadata's "Drive has no sidecar for this archive" outcome;
+// open_save_details keys the Cloud-only explanation off this exact value.
+constexpr const char *kNoRemoteSidecarError = "no details file in the Cloud";
 constexpr const char *kDriveFilesEndpoint = "https://www.googleapis.com/drive/v3/files";
 constexpr const char *kDriveUploadEndpoint =
     "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id%2Cname";
@@ -1427,7 +1430,7 @@ bool App::sync_drive_index() {
       }
       const auto folder = folder_id_to_name.find(file.parent_id);
       if (folder != folder_id_to_name.end()) {
-        drive_index_[folder->second].push_back({file.name, file.id});
+        drive_index_[folder->second].push_back({file.name, file.id, file.size_bytes});
       }
     }
     page_token = list.next_page_token;
@@ -1509,6 +1512,15 @@ std::string App::remote_file_id_for(const std::string &remote_name) const {
     }
   }
   return {};
+}
+
+long long App::remote_size_for(const std::string &remote_name) const {
+  for (const RemoteBackup &backup : remote_backups_) {
+    if (backup.name == remote_name) {
+      return backup.size_bytes;
+    }
+  }
+  return 0;
 }
 
 // Actual Drive folder holding this save's backups: either the bare key created by older versions
@@ -1805,7 +1817,7 @@ SaveMetadataJsonResult App::download_remote_backup_metadata(
   const DriveFile sidecar =
       find_remote_sidecar(folder->second, archive_file_id, archive_name);
   if (sidecar.id.empty()) {
-    return {false, {}, {}, "slot details unavailable"};
+    return {false, {}, {}, kNoRemoteSidecarError};
   }
   if (!ensure_parent_directory(metadata_path)) {
     return {false, {}, {}, "could not create metadata folder"};
@@ -1965,12 +1977,44 @@ void App::open_save_details() {
               : "This save has no readable save slot metadata. The save time comes from its "
                 "newest file.";
     }
+    // On-demand: the live save's on-disk footprint. No ZIP exists yet, so leave archive_bytes unset.
+    bool save_size_ok = false;
+    const std::uint64_t save_bytes = compute_folder_size(save.path, &save_size_ok);
+    if (save_size_ok) {
+      slot_details_.save_bytes = save_bytes;
+      slot_details_.save_bytes_known = true;
+    }
     slot_details_.open = true;
     return;
   }
 
   const BackupRow row = *selected_row;
   slot_details_.snapshot_name = row.primary_name();
+
+  // A snapshot shows one size: its ZIP file. The archive stores entries uncompressed, so the
+  // save content inside differs from the file size only by ZIP header overhead - showing both
+  // was two nearly identical numbers. Independent of slot-metadata parsing below, so the size
+  // shows even when the slot table cannot be read.
+  if (row.has_local()) {
+    bool zip_ok = false;
+    const std::uint64_t zip_bytes = archive_file_size(
+        local_backup_archive_path(kBackupRoot, save.id, row.local_name), &zip_ok);
+    if (zip_ok) {
+      slot_details_.archive_bytes = zip_bytes;
+      slot_details_.archive_bytes_known = true;
+    }
+  }
+
+  // A Cloud-only snapshot has no local file to measure, but the Drive listing already carried the
+  // ZIP's size, so at least that shows without downloading anything.
+  if (!slot_details_.archive_bytes_known && row.has_remote()) {
+    const long long remote_bytes = remote_size_for(row.remote_name);
+    if (remote_bytes > 0) {
+      slot_details_.archive_bytes = static_cast<std::uint64_t>(remote_bytes);
+      slot_details_.archive_bytes_known = true;
+    }
+  }
+
   SaveMetadataJsonResult metadata;
 
   if (row.has_local()) {
@@ -2004,8 +2048,21 @@ void App::open_save_details() {
     // an estimate.
     slot_details_.unavailable_message = "No slot details available";
     if (!row.has_local()) {
-      slot_details_.warning_message =
-          "Download the backup to check for save slot information.";
+      // Say why the Cloud lookup came up empty - being offline, a backup whose details were never
+      // uploaded, and a failed fetch read very differently to the user. All three end with the
+      // same escape hatch: download the ZIP and inspect it locally.
+      if (!network_connected_ || !google_connected_) {
+        slot_details_.warning_message =
+            "Google Drive is not connected. Download the backup to check for save slot "
+            "information.";
+      } else if (metadata.error == kNoRemoteSidecarError) {
+        slot_details_.warning_message =
+            "This backup has no details file in the Cloud. Download it to check for save slot "
+            "information.";
+      } else {
+        slot_details_.warning_message =
+            "Download the backup to check for save slot information.";
+      }
     } else {
       slot_details_.warning_message =
           "No readable save slot information was found in this backup.";
