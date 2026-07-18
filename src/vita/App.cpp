@@ -493,16 +493,41 @@ bool App::resolve_all_save_times() {
   }
   constexpr const char *kContext = "Switching to Last Saved sort";
   constexpr const char *kCancelHint = "cancel and sort by name";
+
+  // Only controller samples newer than this moment count as a cancel. The Square tap that switched
+  // the sort mode is still in the sampling history and must not cancel the read it just started.
+  SceCtrlData armed {};
+  sceCtrlPeekBufferPositive(0, &armed, 1);
+
+  // Each save's resolve blocks this thread on a mount, so an instantaneous poll would only catch a
+  // press timed exactly between two saves. Scanning the buffered sample history (up to 64 frames)
+  // catches a quick tap made while a mount was running as soon as that mount returns.
+  const auto cancel_requested = [&armed]() {
+    SceCtrlData pads[64] = {};
+    const int count = sceCtrlPeekBufferPositive(0, pads, 64);
+    for (int i = 0; i < count; ++i) {
+      if (pads[i].timeStamp > armed.timeStamp && (pads[i].buttons & SCE_CTRL_SQUARE) != 0) {
+        return true;
+      }
+    }
+    return false;
+  };
+
   std::size_t done = 0;
   for (SaveRecord &save : saves_) {
     if (!save.save_time_requires_mount) {
       continue;
     }
-    // Each save needs its own (blocking) mount, so a full library can take a while. Let Square bail
-    // out; the caller then keeps the name order instead of a half-resolved Last Saved order.
-    SceCtrlData pad {};
-    sceCtrlPeekBufferPositive(0, &pad, 1);
-    if ((pad.buttons & SCE_CTRL_SQUARE) != 0) {
+    if (cancel_requested()) {
+      // Swallow the rest of the press before returning: the main loop cycles the sort on a Square
+      // release edge, so handing it a still-held Square would fire Name -> Backup immediately.
+      SceCtrlData pad {};
+      do {
+        ui_.draw_busy("Reading save times", static_cast<long long>(done),
+                      static_cast<long long>(total), kContext, kCancelHint);
+        sceKernelDelayThread(16 * 1000);
+        sceCtrlPeekBufferPositive(0, &pad, 1);
+      } while ((pad.buttons & SCE_CTRL_SQUARE) != 0);
       return false;
     }
     ui_.draw_busy("Reading save times", static_cast<long long>(done),
