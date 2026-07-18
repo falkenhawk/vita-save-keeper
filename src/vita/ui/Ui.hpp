@@ -30,7 +30,6 @@ struct SlotDetailsState {
   int details_scroll{};
   std::string unavailable_message;
   std::string warning_message;
-  bool download_to_inspect_available{};
   // One size per view, computed on demand when it opens so the grid never pays for it.
   // save_bytes is the live save's on-disk footprint ("New Backup" row); archive_bytes is a
   // snapshot's ZIP file size (local stat, or the Drive-reported size for a Cloud-only copy).
@@ -40,6 +39,10 @@ struct SlotDetailsState {
   bool save_bytes_known{};
   std::uint64_t archive_bytes{};
   bool archive_bytes_known{};
+  // Where the inspected snapshot lives, mirroring the overview's cloud glyph in the header
+  // corner. Both false for the live save, which is not a snapshot.
+  bool snapshot_on_card{};
+  bool snapshot_in_cloud{};
 };
 
 // Grid width of the save panel; D-pad up/down moves by one full row, so the input handler in App
@@ -114,8 +117,10 @@ public:
   // with Latin-font metrics. The _status_ variant targets the status line; the _modal_ variant
   // targets the busy modal's title (wider font, box width), so a long name never eats a suffix
   // like " Cloud backup" or the closing quote.
+  // max_width 0 uses the overview status line's budget; the details footer line passes a wider
+  // one, since its status shares the bar with fewer, shorter hints.
   std::string compose_status_with_name(const std::string &prefix, const std::string &name,
-                                       const std::string &suffix) const;
+                                       const std::string &suffix, int max_width = 0) const;
   std::string compose_modal_label(const std::string &prefix, const std::string &name,
                                   const std::string &suffix) const;
   // Full-screen modal frame for blocking work; safe to call from transfer callbacks because all
@@ -137,6 +142,9 @@ private:
   // The previous frame, dimmed, as a modal's background; null-safe against the details view's
   // partial UiState. Shared by draw_busy and prompt_text_input.
   void draw_modal_backdrop();
+  // The card/Cloud/both cloud glyph shared by the backup rows and the details header; textures
+  // with a primitive fallback. Draws nothing when both flags are false.
+  void draw_presence_glyph(int x, int y, bool on_card, bool in_cloud);
   void draw_header(const UiState &state);
   void draw_title_grid(const UiState &state);
   void draw_backup_panel(const UiState &state);
@@ -144,7 +152,14 @@ private:
   void draw_google_auth_panel(const UiState &state);
   void draw_status_line(const UiState &state);
   void draw_footer(const UiState &state);
-  void draw_slot_details(const SlotDetailsState &state, bool enter_is_cross);
+  // status_message/status_kind mirror the overview's status line in this screen's footer, so the
+  // carried-over actions (transfer, backup/restore, label) and their confirmation prompts stay
+  // visible here. While a confirmation is pending the prompt renders in the accent color and the
+  // footer reduces to confirm/cancel.
+  void draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
+                         const std::string &status_message, StatusKind status_kind,
+                         bool restore_confirmation_pending,
+                         bool duplicate_backup_confirmation_pending);
   int measure_text(unsigned int size, const char *text) const;
   std::string fit_text(unsigned int size, const std::string &text, int max_width) const;
   std::vector<std::string> wrap_text(unsigned int size, const std::string &text,

@@ -134,7 +134,6 @@ private:
   SaveMetadataJsonResult download_remote_backup_metadata(const SaveRecord &save,
                                                           const std::string &archive_name,
                                                           const std::string &archive_file_id);
-  void download_and_inspect_selected_backup();
   void open_save_details();
   void request_save_details();
   void repair_remote_backup_metadata(const SaveRecord &save, const BackupRow &row,
@@ -147,6 +146,10 @@ private:
   bool poll_batch_cancel();
   void set_status(StatusKind kind, std::string message);
   void clear_status();
+  // compose_status_with_name for whichever screen will render it: the details footer line fits
+  // far more than the overview's 380px status column, so names truncate later there.
+  std::string status_with_name(const std::string &prefix, const std::string &name,
+                               const std::string &suffix) const;
 
   GoogleClientCredentials google_credentials_;
   GoogleTokenCache google_token_cache_;

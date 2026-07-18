@@ -342,6 +342,13 @@ void App::clear_status() {
   status_message_.clear();
 }
 
+std::string App::status_with_name(const std::string &prefix, const std::string &name,
+                                  const std::string &suffix) const {
+  // The details footer line runs to where its hints start; 560 is safely inside that for every
+  // hint set this screen shows, and the renderer re-fits against the actual hints each frame.
+  return ui_.compose_status_with_name(prefix, name, suffix, slot_details_.open ? 560 : 0);
+}
+
 LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
                                                const std::string &suffix,
                                                bool report_progress,
@@ -833,7 +840,7 @@ void App::create_new_backup() {
         duplicate_backup_confirmation_pending_ = true;
         // Says why a new backup is redundant; the footer offers "Create New Backup Anyway".
         set_status(StatusKind::Info,
-                   ui_.compose_status_with_name("No changes since ", display_backup_name(match),
+                   status_with_name("No changes since ", display_backup_name(match),
                                                 "."));
         return;
       }
@@ -865,7 +872,7 @@ void App::create_new_backup() {
       set_status(StatusKind::Success, "Backup created. Press Select to upload it.");
     } else {
       set_status(StatusKind::Success,
-                 ui_.compose_status_with_name("Created ", display_backup_name(file_name), "."));
+                 status_with_name("Created ", display_backup_name(file_name), "."));
     }
   } else {
     set_status(StatusKind::Error, "Backup failed: " + result.error);
@@ -900,7 +907,7 @@ void App::handle_delete_button() {
     delete_scope_prompt_pending_ = true;
     // The footer's three scope buttons say where, so the status only needs to name what. Just
     // the quoted name ellipsizes, so the "?" always survives.
-    set_status(StatusKind::Info, ui_.compose_status_with_name("Delete ", display, "?"));
+    set_status(StatusKind::Info, status_with_name("Delete ", display, "?"));
     return;
   }
 
@@ -910,7 +917,7 @@ void App::handle_delete_button() {
     // Card-only is the plain case, so the prompt just names what; a Cloud-only delete keeps its
     // "from the Cloud?" qualifier since removing the only remote copy is the weightier action.
     set_status(StatusKind::Info,
-               ui_.compose_status_with_name("Delete ", display,
+               status_with_name("Delete ", display,
                                             row->has_remote() ? " from the Cloud?" : "?"));
     return;
   }
@@ -1016,16 +1023,16 @@ void App::perform_scoped_delete(bool delete_local, bool delete_remote) {
   if (local_failed) {
     set_status(StatusKind::Error,
                remote_requested ? "Deleted the Cloud copy, but not the card copy."
-                                : ui_.compose_status_with_name("Could not delete ", display, "."));
+                                : status_with_name("Could not delete ", display, "."));
     return;
   }
   if (delete_local && remote_requested) {
-    set_status(StatusKind::Success, ui_.compose_status_with_name("Deleted ", display, "."));
+    set_status(StatusKind::Success, status_with_name("Deleted ", display, "."));
   } else if (remote_requested) {
     set_status(StatusKind::Success,
-               ui_.compose_status_with_name("Deleted ", display, " from the Cloud."));
+               status_with_name("Deleted ", display, " from the Cloud."));
   } else {
-    set_status(StatusKind::Success, ui_.compose_status_with_name("Deleted ", display, "."));
+    set_status(StatusKind::Success, status_with_name("Deleted ", display, "."));
   }
 }
 
@@ -1061,7 +1068,7 @@ void App::handle_restore() {
     delete_confirmation_pending_ = false;
     delete_scope_prompt_pending_ = false;
     restore_confirmation_pending_ = true;
-    set_status(StatusKind::Info, ui_.compose_status_with_name("Restore ", row.display_name(), "?"));
+    set_status(StatusKind::Info, status_with_name("Restore ", row.display_name(), "?"));
     return;
   }
 
@@ -1143,7 +1150,7 @@ void App::handle_restore() {
     invalidate_save_time(save);
     schedule_selected_save_time_resolve();
     set_status(StatusKind::Success,
-               ui_.compose_status_with_name(
+               status_with_name(
                    remote_restore ? "Downloaded and restored " : "Restored ",
                    display_backup_name(backup_name), "."));
   } else {
@@ -1801,7 +1808,7 @@ void App::handle_transfer_button() {
       return;
     }
     set_status(StatusKind::Success,
-               ui_.compose_status_with_name("Downloaded ", display_backup_name(row.remote_name),
+               status_with_name("Downloaded ", display_backup_name(row.remote_name),
                                             "."));
     return;
   }
@@ -1841,7 +1848,7 @@ void App::handle_transfer_button() {
     set_status(StatusKind::Info, "Backup uploaded, but slot details were not synced.");
   } else {
     set_status(StatusKind::Success,
-               ui_.compose_status_with_name("Uploaded ", display_backup_name(backup_name),
+               status_with_name("Uploaded ", display_backup_name(backup_name),
                                             " to the Cloud."));
   }
 }
@@ -2057,32 +2064,13 @@ void App::repair_remote_backup_metadata(const SaveRecord &save, const BackupRow 
   });
 }
 
-void App::download_and_inspect_selected_backup() {
-  const SaveRecord *selected = selected_save_record();
-  const BackupRow *selected_row = selected_backup_row();
-  if (!selected || !selected_row || !slot_details_.download_to_inspect_available) {
-    return;
-  }
-  const SaveRecord save = *selected;
-  const BackupRow remote_row = *selected_row;
-  std::string error;
-  if (!download_remote_backup_to_card(save, remote_row, &error)) {
-    slot_details_.warning_message =
-        error.empty() ? "The backup could not be downloaded." : std::move(error);
-    return;
-  }
-
-  // The ZIP is now a normal card backup regardless of whether optional slot information exists.
-  // Recover locally, replace an unusable Drive companion when possible, then redraw this screen.
-  const SaveMetadataJsonResult metadata =
-      ensure_local_backup_metadata(save, remote_row.remote_name);
-  if (save_metadata_is_usable(metadata, backup_identity(remote_row.remote_name))) {
-    repair_remote_backup_metadata(save, remote_row, true);
-  }
-  open_save_details();
-}
-
 void App::request_save_details() {
+  // Entering details silently drops transient overview feedback: a stale status line is
+  // irrelevant on the new screen, and a pending confirmation must not carry a primed second
+  // press across screens.
+  restore_confirmation_pending_ = false;
+  duplicate_backup_confirmation_pending_ = false;
+  clear_status();
   const BackupRow *row = selected_backup_row();
   const SaveRecord *save = selected_save_record();
   // The live-save ("New Backup") row shows a time still being read through a mount. Opening now
@@ -2103,14 +2091,18 @@ void App::open_save_details() {
     return;
   }
   const SaveRecord save = *selected;
-  ui_.draw_busy("Loading save details", 0, -1);
 
+  // The busy modal appears only ahead of real work - a mount, an archive inspection, or a network
+  // fetch. A details open that reads a cached companion is instant and must not flash a modal.
   slot_details_ = {};
   slot_details_.game_title = save.display_name;
   if (!selected_row) {
     // "New Backup" represents the live save. Resolve its details directly without creating an
     // archive or JSON companion; this is a read-only preview of what the next backup would use.
     slot_details_.snapshot_name = "Current Save";
+    if (save.platform != SavePlatform::Psp) {
+      ui_.draw_busy("Loading save details", 0, -1);
+    }
     slot_details_.metadata = resolve_live_save_metadata(
         save.path, {}, save.platform != SavePlatform::Psp, mount_bridge_ready_);
     if (!save_metadata_has_observed_time(slot_details_.metadata)) {
@@ -2140,6 +2132,8 @@ void App::open_save_details() {
 
   const BackupRow row = *selected_row;
   slot_details_.snapshot_name = row.primary_name();
+  slot_details_.snapshot_on_card = row.has_local();
+  slot_details_.snapshot_in_cloud = row.has_remote();
 
   // A snapshot shows one size: its ZIP file. The archive stores entries uncompressed, so the
   // save content inside differs from the file size only by ZIP header overhead - showing both
@@ -2172,23 +2166,29 @@ void App::open_save_details() {
         local_backup_metadata_path(kBackupRoot, save.id, row.local_name);
     const bool already_cached = save_metadata_is_usable(
         read_save_metadata_json(metadata_path), backup_identity(row.local_name));
+    if (!already_cached) {
+      // Recovery reads the ZIP and may extract and mount it; a cached companion opens instantly.
+      ui_.draw_busy("Loading save details", 0, -1);
+    }
     metadata = ensure_local_backup_metadata(save, row.local_name);
     if (metadata.ok && !already_cached && row.has_remote()) {
-      repair_remote_backup_metadata(save, row);
+      // Replace an unusable Drive companion too: local recovery just produced a healthy one.
+      repair_remote_backup_metadata(save, row, true);
     }
   }
 
   // A missing local companion may still exist on Drive. Fetch only this one small JSON file when
   // the user asks for details; the startup index remains ZIP-only and fast.
-  if (!metadata.ok && row.has_remote() && network_connected_ && ensure_google_access_token()) {
-    metadata = download_remote_backup_metadata(save, row.remote_name,
-                                                remote_file_id_for(row.remote_name));
+  if (!metadata.ok && row.has_remote() && network_connected_) {
+    ui_.draw_busy("Loading save details", 0, -1);
+    if (ensure_google_access_token()) {
+      metadata = download_remote_backup_metadata(save, row.remote_name,
+                                                 remote_file_id_for(row.remote_name));
+    }
   }
 
   const bool usable_metadata =
       save_metadata_is_usable(metadata, backup_identity(row.primary_name()));
-  slot_details_.download_to_inspect_available =
-      backup_details_download_available(row, usable_metadata);
 
   if (usable_metadata) {
     slot_details_.metadata = std::move(metadata.metadata);
@@ -2446,7 +2446,7 @@ void App::begin_label_edit() {
   set_status(StatusKind::Success,
              label.empty()
                  ? std::string("Label removed.")
-                 : ui_.compose_status_with_name("Labeled ", display_backup_name(new_name), "."));
+                 : status_with_name("Labeled ", display_backup_name(new_name), "."));
 }
 
 void App::cancel_sync_all_confirmation() {
@@ -2781,20 +2781,79 @@ int App::run() {
     const unsigned int pressed =
         apply_hold_repeat(buttons, previous_buttons, &repeat_held_buttons, &repeat_frames);
 
-    // Details is deliberately isolated from the normal action map. Only slot navigation,
-    // description scrolling, and Back are accepted, so an accidental press cannot restore,
-    // delete, upload, or create a backup behind this screen.
+    // Details carries the overview's per-snapshot actions - transfer, backup/restore, label -
+    // which all act on the inspected snapshot (the selection cannot move while this screen is
+    // open, so the wrong row cannot be hit). Delete and the batch hold stay overview-only.
     if (slot_details_.open) {
       if ((pressed & cancel_button) != 0) {
-        slot_details_.open = false;
+        // While a prompt is pending, Circle answers it and stays on the screen; otherwise it
+        // leaves, silently resetting so no primed confirmation or stale status follows back to
+        // the overview.
+        if (restore_confirmation_pending_ || duplicate_backup_confirmation_pending_) {
+          cancel_restore_confirmation();
+          cancel_duplicate_backup_confirmation();
+        } else {
+          slot_details_.open = false;
+          clear_status();
+        }
         previous_buttons = buttons;
         sceKernelDelayThread(kFrameDelayUs);
         continue;
       }
-      // Select mirrors the overview, where it downloads a Cloud-only backup to the card.
-      if ((pressed & SCE_CTRL_SELECT) != 0 &&
-          slot_details_.download_to_inspect_available) {
-        download_and_inspect_selected_backup();
+      // A pending confirmation (restore, duplicate backup) survives only an immediate repeat of
+      // its own button; anything else backs out, exactly like the overview.
+      if ((pressed & ~backup_button) != 0) {
+        cancel_restore_confirmation();
+        cancel_duplicate_backup_confirmation();
+      }
+      // Select transfers to the side the snapshot is missing from, as in the overview. A download
+      // makes the ZIP local: reopen so its metadata, sizes, and the presence glyph reflect that
+      // (recovering slot details from the fresh ZIP if the Cloud had no companion).
+      if ((pressed & SCE_CTRL_SELECT) != 0) {
+        const BackupRow *row_before = selected_backup_row();
+        const bool was_local = row_before && row_before->has_local();
+        if (row_before) {
+          handle_transfer_button();
+        }
+        const BackupRow *row_after = selected_backup_row();
+        if (row_after && row_after->has_local() && !was_local) {
+          open_save_details();
+        } else if (row_after) {
+          slot_details_.snapshot_on_card = row_after->has_local();
+          slot_details_.snapshot_in_cloud = row_after->has_remote();
+        }
+        previous_buttons = buttons;
+        sceKernelDelayThread(kFrameDelayUs);
+        continue;
+      }
+      // The context action: back up the live save, or restore the inspected snapshot (second
+      // press confirms, prompted in this screen's status line).
+      if ((pressed & backup_button) != 0) {
+        const bool was_live_save = selected_backup_row() == nullptr;
+        handle_action_button();
+        const BackupRow *row_after = selected_backup_row();
+        // Creating a backup moves the focus to the fresh snapshot; follow it, so the screen (and
+        // its Select-to-upload nudge) shows the file that was just created instead of still
+        // presenting the live save. Its companion was just written, so the reopen is instant.
+        if (was_live_save && row_after != nullptr) {
+          open_save_details();
+        } else if (row_after != nullptr) {
+          // Restoring a Cloud-only snapshot downloads it to the card first; the header glyph
+          // follows the row's new presence.
+          slot_details_.snapshot_on_card = row_after->has_local();
+          slot_details_.snapshot_in_cloud = row_after->has_remote();
+        }
+        previous_buttons = buttons;
+        sceKernelDelayThread(kFrameDelayUs);
+        continue;
+      }
+      // Square edits the label directly - the sort tap has no meaning here, so no hold needed.
+      // Reopen afterwards so the header shows the new name (the metadata is cached by then).
+      if ((pressed & SCE_CTRL_SQUARE) != 0) {
+        if (selected_backup_row()) {
+          begin_label_edit();
+          open_save_details();
+        }
         previous_buttons = buttons;
         sceKernelDelayThread(kFrameDelayUs);
         continue;
@@ -2840,6 +2899,12 @@ int App::run() {
       UiState details_ui;
       details_ui.enter_is_cross = enter_is_cross_;
       details_ui.slot_details = &slot_details_;
+      // Status and confirmation state feed this screen's own status line, so the carried-over
+      // actions give the same feedback they give in the overview.
+      details_ui.status_message = status_message_;
+      details_ui.status_kind = status_kind_;
+      details_ui.restore_confirmation_pending = restore_confirmation_pending_;
+      details_ui.duplicate_backup_confirmation_pending = duplicate_backup_confirmation_pending_;
       ui_.draw(details_ui);
       previous_buttons = buttons;
       sceKernelDelayThread(kFrameDelayUs);

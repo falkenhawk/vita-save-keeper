@@ -425,7 +425,8 @@ void draw_hint(const FontSet &fonts, int x, const HintSpec &hint) {
   }
 }
 
-void draw_hints_right_aligned(const FontSet &fonts, const HintSpec *hints, int count) {
+// Returns the leftmost x it drew to, so a caller can fit other footer content beside the hints.
+int draw_hints_right_aligned(const FontSet &fonts, const HintSpec *hints, int count) {
   // A group label and every hint to its right form one tight cluster - the "Delete: Local Cloud
   // Both" options group - set close together, while the gap that separates the cluster from the
   // rest of the footer (e.g. Cancel) stays the standard width.
@@ -437,12 +438,15 @@ void draw_hints_right_aligned(const FontSet &fonts, const HintSpec *hints, int c
     }
   }
   int x = 936;
+  int leftmost = x;
   for (int i = count - 1; i >= 0; --i) {
     x -= hint_width(fonts, hints[i]);
     draw_hint(fonts, x, hints[i]);
+    leftmost = x;
     const bool inside_group = (i - 1) >= group_start;  // hint[i-1] and hint[i] both in the group
     x -= inside_group ? 16 : 36;
   }
+  return leftmost;
 }
 
 std::string format_minutes_seconds(int total_seconds) {
@@ -751,9 +755,10 @@ std::string Ui::fit_quoted_name(const std::string &prefix, const std::string &na
 }
 
 std::string Ui::compose_status_with_name(const std::string &prefix, const std::string &name,
-                                         const std::string &suffix) const {
-  // Matches the 380px budget draw_status_line renders with.
-  return fit_quoted_name(prefix, name, suffix, kTextSizeSmall, 380);
+                                         const std::string &suffix, int max_width) const {
+  // The default matches the 380px budget draw_status_line renders with; the details screen's
+  // footer line has more room and passes its own width.
+  return fit_quoted_name(prefix, name, suffix, kTextSizeSmall, max_width > 0 ? max_width : 380);
 }
 
 std::string Ui::compose_modal_label(const std::string &prefix, const std::string &name,
@@ -785,7 +790,9 @@ void Ui::draw(const UiState &state) {
   vita2d_clear_screen();
 
   if (state.slot_details && state.slot_details->open) {
-    draw_slot_details(*state.slot_details, state.enter_is_cross);
+    draw_slot_details(*state.slot_details, state.enter_is_cross, state.status_message,
+                      state.status_kind, state.restore_confirmation_pending,
+                      state.duplicate_backup_confirmation_pending);
   } else {
     draw_header(state);
     draw_title_grid(state);
@@ -795,6 +802,25 @@ void Ui::draw(const UiState &state) {
 
   vita2d_end_drawing();
   vita2d_swap_buffers();
+}
+
+void Ui::draw_presence_glyph(int x, int y, bool on_card, bool in_cloud) {
+  vita2d_texture *glyph = nullptr;
+  if (in_cloud) {
+    glyph = on_card ? cloud_synced_tex_ : cloud_drive_only_tex_;
+  } else if (on_card) {
+    glyph = cloud_local_only_tex_;
+  }
+  if (glyph) {
+    vita2d_draw_texture(glyph, static_cast<float>(x), static_cast<float>(y));
+  } else if (in_cloud) {
+    // Primitive fallback if a texture failed to load (there is none for local-only).
+    if (on_card) {
+      draw_cloud_synced_glyph(x, y);
+    } else {
+      draw_cloud_drive_only_glyph(x, y);
+    }
+  }
 }
 
 void Ui::draw_modal_backdrop() {
@@ -807,7 +833,10 @@ void Ui::draw_modal_backdrop() {
     return;
   }
   if (last_state_.slot_details && last_state_.slot_details->open) {
-    draw_slot_details(*last_state_.slot_details, last_state_.enter_is_cross);
+    draw_slot_details(*last_state_.slot_details, last_state_.enter_is_cross,
+                      last_state_.status_message, last_state_.status_kind,
+                      last_state_.restore_confirmation_pending,
+                      last_state_.duplicate_backup_confirmation_pending);
   } else if (last_state_.saves && last_state_.visible_saves && last_state_.backup_rows) {
     draw_header(last_state_);
     draw_title_grid(last_state_);
@@ -832,17 +861,29 @@ int Ui::details_max_scroll(const SlotDetailsState &state) const {
   return std::max(0, static_cast<int>(lines.size()) - kVisibleDetailLines);
 }
 
-void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross) {
+void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
+                           const std::string &status_message, StatusKind status_kind,
+                           bool restore_confirmation_pending,
+                           bool duplicate_backup_confirmation_pending) {
+  const bool confirmation_pending =
+      restore_confirmation_pending || duplicate_backup_confirmation_pending;
   // This screen owns the full body so the backup list cannot distract from the currently
   // inspected snapshot. All values were loaded by App before this draw call.
   vita2d_draw_rectangle(0, 0, 960, 52, kColorHeader);
   vita2d_draw_line(0, 52, 960, 52, RGBA8(255, 255, 255, 20));
   draw_text(fonts_, 18, 34, kColorText, kTextSizeTitle, "Save Details");
+  // The overview's cloud glyph repeats in the corner so the inspected snapshot's location (card,
+  // Cloud, or both) stays visible; the live save shows neither flag and gets no glyph.
+  const bool show_presence = state.snapshot_on_card || state.snapshot_in_cloud;
+  const int context_right = show_presence ? 904 : 942;
   const std::string context = fit_text(
       kTextSizeSmall, state.game_title + "  /  " + display_backup_name(state.snapshot_name),
       680);
-  draw_text(fonts_, 942 - measure_text(kTextSizeSmall, context.c_str()), 32, kColorMuted,
-            kTextSizeSmall, context.c_str());
+  draw_text(fonts_, context_right - measure_text(kTextSizeSmall, context.c_str()), 32,
+            kColorMuted, kTextSizeSmall, context.c_str());
+  if (show_presence) {
+    draw_presence_glyph(914, 17, state.snapshot_on_card, state.snapshot_in_cloud);
+  }
 
   // A full timestamp is meaningful here: saves in one game can span several years. Give the
   // summary pane enough room for YYYY-MM-DD HH:MM:SS instead of dropping the year to make it fit.
@@ -948,10 +989,14 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross) {
     // that visibly changes as you move between them, confirming the selection landed.
     char slot_label[16];
     std::snprintf(slot_label, sizeof(slot_label), "Slot %03u", slot.id);
-    draw_text(fonts_, kRightX, 82, kColorAccent, kTextSizeNormal, slot_label);
+    // Baseline 81 centers the digit ink exactly between the header rule (y=52) and the divider
+    // below (y=96): 16px of air on both sides, measured from a hardware capture.
+    draw_text(fonts_, kRightX, 81, kColorAccent, kTextSizeNormal, slot_label);
     const std::string slot_time = format_save_datetime_spaced(slot.modified_at);
-    // Tabular so the date does not shift sideways as the selection moves between slots.
-    draw_datetime_tabular(fonts_, 926, 82, kColorText, kTextSizeSmall, slot_time);
+    // Tabular so the date does not shift sideways as the selection moves between slots; same size
+    // as the slot label so the pair reads as one headline (a smaller date on the same baseline
+    // started its caps lower and looked misaligned).
+    draw_datetime_tabular(fonts_, 926, 81, kColorText, kTextSizeNormal, slot_time);
     vita2d_draw_line(kRightX, 96, 926, 96, RGBA8(255, 255, 255, 20));
 
     draw_text(fonts_, kRightX, 128, kColorMuted, kTextSizeTiny, "TITLE");
@@ -992,16 +1037,49 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross) {
 
   vita2d_draw_rectangle(0, 508, 960, 36, RGBA8(3, 7, 18, 230));
   const ButtonSymbol cancel = enter_is_cross ? ButtonSymbol::Circle : ButtonSymbol::Cross;
+  const ButtonSymbol primary = enter_is_cross ? ButtonSymbol::Cross : ButtonSymbol::Circle;
+  // The overview's per-snapshot actions carry over, with the same button meanings: Select
+  // transfers to the side the snapshot is missing from, Square labels, the action button backs
+  // up the live save or restores the inspected snapshot.
+  const bool is_snapshot = state.snapshot_on_card || state.snapshot_in_cloud;
   std::vector<HintSpec> hints;
-  if (details_max_scroll(state) > 0) {
-    hints.push_back({ButtonSymbol::Label, "R-stick  Scroll"});
+  if (confirmation_pending) {
+    // A pending prompt owns the footer: only the two buttons that answer it are offered.
+    hints.push_back({primary, restore_confirmation_pending ? "Confirm restore"
+                                                           : "Confirm backup"});
+    hints.push_back({cancel, "Cancel"});
+  } else {
+    if (details_max_scroll(state) > 0) {
+      hints.push_back({ButtonSymbol::Label, "R-stick  Scroll"});
+    }
+    if (is_snapshot) {
+      hints.push_back({ButtonSymbol::Square, "Label"});
+      if (!state.snapshot_on_card) {
+        hints.push_back({ButtonSymbol::Select, "Download"});
+      } else if (!state.snapshot_in_cloud) {
+        hints.push_back({ButtonSymbol::Select, "Upload"});
+      }
+    }
+    hints.push_back({primary, is_snapshot ? "Restore" : "Backup"});
+    hints.push_back({cancel, "Back"});
   }
-  if (state.download_to_inspect_available) {
-    const ButtonSymbol primary = enter_is_cross ? ButtonSymbol::Cross : ButtonSymbol::Circle;
-    hints.push_back({primary, "Download & Inspect"});
+  const int hints_left =
+      draw_hints_right_aligned(fonts_, hints.data(), static_cast<int>(hints.size()));
+
+  // The overview's status line, mirrored here so action feedback and confirmation prompts are
+  // visible without leaving the screen. It gets exactly the room the hints leave over.
+  if (!status_message.empty()) {
+    unsigned int color = kColorMuted;
+    if (confirmation_pending) {
+      color = kColorAccent;
+    } else if (status_kind == StatusKind::Success) {
+      color = kColorSuccess;
+    } else if (status_kind == StatusKind::Error) {
+      color = kColorError;
+    }
+    draw_text(fonts_, 18, 531, color, kTextSizeSmall,
+              fit_text(kTextSizeSmall, status_message, std::max(120, hints_left - 48)).c_str());
   }
-  hints.push_back({cancel, "Back"});
-  draw_hints_right_aligned(fonts_, hints.data(), static_cast<int>(hints.size()));
 }
 
 void Ui::draw_header(const UiState &state) {
@@ -1197,22 +1275,7 @@ void Ui::draw_backup_panel(const UiState &state) {
       max_text_width = 150;
     } else {
       max_text_width = 340;
-      vita2d_texture *glyph = nullptr;
-      if (row.has_remote()) {
-        glyph = row.has_local() ? cloud_synced_tex_ : cloud_drive_only_tex_;
-      } else if (row.has_local()) {
-        glyph = cloud_local_only_tex_;
-      }
-      if (glyph) {
-        vita2d_draw_texture(glyph, 902, y + 9);
-      } else if (row.has_remote()) {
-        // Primitive fallback if a texture failed to load (there is none for local-only).
-        if (row.has_local()) {
-          draw_cloud_synced_glyph(902, y + 9);
-        } else {
-          draw_cloud_drive_only_glyph(902, y + 9);
-        }
-      }
+      draw_presence_glyph(902, y + 9, row.has_local(), row.has_remote());
     }
     const std::string display = row.display_name();
     const int full_width = measure_text(kTextSizeSmall, display.c_str());

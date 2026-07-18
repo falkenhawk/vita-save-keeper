@@ -281,18 +281,6 @@ void test_backup_rows_do_not_merge_foreign_names_sharing_a_prefix() {
   EXPECT_TRUE(!rows[2].has_remote() || !rows[2].has_local());
 }
 
-void test_backup_details_offer_download_only_for_uninspected_drive_copy() {
-  vsm::BackupRow drive_only;
-  drive_only.remote_name = "2026-07-12 01-44-07.zip";
-  EXPECT_TRUE(vsm::backup_details_download_available(drive_only, false));
-  EXPECT_TRUE(!vsm::backup_details_download_available(drive_only, true));
-
-  vsm::BackupRow downloaded = drive_only;
-  downloaded.local_name = drive_only.remote_name;
-  EXPECT_TRUE(!vsm::backup_details_download_available(downloaded, false));
-  EXPECT_TRUE(!vsm::backup_details_download_available(vsm::BackupRow::new_backup_row(), false));
-}
-
 void test_backup_name_identity_label_and_rename_helpers() {
   EXPECT_TRUE(vsm::has_backup_timestamp_prefix("2026-05-21 16-14-09.zip"));
   EXPECT_TRUE(vsm::has_backup_timestamp_prefix("2026-05-21 16-14-09 before boss.zip"));
@@ -2051,7 +2039,6 @@ int main() {
   test_timestamped_backup_name_uses_jksv_style_zip_name();
   test_backup_rows_merge_local_and_remote_by_timestamp_identity();
   test_backup_rows_do_not_merge_foreign_names_sharing_a_prefix();
-  test_backup_details_offer_download_only_for_uninspected_drive_copy();
   test_backup_name_identity_label_and_rename_helpers();
   test_backup_timestamp_parser_reads_legacy_names_defensively();
   test_backup_counter_identity_and_allocation();
