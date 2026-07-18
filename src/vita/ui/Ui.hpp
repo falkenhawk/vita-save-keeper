@@ -21,6 +21,14 @@ namespace vsm::vita {
 
 enum class StatusKind { Info, Success, Error };
 
+// Modal shown when connecting fails because the OAuth client credentials are absent, unusable,
+// or rejected by Google's device endpoint.
+enum class GoogleSetupPrompt { None, MissingFile, InvalidFile, RejectedByGoogle };
+
+// Step-by-step setup guide; the setup prompt renders it as a QR code next to its textual form.
+inline constexpr const char *kGoogleSetupGuideUrl =
+    "https://github.com/falkenhawk/vita-save-keeper/blob/master/docs/google-drive-setup.md";
+
 struct SlotDetailsState {
   bool open{};
   std::string game_title;
@@ -67,6 +75,8 @@ struct UiState {
   bool delete_confirmation_pending{};
   bool delete_scope_prompt_pending{};
   bool sync_all_confirmation_pending{};
+  // Whether the pending batch would upload; without Drive the confirm hint drops "& Upload".
+  bool sync_all_will_upload{};
   bool duplicate_backup_confirmation_pending{};
   // 0 when idle; fraction of the active hold gesture (Select = batch, Square = label, Triangle =
   // Google action) completed,
@@ -75,6 +85,7 @@ struct UiState {
   bool google_connected{};
   bool drive_synced{};
   bool google_auth_pending{};
+  GoogleSetupPrompt google_setup_prompt{GoogleSetupPrompt::None};
   // Live internet state; signed-in without a connection renders as "Google Drive offline".
   bool network_connected{true};
   // Which physical button the system treats as "enter"; western consoles use Cross, Japanese
@@ -152,6 +163,7 @@ private:
   void draw_google_auth_panel(const UiState &state);
   void draw_status_line(const UiState &state);
   void draw_footer(const UiState &state);
+  void draw_google_setup_prompt(const UiState &state);
   // status_message/status_kind mirror the overview's status line in this screen's footer, so the
   // carried-over actions (transfer, backup/restore, label) and their confirmation prompts stay
   // visible here. While a confirmation is pending the prompt renders in the accent color and the

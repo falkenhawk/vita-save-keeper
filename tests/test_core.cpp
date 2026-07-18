@@ -1964,11 +1964,14 @@ void test_sync_plan_decides_backup_and_upload_per_game() {
 void test_sync_all_confirm_message_states_scope() {
   EXPECT_EQ(vsm::sync_all_confirm_message(73, "Vita", true),
             "Backup & upload all 73 Vita saves?");
-  // Offline is already indicated by the header and by the missing "& upload" in the verb; the
-  // prompt does not repeat it.
-  EXPECT_EQ(vsm::sync_all_confirm_message(4, "PSP", false), "Backup all 4 PSP saves?");
+  // Without Drive the dropped "& upload" alone is easy to miss; "locally" states outright that
+  // nothing will reach the Cloud.
+  EXPECT_EQ(vsm::sync_all_confirm_message(4, "PSP", false),
+            "Backup all 4 PSP saves locally?");
   EXPECT_EQ(vsm::sync_all_confirm_message(1, "Homebrew", true),
             "Backup & upload 1 Homebrew save?");
+  EXPECT_EQ(vsm::sync_all_confirm_message(1, "Homebrew", false),
+            "Backup 1 Homebrew save locally?");
 }
 
 void test_sync_run_summary_reports_results_and_cancellation() {

@@ -800,6 +800,10 @@ void Ui::draw(const UiState &state) {
     draw_footer(state);
   }
 
+  if (state.google_setup_prompt != GoogleSetupPrompt::None) {
+    draw_google_setup_prompt(state);
+  }
+
   vita2d_end_drawing();
   vita2d_swap_buffers();
 }
@@ -1103,6 +1107,22 @@ void Ui::draw_header(const UiState &state) {
   const int status_x = 960 - 18 - measure_text(kTextSizeSmall, drive_status);
   vita2d_draw_fill_circle(status_x - 14, 26, 5, dot_color);
   draw_text(fonts_, status_x, 32, kColorMuted, kTextSizeSmall, drive_status);
+
+  // The connect gesture lives here next to the state it fixes, not in the footer: "not
+  // connected" and "hold Triangle to connect" belong in one glance.
+  if (!state.google_connected && !state.google_auth_pending) {
+    const char *hold_text = "hold";
+    const char *connect_text = "to connect";
+    const int hold_w = measure_text(kTextSizeSmall, hold_text);
+    const int connect_w = measure_text(kTextSizeSmall, connect_text);
+    const int glyph_w = 16;
+    const int cue_w = hold_w + 6 + glyph_w + 6 + connect_w;
+    const int cue_x = status_x - 19 - 24 - cue_w;
+    draw_text(fonts_, cue_x, 32, kColorMuted, kTextSizeSmall, hold_text);
+    draw_button_shape(cue_x + hold_w + 6, 17, ButtonSymbol::Triangle, kColorMuted);
+    draw_text(fonts_, cue_x + hold_w + 6 + glyph_w + 6, 32, kColorMuted, kTextSizeSmall,
+              connect_text);
+  }
 }
 
 void Ui::draw_title_grid(const UiState &state) {
@@ -1423,6 +1443,11 @@ void Ui::draw_footer(const UiState &state) {
 
   // The footer follows the current mode so a cancel hint only appears when there is actually
   // something to cancel. Hints are right-aligned with the primary action at the right edge.
+  if (state.google_setup_prompt != GoogleSetupPrompt::None) {
+    const HintSpec hints[] = {{cancel, "Close"}};
+    draw_hints_right_aligned(fonts_, hints, 1);
+    return;
+  }
   if (state.google_auth_pending) {
     const HintSpec hints[] = {{cancel, "Cancel Sign-In"}, {ButtonSymbol::Triangle, "Check Now"}};
     draw_hints_right_aligned(fonts_, hints, 2);
@@ -1450,7 +1475,9 @@ void Ui::draw_footer(const UiState &state) {
     return;
   }
   if (state.sync_all_confirmation_pending) {
-    const HintSpec hints[] = {{cancel, "Cancel"}, {confirm, "Confirm Backup & Upload All"}};
+    const HintSpec hints[] = {{cancel, "Cancel"},
+                              {confirm, state.sync_all_will_upload ? "Confirm Backup & Upload All"
+                                                                   : "Confirm Backup All"}};
     draw_hints_right_aligned(fonts_, hints, 2);
     return;
   }
@@ -1474,8 +1501,10 @@ void Ui::draw_footer(const UiState &state) {
   // label gesture appears as a dim qualifier only on backup rows, where it applies.
   hints.push_back({ButtonSymbol::Square, sort_label.c_str(), nullptr,
                    focused_row ? "(hold: Label)" : nullptr});
+  // The connect cue lives in the header next to "not connected"; the footer only notes the
+  // refresh hold once a connection exists.
   hints.push_back({ButtonSymbol::Triangle, "Details", nullptr,
-                   state.google_connected ? "(hold: Refresh)" : "(hold: Connect)"});
+                   state.google_connected ? "(hold: Refresh)" : nullptr});
   hints.push_back({ButtonSymbol::Start, "Delete", nullptr, nullptr});
   // Select moves the focused snapshot across: Upload from a card-only row, Download to the card
   // from a Drive-only row. A synced row has no tap action left, so the slot disappears rather
@@ -1506,6 +1535,76 @@ void Ui::clear_batch_progress() {
   batch_active_ = false;
   batch_action_.clear();
   batch_game_.clear();
+}
+
+void Ui::draw_google_setup_prompt(const UiState &state) {
+  vita2d_draw_rectangle(0, 0, 960, 544, RGBA8(3, 7, 18, 200));
+
+  constexpr int kBoxX = 116;
+  constexpr int kBoxY = 104;
+  constexpr int kBoxW = 728;
+  constexpr int kBoxH = 328;
+  vita2d_draw_rectangle(kBoxX, kBoxY, kBoxW, kBoxH, kColorPanelAlt);
+  vita2d_draw_rectangle(kBoxX, kBoxY, kBoxW, 4, kColorAccent);
+
+  draw_text(fonts_, kBoxX + 28, kBoxY + 48, kColorText, kTextSizeTitle,
+            "Google Drive setup needed");
+
+  const bool missing = state.google_setup_prompt == GoogleSetupPrompt::MissingFile;
+  const int text_x = kBoxX + 28;
+  int y = kBoxY + 96;
+  if (missing) {
+    // Only Roboto-Regular is bundled, so the app name gets its bold from a 1px double draw.
+    draw_text(fonts_, text_x, y, kColorText, kTextSizeSmall, "Save Keeper");
+    draw_text(fonts_, text_x + 1, y, kColorText, kTextSizeSmall, "Save Keeper");
+    draw_text(fonts_, text_x + measure_text(kTextSizeSmall, "Save Keeper") + 1, y, kColorText,
+              kTextSizeSmall, " syncs backups to your own Google Drive.");
+    y += 28;
+    draw_text(fonts_, text_x, y, kColorText, kTextSizeSmall,
+              "That needs a one-time setup - free, about ten minutes.");
+    y += 28 + 16;
+    draw_text(fonts_, text_x, y, kColorText, kTextSizeSmall, "No credentials file was found at:");
+    y += 28;
+  } else if (state.google_setup_prompt == GoogleSetupPrompt::InvalidFile) {
+    draw_text(fonts_, text_x, y, kColorText, kTextSizeSmall,
+              "The credentials file could not be used - it needs");
+    y += 28;
+    draw_text(fonts_, text_x, y, kColorText, kTextSizeSmall,
+              "client_id and client_secret. Redo the last guide");
+    y += 28;
+    draw_text(fonts_, text_x, y, kColorText, kTextSizeSmall, "step and replace the file at:");
+    y += 28;
+  } else {
+    draw_text(fonts_, text_x, y, kColorText, kTextSizeSmall,
+              "Google did not accept these credentials.");
+    y += 28;
+    draw_text(fonts_, text_x, y, kColorText, kTextSizeSmall,
+              "The OAuth client may have been deleted or changed.");
+    y += 28;
+    draw_text(fonts_, text_x, y, kColorText, kTextSizeSmall,
+              "Redo the guide and replace the file at:");
+    y += 28;
+  }
+  draw_text(fonts_, text_x, y, kColorMuted, kTextSizeSmall,
+            "ux0:data/save-keeper/google-client.json");
+  y += 44;
+  draw_text(fonts_, text_x, y, kColorText, kTextSizeSmall, "Scan the QR code to open the ");
+  const int scan_w = measure_text(kTextSizeSmall, "Scan the QR code to open the ");
+  draw_text(fonts_, text_x + scan_w, y, kColorText, kTextSizeSmall, "Google Drive Setup Guide.");
+  draw_text(fonts_, text_x + scan_w + 1, y, kColorText, kTextSizeSmall,
+            "Google Drive Setup Guide.");
+
+  // 86 chars at ECC LOW is a 37-module code; 5px modules plus the quiet zone make 205px.
+  constexpr int kQrSize = 205;
+  constexpr int kQrX = kBoxX + kBoxW - 28 - kQrSize;
+  constexpr int kQrY = kBoxY + 52;
+  draw_qr_code(kGoogleSetupGuideUrl, kQrX, kQrY, 5);
+  // The QR's destination spelled out, hanging from the code's bottom-right corner.
+  const char *url_display =
+      "github.com/falkenhawk/vita-save-keeper/blob/master/docs/google-drive-setup.md";
+  const int url_w = measure_text(kTextSizeTiny, url_display);
+  draw_text(fonts_, kBoxX + kBoxW - 28 - url_w, kQrY + kQrSize + 24, kColorMuted, kTextSizeTiny,
+            url_display);
 }
 
 void Ui::draw_busy(const std::string &label, long long done, long long total,

@@ -1216,12 +1216,14 @@ bool App::load_google_credentials() {
 
   std::string json;
   if (!read_text_file(kGoogleClientPath, &json)) {
+    google_credentials_error_ = GoogleSetupPrompt::MissingFile;
     set_status(StatusKind::Error, "No Google client set up - see docs/google-drive-setup.md");
     return false;
   }
 
   google_credentials_ = parse_google_client_credentials(json);
   if (!google_credentials_.ok) {
+    google_credentials_error_ = GoogleSetupPrompt::InvalidFile;
     set_status(StatusKind::Error, "Google client JSON needs client_id and client_secret.");
   }
   return google_credentials_.ok;
@@ -1253,6 +1255,10 @@ void App::handle_google_button() {
 
 void App::begin_google_auth() {
   if (!load_google_credentials()) {
+    // The one-line status truncates exactly where the guide path starts; a modal with the guide
+    // QR explains the setup instead.
+    clear_status();
+    google_setup_prompt_ = google_credentials_error_;
     return;
   }
 
@@ -1262,6 +1268,14 @@ void App::begin_google_auth() {
       http.post_form(kGoogleDeviceCodeEndpoint,
                      build_device_code_request_body(google_credentials_.client_id));
   if (!response.ok) {
+    // A definitive 4xx here means Google rejected the client credentials themselves (deleted or
+    // mistyped OAuth client). Transport failures and server errors keep the one-line status, so
+    // an offline console never blames the credentials file.
+    if (response.status == 400 || response.status == 401 || response.status == 403) {
+      clear_status();
+      google_setup_prompt_ = GoogleSetupPrompt::RejectedByGoogle;
+      return;
+    }
     set_status(StatusKind::Error,
                response.error.empty()
                    ? "Google device request failed (HTTP " + std::to_string(response.status) + ")."
@@ -2510,6 +2524,7 @@ void App::begin_sync_all() {
   // Confirmation is instant: per-game work (signature check, zip, upload) is decided and done
   // during the run itself, so nothing is read twice and there is no scan phase to wait through.
   sync_all_confirmation_pending_ = true;
+  sync_all_will_upload_ = drive_online;
   set_status(StatusKind::Info,
              sync_all_confirm_message(visible_saves_.size(), save_category_label(category_),
                                       drive_online));
@@ -2929,6 +2944,16 @@ int App::run() {
       details_open_pending_ = false;
     }
 
+    // The setup prompt closes on any button, like the other prompts backing out. The consumed
+    // flag swallows a confirm press so closing the prompt cannot also act on the row underneath.
+    bool setup_prompt_consumed_confirm = false;
+    if (google_setup_prompt_ != GoogleSetupPrompt::None && pressed != 0) {
+      google_setup_prompt_ = GoogleSetupPrompt::None;
+      if ((pressed & backup_button) != 0) {
+        setup_prompt_consumed_confirm = true;
+      }
+    }
+
     if ((pressed & SCE_CTRL_LEFT) != 0) {
       move_selected_save(-1);
     }
@@ -2968,7 +2993,7 @@ int App::run() {
       }
     }
     rstick_direction_prev = rstick_direction;
-    if ((pressed & backup_button) != 0) {
+    if ((pressed & backup_button) != 0 && !setup_prompt_consumed_confirm) {
       handle_action_button();
     }
     if ((pressed & cancel_button) != 0) {
@@ -3085,10 +3110,12 @@ int App::run() {
     ui_state.delete_confirmation_pending = delete_confirmation_pending_;
     ui_state.delete_scope_prompt_pending = delete_scope_prompt_pending_;
     ui_state.sync_all_confirmation_pending = sync_all_confirmation_pending_;
+    ui_state.sync_all_will_upload = sync_all_will_upload_;
     ui_state.duplicate_backup_confirmation_pending = duplicate_backup_confirmation_pending_;
     ui_state.enter_is_cross = enter_is_cross_;
     ui_state.slot_details = &slot_details_;
     ui_state.google_connected = google_connected_;
+    ui_state.google_setup_prompt = google_setup_prompt_;
     ui_state.drive_synced = drive_synced_;
     ui_state.network_connected = network_connected_;
     ui_state.google_auth_pending = google_auth_pending_;

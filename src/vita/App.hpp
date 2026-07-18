@@ -184,10 +184,17 @@ private:
   // Second-press force for a manual backup whose content already exists in a local archive.
   bool duplicate_backup_confirmation_pending_{};
   bool sync_all_confirmation_pending_{};
+  // Baked when the batch confirmation opens, so the footer hint matches the prompt text even if
+  // the network state changes while the prompt is up.
+  bool sync_all_will_upload_{};
   // Set while run_sync_all is executing; the HTTP cancel check polls the pad only then, so a
   // held cancel button can abort an in-flight upload without affecting single-file transfers.
   bool batch_running_{};
   bool batch_cancel_requested_{};
+  // Why the last credentials load failed, and the modal (if any) currently explaining it. Only
+  // the user-initiated connect opens the modal; background token refreshes never do.
+  GoogleSetupPrompt google_credentials_error_{GoogleSetupPrompt::None};
+  GoogleSetupPrompt google_setup_prompt_{GoogleSetupPrompt::None};
   bool google_connected_{};
   // Live internet state, polled once per second; a stored sign-in without a connection shows as
   // "offline" and turns the batch into a backups-only run.

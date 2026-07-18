@@ -39,11 +39,11 @@ std::string sync_all_confirm_message(std::size_t games, const std::string &tab_l
                                      bool drive_connected) {
   const std::string saves_noun =
       std::to_string(games) + " " + tab_label + (games == 1 ? " save" : " saves");
-  // Offline needs no extra note: the header already shows it, and the missing "& upload" in the
-  // verb says what this run will and will not do.
+  // Without Drive the run only writes to the card. The header already shows the connection
+  // state, but a dropped "& upload" is easy to miss; "locally" says it outright.
   const std::string action = drive_connected ? "Backup & upload " : "Backup ";
   const std::string scope = games == 1 ? saves_noun : "all " + saves_noun;
-  return action + scope + "?";
+  return action + scope + (drive_connected ? "?" : " locally?");
 }
 
 std::string sync_run_summary(const SyncRunCounts &counts) {
