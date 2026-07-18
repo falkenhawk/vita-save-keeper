@@ -4,41 +4,49 @@ All notable changes to Save Keeper are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [1.1.0] - unreleased
+## [1.1.0] - 2026-07-19
 
 ### Added
-- new snapshots use the latest actual Vita save-slot date in their filename. If a game does not
-  expose slot data, Save Keeper falls back to the newest save file time and finally the backup time
-- press Triangle on a snapshot to open a full-screen slot browser with each slot's date, title,
-  subtitle, and description
-- optional JSON metadata companions sync with each ZIP on Google Drive. They are loaded only when
-  details are requested, so the normal backup index stays lightweight
-- back up and upload a whole tab in one gesture: hold Select to snapshot every game in the
-  current Vita / Homebrew / PSP tab and send it to the Cloud. Ideal for a first full backup of
-  your library - later runs only upload the backups that are new, not everything again
-- backup labels: give a snapshot a name ("before boss", "100% save") with the on-screen
-  keyboard. The label is added after the timestamp, so backups still sort by date, and a label
-  edit is mirrored to the Cloud copy
+- back up and upload a whole tab in one gesture: hold Select to back up every game in the current
+  Vita / Homebrew / PSP tab and send it to Google Drive, later runs only process what is new
+- full-screen save details on Triangle: every slot's date, title, subtitle, and description, plus
+  the live save's size or a backup's ZIP file size. The overview's backup, restore, transfer, and
+  label actions work right there on the inspected backup. Details load only when the view
+  opens, so browsing stays instant
+- backup labels: name a backup ("before boss", "100% save") with the on-screen keyboard. The
+  label follows the timestamp so backups still sort by date, and label edits mirror to the Cloud
+- real save times: the actual save-slot date is read from each game's save data and used for the
+  grid's "Last save" line, the last-saved sort, and backup filenames, with file times as the
+  fallback. Once read, times and titles are cached, so a launch only re-reads what changed
+- download a Cloud-only backup without restoring it (Select)
+- deleting a backup that exists on both sides asks where: local only, Cloud only, or both
+- a Google Drive setup screen: trying to connect without the credentials file now explains what
+  is missing and shows a QR code straight to the step-by-step guide
+- each backup now carries a small JSON file with its slot details, stored next to the ZIP locally
+  and on Google Drive. It is optional - a missing or broken one never gets in the way, and Save
+  Keeper can fill in details for backups made by 1.0
 
 ### Changed
-- existing 1.0 ZIP-only backups remain fully usable and are not renamed. For a local Vita backup,
-  slot details are recovered lazily from the ZIP without extracting or rewriting it
-- missing, malformed, or failed metadata never blocks ZIP backup, upload, download, restore,
-  labeling, or deletion; whole-save ZIPs remain the only backup and restore boundary
-- one row per snapshot instead of separate local and Cloud entries, with a small cloud glyph
-  marking where it lives: on the memory card, in the Cloud, or both
-- download a Cloud-only backup to the memory card without restoring it (Select)
-- when a backup exists both on the card and in the Cloud, deleting it asks where: local only,
-  Cloud only, or both
-- Drive folders now carry the game's title (for example `PCSB00456 FEZ`), so backups are
-  browsable in the Google Drive web UI
-- sorting now cycles name, latest backup, then last saved, so the mode that reads every save's
-  slot data comes last; the sort choice saved by older versions still loads
+- every backup is one clean row: the separate local and `[GD]`-prefixed Cloud entries of 1.0 are
+  merged, and a small cloud glyph on each row marks where it lives - locally, in the Cloud, or both
+- sorting cycles name, latest backup, then last saved. Last saved now orders by real save times,
+  and reading them shows a progress modal that Square cancels back to name order
+- creating a backup when nothing changed since an existing one shows a "No changes" warning
+  instead of writing a duplicate, a second press creates one anyway
+- Drive folders now carry the game's title next to the ID (for example `PCSB00456 FEZ`), so
+  backups are easier to recognize and find in the Google Drive web UI
+- existing 1.0 backups remain fully usable and are not renamed
+- backup names display without the .zip extension
 - footer button hints, hold-gesture cues, and status messages cleaned up throughout
+- refreshed app assets: new icon, LiveArea background, and start screen
 
 ## [1.0.0] - 2026-07-05
 
-Initial release: timestamped ZIP snapshots of Vita, homebrew, and PSP saves; upload, download,
-and restore through your own Google Drive; QR-code sign-in; a game grid with real titles and
-icons; sorting by name, last saved, or last synced; and an automatic pre-restore snapshot so a
-restore never destroys the current save.
+Initial release:
+
+- timestamped ZIP backups of Vita, homebrew, and PSP saves
+- upload, download, and restore through your own Google Drive
+- QR-code sign-in
+- a game grid with real titles and icons
+- sorting by name, last saved, or last synced
+- an automatic pre-restore backup, so a restore never destroys the current save

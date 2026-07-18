@@ -1,9 +1,8 @@
 # Google Drive setup
 
-Save Keeper uploads backups to your own Google Drive. For that, Google requires the app to be
-registered under a Google Cloud project that belongs to you. You do this once, it takes about ten
-minutes, it is free, and no credit card or billing account is needed. Afterwards every device
-(Vita, PS TV) just scans a QR code once.
+Save Keeper uploads backups to your own Google Drive. For that, the app must be registered
+under a Google Cloud project that belongs to you. You do this once, it takes about ten minutes,
+it is free, and no credit card or billing account is needed.
 
 ## Step 1 - create the project
 
@@ -72,8 +71,8 @@ cmake --build build/vita
 
 ## Step 6 - connect on the Vita
 
-1. open Save Keeper and press **Triangle**
-2. scan the QR code with your phone - the sign-in code is already filled in; or open
+1. open Save Keeper and hold **Triangle**
+2. scan the QR code with your phone - the sign-in code is already filled in. Or open
    `google.com/device` in any browser and type the code shown on the Vita
 3. approve access on the phone. The Vita notices by itself within a few seconds - done.
 
@@ -87,7 +86,11 @@ Drive, which is what makes save sync between them work.
 
 ## Good to know
 
-- Save Keeper can only see files it created itself; it cannot read anything else in your Drive
+- Save Keeper can only see files it created itself - it cannot read anything else in your Drive
 - backups live under the `PSV Saves` folder, one subfolder per game
+- backups stay in your Drive even if you uninstall Save Keeper or wipe the Vita - you can browse
+  and download the ZIPs from the Drive web UI on any computer
+- if the Vita asks you to reconnect every week, the consent screen is still in Testing - publish
+  it to **Production** (Step 3)
 - to disconnect a device: delete `google-token.json` on it, and revoke the grant at
   https://myaccount.google.com/permissions
