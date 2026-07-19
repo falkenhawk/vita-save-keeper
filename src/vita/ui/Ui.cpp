@@ -1652,15 +1652,18 @@ void Ui::draw_busy(const std::string &label, long long done, long long total,
   } else {
     fitted_label = fit_text(kTextSizeNormal, label, title_max_w);
   }
-  draw_text(fonts_, kBoxX + 24, kBoxY + 42, kColorText, kTextSizeNormal, fitted_label.c_str());
+  // The title block sits so the cap top clears the accent strip by the same 20px the baseline
+  // keeps above the bar (a size-18 cap is ~13px tall); the old +42/+62 layout read heavier on
+  // top. The whole stack below shifts with it, so the slack goes to the box's bottom padding.
+  draw_text(fonts_, kBoxX + 24, kBoxY + 37, kColorText, kTextSizeNormal, fitted_label.c_str());
   if (batch_transfer) {
     const int pw = text_width(fonts_, kTextSizeSmall, transfer_pct);
-    draw_text(fonts_, kBoxX + kBoxW - 24 - pw, kBoxY + 42, kColorAccent, kTextSizeSmall,
+    draw_text(fonts_, kBoxX + kBoxW - 24 - pw, kBoxY + 37, kColorAccent, kTextSizeSmall,
               transfer_pct);
   }
 
   const int bar_x = kBoxX + 24;
-  const int bar_y = kBoxY + 62;
+  const int bar_y = kBoxY + 57;
   const int bar_w = kBoxW - 48;
   const int bar_h = 12;
   vita2d_draw_rectangle(bar_x, bar_y, bar_w, bar_h, RGBA8(255, 255, 255, 24));
@@ -1695,7 +1698,7 @@ void Ui::draw_busy(const std::string &label, long long done, long long total,
     show_overall = true;
   }
   if (show_overall) {
-    draw_text(fonts_, bar_x, kBoxY + 98, kColorMuted, kTextSizeSmall, overall_pct);
+    draw_text(fonts_, bar_x, kBoxY + 93, kColorMuted, kTextSizeSmall, overall_pct);
   }
 
   if (batch_active_) {
@@ -1705,13 +1708,13 @@ void Ui::draw_busy(const std::string &label, long long done, long long total,
     const int hold_w = text_width(fonts_, kTextSizeSmall, hold_text);
     const int cancel_w = text_width(fonts_, kTextSizeSmall, cancel_text);
     int x = kBoxX + kBoxW - 24 - (hold_w + 6 + 22 + cancel_w);
-    draw_text(fonts_, x, kBoxY + 98, kColorMuted, kTextSizeSmall, hold_text);
+    draw_text(fonts_, x, kBoxY + 93, kColorMuted, kTextSizeSmall, hold_text);
     x += hold_w + 6;
-    draw_button_shape(x, kBoxY + 84,
+    draw_button_shape(x, kBoxY + 79,
                       batch_cancel_is_circle_ ? ButtonSymbol::Circle : ButtonSymbol::Cross,
                       kColorMuted);
     x += 22;
-    draw_text(fonts_, x, kBoxY + 98, kColorMuted, kTextSizeSmall, cancel_text);
+    draw_text(fonts_, x, kBoxY + 93, kColorMuted, kTextSizeSmall, cancel_text);
   }
 
   if (cancel_hint != nullptr) {
