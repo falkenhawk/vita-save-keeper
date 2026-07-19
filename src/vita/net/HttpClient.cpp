@@ -1,12 +1,16 @@
 #include "vita/net/HttpClient.hpp"
 
+#include "core/MultipartUpload.hpp"
+
 #include <curl/curl.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/net/net.h>
 #include <psp2/net/netctl.h>
 #include <psp2/sysmodule.h>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <utility>
 
 namespace vsm::vita {
@@ -136,25 +140,71 @@ std::size_t write_file_body(char *ptr, std::size_t size, std::size_t nmemb, void
   return std::fwrite(ptr, size, nmemb, static_cast<FILE *>(userdata));
 }
 
-bool read_binary_file(const std::string &path, std::string *contents) {
-  FILE *file = std::fopen(path.c_str(), "rb");
-  if (!file) {
-    return false;
-  }
+// Streaming state for a multipart upload. The file is never loaded whole: reading a 52 MB backup
+// archive into a string and packing it into an in-RAM body used to cost several times the file
+// size in transient copies, which threw an uncaught bad_alloc and crashed the app.
+struct MultipartReadState {
+  const MultipartRelatedBody *body{};
+  FILE *file{};
+  std::uint64_t offset{};
+  bool file_read_failed{};
+};
 
-  contents->clear();
-  char buffer[32 * 1024];
-  while (true) {
-    const std::size_t read = std::fread(buffer, 1, sizeof(buffer), file);
-    if (read > 0) {
-      contents->append(buffer, read);
-    }
-    if (read < sizeof(buffer)) {
-      const bool ok = std::ferror(file) == 0;
-      std::fclose(file);
-      return ok;
-    }
+std::size_t read_multipart_body(char *ptr, std::size_t size, std::size_t nmemb, void *userdata) {
+  auto *state = static_cast<MultipartReadState *>(userdata);
+  const std::size_t capacity = size * nmemb;
+  if (capacity == 0) {
+    return 0;
   }
+  const MultipartChunk chunk = next_multipart_chunk(*state->body, state->offset, capacity);
+  switch (chunk.source) {
+  case MultipartChunk::Source::Prefix:
+    std::memcpy(ptr, state->body->prefix.data() + chunk.source_offset, chunk.length);
+    break;
+  case MultipartChunk::Source::File:
+    // Sequential freads track chunk.source_offset; only the seek callback can move the position.
+    // A short read would desync the promised Content-Length and hang the transfer, so any
+    // filesystem hiccup aborts the request instead of sending a corrupt body.
+    if (std::fread(ptr, 1, chunk.length, state->file) != chunk.length) {
+      state->file_read_failed = true;
+      return CURL_READFUNC_ABORT;
+    }
+    break;
+  case MultipartChunk::Source::Suffix:
+    std::memcpy(ptr, state->body->suffix.data() + chunk.source_offset, chunk.length);
+    break;
+  case MultipartChunk::Source::End:
+    return 0;
+  }
+  state->offset += chunk.length;
+  return chunk.length;
+}
+
+int seek_multipart_body(void *userdata, curl_off_t offset, int origin) {
+  auto *state = static_cast<MultipartReadState *>(userdata);
+  if (origin != SEEK_SET || offset < 0) {
+    return CURL_SEEKFUNC_CANTSEEK;
+  }
+  // curl rewinds the body when a request must be retransmitted (auth renegotiation, redirect).
+  // The file position must follow so sequential freads resume at the right byte.
+  const std::uint64_t body_offset = static_cast<std::uint64_t>(offset);
+  const std::uint64_t file_begin = state->body->prefix.size();
+  std::uint64_t file_position = 0;
+  if (body_offset > file_begin) {
+    file_position = std::min<std::uint64_t>(body_offset - file_begin, state->body->file_size);
+  }
+  if (std::fseek(state->file, static_cast<long>(file_position), SEEK_SET) != 0) {
+    return CURL_SEEKFUNC_FAIL;
+  }
+  state->offset = body_offset;
+  return CURL_SEEKFUNC_OK;
+}
+
+// A fixed deadline cannot fit arbitrarily large uploads on Vita wifi; budget a 50 KB/s worst-case
+// sustained rate on top of the base allowance. A stalled transfer is still cancellable through the
+// progress callback, so a generous ceiling only bounds the pathological case.
+long upload_timeout_seconds(std::uint64_t total_size) {
+  return 120L + static_cast<long>(total_size / (50 * 1024));
 }
 
 HttpResponse send_multipart_file(const std::string &url, const std::string &metadata_json,
@@ -169,8 +219,17 @@ HttpResponse send_multipart_file(const std::string &url, const std::string &meta
   headers = curl_slist_append(headers, "Accept: application/json");
   headers = append_bearer_header(headers, bearer_token);
 
-  std::string file_contents;
-  if (!read_binary_file(file_path, &file_contents)) {
+  FILE *file = std::fopen(file_path.c_str(), "rb");
+  if (!file) {
+    curl_slist_free_all(headers);
+    return transport_error("could not read upload file");
+  }
+  long file_size = -1;
+  if (std::fseek(file, 0, SEEK_END) == 0) {
+    file_size = std::ftell(file);
+  }
+  if (file_size < 0 || std::fseek(file, 0, SEEK_SET) != 0) {
+    std::fclose(file);
     curl_slist_free_all(headers);
     return transport_error("could not read upload file");
   }
@@ -178,25 +237,35 @@ HttpResponse send_multipart_file(const std::string &url, const std::string &meta
   // Drive expects multipart/related, while libcurl's MIME helper emits multipart/form-data. The
   // media part's content type is the caller's, so a JSON sidecar is not mislabeled as a ZIP.
   constexpr const char *kBoundary = "save-keeper-drive-boundary";
-  const std::string body = std::string("--") + kBoundary +
-                           "\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n" +
-                           metadata_json + "\r\n--" + kBoundary + "\r\nContent-Type: " +
-                           file_content_type + "\r\n\r\n" + file_contents + "\r\n--" + kBoundary +
-                           "--\r\n";
+  const MultipartRelatedBody body = build_multipart_related_body(
+      kBoundary, metadata_json, file_content_type, static_cast<std::uint64_t>(file_size));
+  MultipartReadState state;
+  state.body = &body;
+  state.file = file;
+
   headers = curl_slist_append(
       headers, (std::string("Content-Type: multipart/related; boundary=") + kBoundary).c_str());
 
   curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+  curl_easy_setopt(curl, CURLOPT_POST, 1L);
   if (update_existing) {
     curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PATCH");
-  } else {
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
   }
-  curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.data());
-  curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
+  curl_easy_setopt(curl, CURLOPT_READFUNCTION, read_multipart_body);
+  curl_easy_setopt(curl, CURLOPT_READDATA, &state);
+  curl_easy_setopt(curl, CURLOPT_SEEKFUNCTION, seek_multipart_body);
+  curl_easy_setopt(curl, CURLOPT_SEEKDATA, &state);
+  curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(body.total_size()));
 
-  const HttpResponse response = perform_with_body(curl, headers);
+  HttpResponse response =
+      perform_with_body(curl, headers, upload_timeout_seconds(body.total_size()));
+  std::fclose(file);
   curl_slist_free_all(headers);
+  if (!response.ok && state.file_read_failed) {
+    // The local read failure caused the abort; report it instead of curl's generic
+    // "aborted by callback".
+    response.error = "could not read upload file";
+  }
   return response;
 }
 
@@ -316,9 +385,9 @@ BusyLabelScope::BusyLabelScope(const char *label, bool indeterminate)
     g_report_transfer_bytes = false;
   }
   // Draw the modal once, immediately, so it appears the instant the operation starts rather than
-  // only when the transfer's first progress callback fires. A large upload spends a noticeable
-  // beat first reading the file and packing the multipart body, during which curl reports nothing;
-  // without this the screen sits frozen on the previous frame. total < 0 = indeterminate sweep.
+  // only when the transfer's first progress callback fires; DNS and the TLS handshake happen
+  // before curl reports anything, and without this the screen sits frozen on the previous frame.
+  // total < 0 = indeterminate sweep.
   if (g_progress_hook && !g_busy_label.empty()) {
     g_progress_hook(g_busy_label, 0, -1);
   }

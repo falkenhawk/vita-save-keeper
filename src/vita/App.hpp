@@ -124,6 +124,8 @@ private:
                                       std::string *error);
   BackupUploadResult upload_local_backup(const SaveRecord &save,
                                          const std::string &backup_name);
+  BackupUploadResult upload_local_backup_impl(const SaveRecord &save,
+                                              const std::string &backup_name);
   // Read a healthy local JSON companion, or rebuild it from sdslot.dat inside an older ZIP.
   SaveMetadataJsonResult ensure_local_backup_metadata(const SaveRecord &save,
                                                        const std::string &backup_name);

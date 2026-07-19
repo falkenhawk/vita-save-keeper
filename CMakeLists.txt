@@ -30,6 +30,7 @@ add_library(vsm_core
   src/core/GoogleConfig.cpp
   src/core/GoogleDrive.cpp
   src/core/GridWindow.cpp
+  src/core/MultipartUpload.cpp
   src/core/PathUtil.cpp
   src/core/SaveCategory.cpp
   src/core/SaveScanner.cpp

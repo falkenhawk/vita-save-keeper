@@ -8,6 +8,7 @@
 #include "core/GoogleDrive.hpp"
 #include "core/GridWindow.hpp"
 #include "core/InputGesture.hpp"
+#include "core/MultipartUpload.hpp"
 #include "core/PathUtil.hpp"
 #include "core/SaveCategory.hpp"
 #include "core/SaveScanner.hpp"
@@ -1694,6 +1695,88 @@ void test_google_drive_parses_single_object_upload_response() {
   EXPECT_EQ(empty.files.size(), static_cast<std::size_t>(0));
 }
 
+void test_multipart_body_frames_match_the_drive_wire_format() {
+  // prefix + <file bytes> + suffix must be byte-identical to the body the app used to assemble
+  // in RAM, or existing Drive uploads would change shape on the wire
+  const vsm::MultipartRelatedBody body = vsm::build_multipart_related_body(
+      "test-boundary", "{\"name\":\"backup.zip\"}", "application/zip", 4);
+
+  EXPECT_EQ(body.prefix,
+            std::string("--test-boundary\r\n"
+                        "Content-Type: application/json; charset=UTF-8\r\n\r\n"
+                        "{\"name\":\"backup.zip\"}\r\n"
+                        "--test-boundary\r\n"
+                        "Content-Type: application/zip\r\n\r\n"));
+  EXPECT_EQ(body.suffix, std::string("\r\n--test-boundary--\r\n"));
+  EXPECT_EQ(static_cast<std::size_t>(body.file_size), static_cast<std::size_t>(4));
+  EXPECT_EQ(static_cast<std::size_t>(body.total_size()),
+            body.prefix.size() + 4 + body.suffix.size());
+}
+
+void test_multipart_chunks_walk_regions_without_spanning_boundaries() {
+  vsm::MultipartRelatedBody body;
+  body.prefix = "PREFIX";
+  body.suffix = "END";
+  body.file_size = 10;
+
+  // a capacity larger than the remaining region still serves only that region: the reader
+  // switches data sources between calls, so a chunk must never straddle two regions
+  vsm::MultipartChunk chunk = vsm::next_multipart_chunk(body, 0, 64);
+  EXPECT_TRUE(chunk.source == vsm::MultipartChunk::Source::Prefix);
+  EXPECT_EQ(static_cast<std::size_t>(chunk.source_offset), static_cast<std::size_t>(0));
+  EXPECT_EQ(chunk.length, static_cast<std::size_t>(6));
+
+  // a small buffer mid-prefix serves the capacity, not the region remainder
+  chunk = vsm::next_multipart_chunk(body, 2, 3);
+  EXPECT_TRUE(chunk.source == vsm::MultipartChunk::Source::Prefix);
+  EXPECT_EQ(static_cast<std::size_t>(chunk.source_offset), static_cast<std::size_t>(2));
+  EXPECT_EQ(chunk.length, static_cast<std::size_t>(3));
+
+  chunk = vsm::next_multipart_chunk(body, 6, 64);
+  EXPECT_TRUE(chunk.source == vsm::MultipartChunk::Source::File);
+  EXPECT_EQ(static_cast<std::size_t>(chunk.source_offset), static_cast<std::size_t>(0));
+  EXPECT_EQ(chunk.length, static_cast<std::size_t>(10));
+
+  chunk = vsm::next_multipart_chunk(body, 13, 2);
+  EXPECT_TRUE(chunk.source == vsm::MultipartChunk::Source::File);
+  EXPECT_EQ(static_cast<std::size_t>(chunk.source_offset), static_cast<std::size_t>(7));
+  EXPECT_EQ(chunk.length, static_cast<std::size_t>(2));
+
+  chunk = vsm::next_multipart_chunk(body, 16, 64);
+  EXPECT_TRUE(chunk.source == vsm::MultipartChunk::Source::Suffix);
+  EXPECT_EQ(static_cast<std::size_t>(chunk.source_offset), static_cast<std::size_t>(0));
+  EXPECT_EQ(chunk.length, static_cast<std::size_t>(3));
+
+  chunk = vsm::next_multipart_chunk(body, 18, 64);
+  EXPECT_TRUE(chunk.source == vsm::MultipartChunk::Source::Suffix);
+  EXPECT_EQ(static_cast<std::size_t>(chunk.source_offset), static_cast<std::size_t>(2));
+  EXPECT_EQ(chunk.length, static_cast<std::size_t>(1));
+
+  chunk = vsm::next_multipart_chunk(body, 19, 64);
+  EXPECT_TRUE(chunk.source == vsm::MultipartChunk::Source::End);
+  EXPECT_EQ(chunk.length, static_cast<std::size_t>(0));
+}
+
+void test_multipart_chunks_handle_empty_files_and_past_end_offsets() {
+  vsm::MultipartRelatedBody body;
+  body.prefix = "P";
+  body.suffix = "S";
+  body.file_size = 0;
+
+  // an empty file collapses the file region: the prefix hands over directly to the suffix
+  vsm::MultipartChunk chunk = vsm::next_multipart_chunk(body, 1, 64);
+  EXPECT_TRUE(chunk.source == vsm::MultipartChunk::Source::Suffix);
+  EXPECT_EQ(static_cast<std::size_t>(chunk.source_offset), static_cast<std::size_t>(0));
+  EXPECT_EQ(chunk.length, static_cast<std::size_t>(1));
+
+  // offsets at or past the total are a clean end, never an out-of-bounds region read
+  chunk = vsm::next_multipart_chunk(body, 2, 64);
+  EXPECT_TRUE(chunk.source == vsm::MultipartChunk::Source::End);
+  chunk = vsm::next_multipart_chunk(body, 100, 64);
+  EXPECT_TRUE(chunk.source == vsm::MultipartChunk::Source::End);
+  EXPECT_EQ(chunk.length, static_cast<std::size_t>(0));
+}
+
 void test_save_category_classification() {
   vsm::SaveRecord retail;
   retail.platform = vsm::SavePlatform::Vita;
@@ -2102,6 +2185,9 @@ int main() {
   test_google_drive_builds_paged_index_queries();
   test_google_drive_parses_parents_and_page_token();
   test_google_drive_parses_single_object_upload_response();
+  test_multipart_body_frames_match_the_drive_wire_format();
+  test_multipart_chunks_walk_regions_without_spanning_boundaries();
+  test_multipart_chunks_handle_empty_files_and_past_end_offsets();
   test_save_category_classification();
   test_saves_sort_by_display_name_case_insensitive();
   test_save_sort_modes_order_saves();

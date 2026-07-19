@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <new>
 #include <string>
 #include <sys/stat.h>
 #include <vector>
@@ -2249,6 +2250,19 @@ void App::open_save_details() {
 // is set here so both the single upload and the batch report the same failures.
 BackupUploadResult App::upload_local_backup(const SaveRecord &save,
                                             const std::string &backup_name) {
+  // An allocation failure anywhere in the upload chain used to escape as an uncaught bad_alloc
+  // and take the whole app down with a crash dump; a clean per-file failure lets a sync batch
+  // carry on with the remaining games.
+  try {
+    return upload_local_backup_impl(save, backup_name);
+  } catch (const std::bad_alloc &) {
+    set_status(StatusKind::Error, "Out of memory while uploading.");
+    return {};
+  }
+}
+
+BackupUploadResult App::upload_local_backup_impl(const SaveRecord &save,
+                                                 const std::string &backup_name) {
   BackupUploadResult result;
   const std::string save_key = drive_folder_name_for(save.id);
   const std::string desired_name = drive_save_folder_name(save_key, save.display_name);

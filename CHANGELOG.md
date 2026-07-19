@@ -4,6 +4,18 @@ All notable changes to Save Keeper are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- huge backups no longer crash the app during Cloud upload. The upload used to load the whole ZIP
+  into memory (and copy it while packing the request), which ran the Vita out of RAM on giant
+  saves - a bloated LittleBigPlanet save weighs over 50 MB. Uploads now stream straight from the
+  memory card, so backup size no longer matters
+- the upload time limit now grows with the backup size, so a big save on slow wifi is not cut off
+  mid-transfer
+- if the app ever runs out of memory while uploading, it shows an error and carries on instead of
+  crashing to the LiveArea
+
 ## [1.1.0] - 2026-07-19
 
 ### Added
