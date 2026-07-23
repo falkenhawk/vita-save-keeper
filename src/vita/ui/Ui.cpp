@@ -175,8 +175,14 @@ int tabular_advance(const FontSet &fonts, unsigned int size, TabularMetrics *met
   if (metrics->advance[index] == 0) {
     const char pair[3] = {'0', '0', '\0'};
     const char triple[4] = {'0', c, '0', '\0'};
-    metrics->advance[index] =
-        std::max(1, text_width(fonts, size, triple) - text_width(fonts, size, pair));
+    int advance = std::max(1, text_width(fonts, size, triple) - text_width(fonts, size, pair));
+    if (c == ' ') {
+      // The date/time separator is two of these spaces. A full space advance is ~half a digit
+      // cell, so the pair sat a full cell apart and read too open; three-quarters each lands the
+      // gap halfway between the cramped single space and the too-wide double.
+      advance = std::max(1, advance * 3 / 4);
+    }
+    metrics->advance[index] = advance;
   }
   return metrics->advance[index];
 }
@@ -193,14 +199,19 @@ TabularMetrics &tabular_metrics(const FontSet &fonts, unsigned int size) {
   return metrics;
 }
 
-void draw_datetime_tabular(const FontSet &fonts, int right_x, int y, unsigned int color,
-                           unsigned int size, const std::string &text) {
+int datetime_tabular_width(const FontSet &fonts, unsigned int size, const std::string &text) {
   TabularMetrics &metrics = tabular_metrics(fonts, size);
   int total = 0;
   for (const char c : text) {
     total += (c >= '0' && c <= '9') ? metrics.cell : tabular_advance(fonts, size, &metrics, c);
   }
-  int x = right_x - total;
+  return total;
+}
+
+void draw_datetime_tabular(const FontSet &fonts, int right_x, int y, unsigned int color,
+                           unsigned int size, const std::string &text) {
+  TabularMetrics &metrics = tabular_metrics(fonts, size);
+  int x = right_x - datetime_tabular_width(fonts, size, text);
   for (const char c : text) {
     const char one[2] = {c, '\0'};
     const int advance = tabular_advance(fonts, size, &metrics, c);
@@ -932,7 +943,10 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
   const int card_h = stats.empty() ? 68 : 76 + static_cast<int>(stats.size()) * 24;
   vita2d_draw_rectangle(18, 72, kLeftCardWidth, card_h, kColorPanelAlt);
   draw_text(fonts_, 34, 98, kColorMuted, kTextSizeTiny, "LAST SAVE TIME");
-  draw_text(fonts_, 34, 124, kColorText, kTextSizeNormal, saved_display.c_str());
+  // Tabular, drawn from its own left edge, so this date carries the same tightened separator gap
+  // as the slot list and header timestamps rather than the font's wider literal spaces.
+  draw_datetime_tabular(fonts_, 34 + datetime_tabular_width(fonts_, kTextSizeNormal, saved_display),
+                        124, kColorText, kTextSizeNormal, saved_display);
   if (!stats.empty()) {
     vita2d_draw_line(34, 140, card_right, 140, RGBA8(255, 255, 255, 18));
     for (std::size_t i = 0; i < stats.size(); ++i) {
@@ -1010,8 +1024,10 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
     const std::string slot_time = format_save_datetime_spaced(slot.modified_at);
     // Tabular so the date does not shift sideways as the selection moves between slots; same size
     // as the slot label so the pair reads as one headline (a smaller date on the same baseline
-    // started its caps lower and looked misaligned).
-    draw_datetime_tabular(fonts_, 926, 81, kColorText, kTextSizeNormal, slot_time);
+    // started its caps lower and looked misaligned). Muted rather than full white: at the same
+    // size, near-white text blooms against the dark pane and reads visibly heavier than the
+    // mid-blue accent label beside it, so the pair looked mismatched. The dimmer tone evens them.
+    draw_datetime_tabular(fonts_, 926, 81, kColorMuted, kTextSizeNormal, slot_time);
     vita2d_draw_line(kRightX, 96, 926, 96, RGBA8(255, 255, 255, 20));
 
     draw_text(fonts_, kRightX, 128, kColorMuted, kTextSizeTiny, "TITLE");
@@ -1296,17 +1312,26 @@ void Ui::draw_backup_panel(const UiState &state) {
         draw_text(fonts_, 898 - measure_text(kTextSizeTiny, kPrefix), y + 23, time_color,
                   kTextSizeTiny, kPrefix);
         draw_circle_spinner(912.0f, static_cast<float>(y) + 17.0f, frame_counter_, time_color);
+      } else if (save->save_time_known) {
+        // The label stays plain text, but the date runs through the tabular renderer so its
+        // date/time separator carries the same tightened gap as the detail screen. Both are
+        // right-aligned to end at 922: the date first, then the label butted against its left.
+        const std::string date = format_save_datetime_spaced(save->saved_at);
+        const int date_w = datetime_tabular_width(fonts_, kTextSizeTiny, date);
+        static const char *const kPrefix = "Last save: ";
+        draw_text(fonts_, 922 - date_w - measure_text(kTextSizeTiny, kPrefix), y + 23, time_color,
+                  kTextSizeTiny, kPrefix);
+        draw_datetime_tabular(fonts_, 922, y + 23, time_color, kTextSizeTiny, date);
       } else {
-        const std::string current_save_time =
-            save->save_time_known ? "Last save: " + format_save_datetime_spaced(save->saved_at)
-                                  : "Last save: unknown";
-        draw_text(fonts_, 922 - measure_text(kTextSizeTiny, current_save_time.c_str()), y + 23,
-                  time_color, kTextSizeTiny, current_save_time.c_str());
+        static const char *const kUnknown = "Last save: unknown";
+        draw_text(fonts_, 922 - measure_text(kTextSizeTiny, kUnknown), y + 23, time_color,
+                  kTextSizeTiny, kUnknown);
       }
       max_text_width = 150;
     } else {
       max_text_width = 340;
-      draw_presence_glyph(902, y + 9, row.has_local(), row.has_remote());
+      // The row wash is nearly transparent, so the pane behind it is what the cut-out must match.
+      draw_presence_glyph(902, y + 9, row.has_local(), row.has_remote(), kColorPanelRight);
     }
     const std::string display = row.display_name();
     const int full_width = measure_text(kTextSizeSmall, display.c_str());
