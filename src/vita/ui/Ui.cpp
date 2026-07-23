@@ -23,12 +23,18 @@
 namespace vsm::vita {
 namespace {
 
+// The surfaces are one colour at five brightness levels, listed darkest first: hue 216 deg with
+// near-constant saturation throughout, so the panes read as levels of a single navy instead of as
+// separate colours sitting next to each other.
 constexpr unsigned int kColorBackground = RGBA8(8, 13, 21, 255);
-constexpr unsigned int kColorHeader = RGBA8(17, 24, 36, 255);
+constexpr unsigned int kColorPanelRight = RGBA8(14, 21, 32, 255);
 constexpr unsigned int kColorPanel = RGBA8(16, 24, 36, 255);
+constexpr unsigned int kColorHeader = RGBA8(19, 28, 42, 255);
 constexpr unsigned int kColorPanelAlt = RGBA8(25, 37, 55, 255);
-constexpr unsigned int kColorAccent = RGBA8(56, 189, 248, 255);
-constexpr unsigned int kColorAccentSoft = RGBA8(56, 189, 248, 40);
+// Sampled from the memory-card glow in the app's own icon0.png, so the UI accent and the LiveArea
+// art are the same blue.
+constexpr unsigned int kColorAccent = RGBA8(24, 166, 248, 255);
+constexpr unsigned int kColorAccentSoft = RGBA8(24, 166, 248, 40);
 constexpr unsigned int kColorText = RGBA8(232, 238, 246, 255);
 constexpr unsigned int kColorMuted = RGBA8(166, 178, 198, 255);
 constexpr unsigned int kColorSuccess = RGBA8(74, 222, 128, 255);
@@ -337,7 +343,7 @@ void draw_button_shape(int x, int y, ButtonSymbol symbol, unsigned int color) {
   switch (symbol) {
   case ButtonSymbol::Circle:
     vita2d_draw_fill_circle(x + 8, y + 8, 8, color);
-    vita2d_draw_fill_circle(x + 8, y + 8, 5, RGBA8(3, 7, 18, 230));
+    vita2d_draw_fill_circle(x + 8, y + 8, 5, RGBA8(5, 10, 18, 230));
     break;
   case ButtonSymbol::Cross:
     vita2d_draw_line(x + 2, y + 2, x + 14, y + 14, color);
@@ -477,21 +483,23 @@ void draw_cloud_body(int x, int y, unsigned int color) {
   vita2d_draw_fill_circle(x + 19.5f, y + 8.5f, 5.5f, color);
 }
 
-void draw_cloud_synced_glyph(int x, int y) {
+void draw_cloud_synced_glyph(int x, int y, unsigned int background) {
   draw_cloud_body(x, y, kColorAccent);
-  // The check is cut out in the panel color; vita2d lines are 1px, so each stroke is tripled
-  // with 1px offsets to read as a ~3px mark on hardware.
-  const unsigned int mark = RGBA8(15, 23, 42, 255);
+  // The check is cut out in the colour of whatever surface the glyph sits on, so it reads as a
+  // hole rather than a dark stroke; vita2d lines are 1px, so each stroke is tripled with 1px
+  // offsets to read as a ~3px mark on hardware.
+  const unsigned int mark = background;
   for (int off = -1; off <= 1; ++off) {
     vita2d_draw_line(x + 9, y + 11 + off, x + 12.5f, y + 14.5f + off, mark);
     vita2d_draw_line(x + 12.5f, y + 14.5f + off, x + 19.5f, y + 7 + off, mark);
   }
 }
 
-void draw_cloud_drive_only_glyph(int x, int y) {
+void draw_cloud_drive_only_glyph(int x, int y, unsigned int background) {
   draw_cloud_body(x, y, kColorPendingDot);
-  // Down arrow: stem plus a stacked-rect arrowhead (vita2d has no filled-triangle primitive).
-  const unsigned int mark = RGBA8(15, 23, 42, 255);
+  // Down arrow: stem plus a stacked-rect arrowhead (vita2d has no filled-triangle primitive),
+  // cut out in the surface colour like the synced check.
+  const unsigned int mark = background;
   vita2d_draw_rectangle(x + 13, y + 3, 3, 7, mark);
   vita2d_draw_rectangle(x + 10, y + 10, 9, 2, mark);
   vita2d_draw_rectangle(x + 12, y + 12, 5, 2, mark);
@@ -810,7 +818,8 @@ void Ui::draw(const UiState &state) {
   vita2d_swap_buffers();
 }
 
-void Ui::draw_presence_glyph(int x, int y, bool on_card, bool in_cloud) {
+void Ui::draw_presence_glyph(int x, int y, bool on_card, bool in_cloud,
+                             unsigned int background) {
   vita2d_texture *glyph = nullptr;
   if (in_cloud) {
     glyph = on_card ? cloud_synced_tex_ : cloud_drive_only_tex_;
@@ -822,9 +831,9 @@ void Ui::draw_presence_glyph(int x, int y, bool on_card, bool in_cloud) {
   } else if (in_cloud) {
     // Primitive fallback if a texture failed to load (there is none for local-only).
     if (on_card) {
-      draw_cloud_synced_glyph(x, y);
+      draw_cloud_synced_glyph(x, y, background);
     } else {
-      draw_cloud_drive_only_glyph(x, y);
+      draw_cloud_drive_only_glyph(x, y, background);
     }
   }
 }
@@ -851,7 +860,7 @@ void Ui::draw_modal_backdrop() {
   } else {
     return;
   }
-  vita2d_draw_rectangle(0, 0, 960, 544, RGBA8(3, 7, 18, 200));
+  vita2d_draw_rectangle(0, 0, 960, 544, RGBA8(5, 10, 18, 200));
 }
 
 int Ui::details_max_scroll(const SlotDetailsState &state) const {
@@ -888,7 +897,7 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
   draw_text(fonts_, context_right - measure_text(kTextSizeSmall, context.c_str()), 32,
             kColorMuted, kTextSizeSmall, context.c_str());
   if (show_presence) {
-    draw_presence_glyph(914, 17, state.snapshot_on_card, state.snapshot_in_cloud);
+    draw_presence_glyph(914, 17, state.snapshot_on_card, state.snapshot_in_cloud, kColorHeader);
   }
 
   // A full timestamp is meaningful here: saves in one game can span several years. Give the
@@ -898,7 +907,7 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
   constexpr int kRightX = 336;
   constexpr int kRightTextWidth = kDetailsPaneWidth;
   vita2d_draw_rectangle(0, 52, kDividerX, 456, kColorPanel);
-  vita2d_draw_rectangle(kDividerX, 52, 960 - kDividerX, 456, RGBA8(15, 23, 42, 255));
+  vita2d_draw_rectangle(kDividerX, 52, 960 - kDividerX, 456, kColorPanelRight);
   vita2d_draw_line(kDividerX, 52, kDividerX, 508, RGBA8(255, 255, 255, 20));
 
   std::string saved_display = "Unknown";
@@ -1041,7 +1050,7 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
     }
   }
 
-  vita2d_draw_rectangle(0, 508, 960, 36, RGBA8(3, 7, 18, 230));
+  vita2d_draw_rectangle(0, 508, 960, 36, RGBA8(5, 10, 18, 230));
   const ButtonSymbol cancel = enter_is_cross ? ButtonSymbol::Circle : ButtonSymbol::Cross;
   const ButtonSymbol primary = enter_is_cross ? ButtonSymbol::Cross : ButtonSymbol::Circle;
   // The overview's per-snapshot actions carry over, with the same button meanings: Select
@@ -1219,7 +1228,7 @@ void Ui::draw_title_grid(const UiState &state) {
 }
 
 void Ui::draw_backup_panel(const UiState &state) {
-  vita2d_draw_rectangle(504, 52, 456, 456, RGBA8(15, 23, 42, 255));
+  vita2d_draw_rectangle(504, 52, 456, 456, kColorPanelRight);
 
   if (state.google_auth_pending && !state.google_user_code.empty()) {
     draw_google_auth_panel(state);
@@ -1438,7 +1447,7 @@ void Ui::draw_status_line(const UiState &state) {
 }
 
 void Ui::draw_footer(const UiState &state) {
-  vita2d_draw_rectangle(0, 508, 960, 36, RGBA8(3, 7, 18, 230));
+  vita2d_draw_rectangle(0, 508, 960, 36, RGBA8(5, 10, 18, 230));
 
   const ButtonSymbol confirm = state.enter_is_cross ? ButtonSymbol::Cross : ButtonSymbol::Circle;
   const ButtonSymbol cancel = state.enter_is_cross ? ButtonSymbol::Circle : ButtonSymbol::Cross;
@@ -1540,7 +1549,7 @@ void Ui::clear_batch_progress() {
 }
 
 void Ui::draw_google_setup_prompt(const UiState &state) {
-  vita2d_draw_rectangle(0, 0, 960, 544, RGBA8(3, 7, 18, 200));
+  vita2d_draw_rectangle(0, 0, 960, 544, RGBA8(5, 10, 18, 200));
 
   constexpr int kBoxX = 116;
   constexpr int kBoxY = 104;

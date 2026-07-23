@@ -154,8 +154,10 @@ private:
   // partial UiState. Shared by draw_busy and prompt_text_input.
   void draw_modal_backdrop();
   // The card/Cloud/both cloud glyph shared by the backup rows and the details header; textures
-  // with a primitive fallback. Draws nothing when both flags are false.
-  void draw_presence_glyph(int x, int y, bool on_card, bool in_cloud);
+  // with a primitive fallback. Draws nothing when both flags are false. background is the surface
+  // the glyph sits on - the fallback cuts its check/arrow out in that colour, and the rows and the
+  // header are different tones.
+  void draw_presence_glyph(int x, int y, bool on_card, bool in_cloud, unsigned int background);
   void draw_header(const UiState &state);
   void draw_title_grid(const UiState &state);
   void draw_backup_panel(const UiState &state);
