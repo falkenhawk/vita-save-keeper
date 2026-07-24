@@ -122,8 +122,21 @@ private:
   void invalidate_save_time(const SaveRecord &restored);
   std::size_t category_count(SaveCategory category) const;
   const SaveRecord *selected_save_record() const;
+  // True when the Homebrew tab's "+ Add folder" tile is the focused cell (selected_save_ sits one
+  // past the visible saves). Only the Homebrew tab grows that extra cell.
+  bool add_folder_tile_focused() const;
   void cancel_restore_confirmation();
   void cancel_delete_confirmation();
+  void cancel_stop_tracking_confirmation();
+  // Directory picker for adding a homebrew data folder. Opens rooted at ux0:data, lists child dirs,
+  // and (Square) tracks the focused one. reload_browser_rows re-lists after a drill/climb; the size
+  // of the focused row is filled in lazily by resolve_browser_size a few frames after it settles.
+  void open_directory_browser();
+  void close_directory_browser();
+  void reload_browser_rows();
+  void browser_track_selected();
+  void schedule_browser_size_resolve();
+  void resolve_browser_size();
   void handle_action_button();
   void create_new_backup();
   // busy_label, when set, names the modal that animates byte progress while the save is hashed
@@ -229,6 +242,10 @@ private:
   std::size_t selected_backup_{};
   bool restore_confirmation_pending_{};
   bool delete_confirmation_pending_{};
+  // Armed by the first Start press on a picker-tracked homebrew entry that has no backups left; a
+  // second Start press then stops tracking it. Cleared by the same navigation/cancel paths as the
+  // other pending confirmations. The RetroArch builtin never arms it (it re-appears every launch).
+  bool stop_tracking_confirmation_pending_{};
   // A snapshot living on card and Drive needs a scope choice instead of a plain second press:
   // Start deletes both sides, Triangle only the Drive copy, Square only the card copy.
   bool delete_scope_prompt_pending_{};
@@ -306,6 +323,12 @@ private:
   bool details_open_pending_{};
   // Details is a separate input/rendering mode. Keeping its state here lets Ui stay I/O-free.
   SlotDetailsState slot_details_;
+  // The add-folder directory picker, another separate input/rendering mode (open gates its branch).
+  DirectoryBrowserState directory_browser_;
+  // Countdown (frames) until the browser's focused row is stat-walked for its size; -1 when idle or
+  // already known. Mirrors pending_time_resolve_frames_, so scrolling the list does not size every
+  // folder it passes.
+  int pending_browser_size_frames_{-1};
   bool enter_is_cross_{true};
   // Device-flow state: while a device code is active the main loop polls Google automatically at
   // the server-provided interval, so connecting only takes one Triangle press plus phone approval.

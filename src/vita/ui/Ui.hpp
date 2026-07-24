@@ -61,6 +61,26 @@ struct SlotDetailsState {
   bool entry_hidden{};
 };
 
+// Directory-picker modal for adding a homebrew data folder to track. Rooted at "ux0:data" and never
+// climbs above it, so a tracked destination always stays on the ux0 filesystem. Rows are the child
+// directories of current_path; each row's size is filled in lazily (debounced) after the selection
+// settles, so browsing a folder full of huge trees does not stat-walk every one at once.
+struct DirectoryBrowserState {
+  bool open{};
+  std::string current_path;  // starts at "ux0:data"; the cancel button climbs back up to it
+  struct Row {
+    std::string name;
+    bool size_known{};
+    std::uint64_t size_bytes{};
+    bool already_tracked{};  // exact path already in a tracked entry or a RetroArch builtin path
+  };
+  std::vector<Row> rows;
+  std::size_t selected{};
+  // Set when the focused folder is over the large-folder threshold and a first Square press asked
+  // for confirmation; any other input clears it, a second Square press then tracks it anyway.
+  bool large_confirm_pending{};
+};
+
 // Grid width of the save panel; D-pad up/down moves by one full row, so the input handler in App
 // must use the same value the renderer lays tiles out with.
 constexpr int kSaveGridColumns = 5;
@@ -102,6 +122,10 @@ struct UiState {
   // consoles use Circle. Primary/cancel symbols in the footer follow it.
   bool enter_is_cross{true};
   const SlotDetailsState *slot_details{};
+  const DirectoryBrowserState *directory_browser{};
+  // The Homebrew tab draws an extra "+ Add folder" tile after the last save; selected_save may then
+  // index one past the visible saves (the tile). Off for every other tab.
+  bool show_add_folder_tile{};
   std::string google_verification_url;
   std::string google_user_code;
   int auth_seconds_left{};
@@ -144,6 +168,9 @@ public:
                                        const std::string &suffix, int max_width = 0) const;
   std::string compose_modal_label(const std::string &prefix, const std::string &name,
                                   const std::string &suffix) const;
+  // Human-readable byte size, shared with the details/browser panes so a status line composed in
+  // App (the large-folder confirmation) formats sizes identically to the on-screen size column.
+  std::string format_size(std::uint64_t bytes) const;
   // Full-screen modal frame for blocking work; safe to call from transfer callbacks because all
   // network requests run on the UI thread. total <= 0 draws an indeterminate sweep.
   // context_above draws a muted line above the modal (the reason the operation is running);
@@ -184,8 +211,15 @@ private:
                          const std::string &status_message, StatusKind status_kind,
                          bool restore_confirmation_pending,
                          bool duplicate_backup_confirmation_pending);
+  // The directory-picker modal; takes the shared status line the same way draw_slot_details does so
+  // the track action's feedback (already tracked, too large, large-folder confirmation) shows here.
+  void draw_directory_browser(const DirectoryBrowserState &state, bool enter_is_cross,
+                              const std::string &status_message, StatusKind status_kind);
   int measure_text(unsigned int size, const char *text) const;
   std::string fit_text(unsigned int size, const std::string &text, int max_width) const;
+  // Ellipsizes from the left ("...ata/retroarch") so a long path keeps its trailing leaf visible,
+  // the mirror of fit_text which keeps the head.
+  std::string fit_text_left(unsigned int size, const std::string &text, int max_width) const;
   std::vector<std::string> wrap_text(unsigned int size, const std::string &text,
                                      int max_width) const;
   std::string fit_quoted_name(const std::string &prefix, const std::string &name,
@@ -211,6 +245,7 @@ private:
   bool has_last_state_{};
   std::size_t title_top_row_{};
   std::size_t backup_top_row_{};
+  std::size_t browser_top_row_{};
   // Marquee state for the focused backup row: which row is scrolling and how many frames it has
   // been focused, so the scroll restarts from the left whenever the selection moves.
   std::size_t marquee_entry_{};

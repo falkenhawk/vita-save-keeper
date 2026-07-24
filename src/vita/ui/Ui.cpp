@@ -247,12 +247,22 @@ std::string truncate_label(const std::string &text, std::size_t max_length) {
   return truncate_utf8_label(text, max_length);
 }
 
+// True when the Homebrew tab's extra "+ Add folder" tile is the focused cell: selected_save sits
+// one past the last visible save (or at 0 when the tab has only the tile). Shared by the grid, the
+// backup pane, and the footer so all three agree on when no real save is selected.
+bool add_folder_tile_focused(const UiState &state) {
+  return state.show_add_folder_tile && state.visible_saves &&
+         state.selected_save >= state.visible_saves->size();
+}
+
 const SaveRecord *selected_visible_record(const UiState &state) {
-  if (!state.visible_saves || state.visible_saves->empty()) {
+  // selected_save can index one past the visible saves on the Homebrew tab (the add-folder tile),
+  // which has no record; every other tab keeps it in range.
+  if (!state.visible_saves || state.selected_save >= state.visible_saves->size()) {
     return nullptr;
   }
   const std::vector<std::size_t> &visible = *state.visible_saves;
-  return &(*state.saves)[visible[state.selected_save % visible.size()]];
+  return &(*state.saves)[visible[state.selected_save]];
 }
 
 std::string title_id_label(const SaveRecord &save) {
@@ -737,6 +747,27 @@ std::string Ui::fit_text(unsigned int size, const std::string &text, int max_wid
   return "...";
 }
 
+std::string Ui::fit_text_left(unsigned int size, const std::string &text, int max_width) const {
+  if (measure_text(size, text.c_str()) <= max_width) {
+    return text;
+  }
+  // Drop whole UTF-8 codepoints off the front until "..." plus the surviving tail fits, so the
+  // trailing directory name (the part that identifies the folder) always stays on screen.
+  std::string cut = text;
+  while (!cut.empty()) {
+    std::size_t first = 1;
+    while (first < cut.size() && (static_cast<unsigned char>(cut[first]) & 0xC0) == 0x80) {
+      ++first;
+    }
+    cut.erase(0, first);
+    const std::string candidate = "..." + cut;
+    if (measure_text(size, candidate.c_str()) <= max_width) {
+      return candidate;
+    }
+  }
+  return "...";
+}
+
 std::vector<std::string> Ui::wrap_text(unsigned int size, const std::string &text,
                                        int max_width) const {
   std::vector<std::string> lines;
@@ -852,6 +883,8 @@ std::string Ui::compose_modal_label(const std::string &prefix, const std::string
   return fit_quoted_name(prefix, name, suffix, kTextSizeNormal, 400 - 48);
 }
 
+std::string Ui::format_size(std::uint64_t bytes) const { return format_bytes(bytes); }
+
 vita2d_texture *Ui::load_icon_texture(const std::string &path) {
   if (path.empty()) {
     return nullptr;
@@ -874,7 +907,10 @@ void Ui::draw(const UiState &state) {
   vita2d_start_drawing();
   vita2d_clear_screen();
 
-  if (state.slot_details && state.slot_details->open) {
+  if (state.directory_browser && state.directory_browser->open) {
+    draw_directory_browser(*state.directory_browser, state.enter_is_cross, state.status_message,
+                           state.status_kind);
+  } else if (state.slot_details && state.slot_details->open) {
     draw_slot_details(*state.slot_details, state.enter_is_cross, state.status_message,
                       state.status_kind, state.restore_confirmation_pending,
                       state.duplicate_backup_confirmation_pending);
@@ -922,7 +958,10 @@ void Ui::draw_modal_backdrop() {
   if (!has_last_state_) {
     return;
   }
-  if (last_state_.slot_details && last_state_.slot_details->open) {
+  if (last_state_.directory_browser && last_state_.directory_browser->open) {
+    draw_directory_browser(*last_state_.directory_browser, last_state_.enter_is_cross,
+                           last_state_.status_message, last_state_.status_kind);
+  } else if (last_state_.slot_details && last_state_.slot_details->open) {
     draw_slot_details(*last_state_.slot_details, last_state_.enter_is_cross,
                       last_state_.status_message, last_state_.status_kind,
                       last_state_.restore_confirmation_pending,
@@ -1184,6 +1223,111 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
   }
 }
 
+void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_is_cross,
+                                const std::string &status_message, StatusKind status_kind) {
+  // Header band matching the details screen; the current path sits at the right, ellipsized from
+  // the left so the folder you are inside stays legible at its trailing end.
+  vita2d_draw_rectangle(0, 0, 960, 52, kColorHeader);
+  vita2d_draw_line(0, 52, 960, 52, RGBA8(255, 255, 255, 20));
+  draw_text(fonts_, 18, 34, kColorText, kTextSizeTitle, "Add folder to back up");
+  const std::string path = fit_text_left(kTextSizeSmall, state.current_path, 520);
+  draw_text(fonts_, 942 - measure_text(kTextSizeSmall, path.c_str()), 32, kColorMuted,
+            kTextSizeSmall, path.c_str());
+
+  vita2d_draw_rectangle(0, 52, 960, 456, kColorPanel);
+
+  constexpr int kListX = 24;
+  constexpr int kListW = 912;  // spans 24..936
+  constexpr int kRowPitch = 42;
+  constexpr int kRowH = 36;
+  constexpr int kListTop = 76;
+  constexpr std::size_t kVisibleRows = 10;
+  constexpr int kSizeRight = 912;
+
+  if (state.rows.empty()) {
+    draw_text(fonts_, kListX + 16, kListTop + 24, kColorMuted, kTextSizeSmall, "no subfolders");
+  } else {
+    browser_top_row_ = grid_window_top_row(browser_top_row_, state.selected, state.rows.size(), 1,
+                                           kVisibleRows);
+    const std::size_t window = browser_top_row_;
+    const std::size_t visible_count =
+        std::min(kVisibleRows, state.rows.size() - std::min(window, state.rows.size()));
+    int y = kListTop;
+    for (std::size_t i = 0; i < visible_count; ++i) {
+      const DirectoryBrowserState::Row &row = state.rows[window + i];
+      const bool focused = (window + i) == state.selected;
+      vita2d_draw_rectangle(kListX, y, kListW, kRowH,
+                            focused ? kColorAccentSoft : RGBA8(255, 255, 255, 10));
+      if (focused) {
+        vita2d_draw_rectangle(kListX, y, 4, kRowH, kColorAccent);
+      }
+      const int text_y = y + 24;
+      // Right column: "tracked" for a folder already covered by an entry (not selectable for a new
+      // one), otherwise its size ("..." until the debounced stat-walk fills it in).
+      std::string right_text;
+      unsigned int right_color;
+      if (row.already_tracked) {
+        right_text = "tracked";
+        right_color = kColorIdleDot;
+      } else {
+        right_text = row.size_known ? format_bytes(row.size_bytes) : "...";
+        right_color = focused ? kColorText : kColorMuted;
+      }
+      const int right_w = measure_text(kTextSizeSmall, right_text.c_str());
+      draw_text(fonts_, kSizeRight - right_w, text_y, right_color, kTextSizeSmall,
+                right_text.c_str());
+      const unsigned int name_color =
+          row.already_tracked ? kColorIdleDot : (focused ? kColorText : kColorMuted);
+      const int name_max = kSizeRight - right_w - 16 - (kListX + 16);
+      const std::string name = fit_text(kTextSizeSmall, row.name, std::max(40, name_max));
+      draw_text(fonts_, kListX + 16, text_y, name_color, kTextSizeSmall, name.c_str());
+      y += kRowPitch;
+    }
+    if (state.rows.size() > kVisibleRows) {
+      constexpr int kTrackY = kListTop;
+      const int track_h = static_cast<int>(kVisibleRows) * kRowPitch;
+      vita2d_draw_rectangle(946, kTrackY, 3, track_h, RGBA8(255, 255, 255, 24));
+      const int thumb_h = std::max(24, track_h * static_cast<int>(kVisibleRows) /
+                                           static_cast<int>(state.rows.size()));
+      const int max_top = static_cast<int>(state.rows.size() - kVisibleRows);
+      const int thumb_y =
+          kTrackY + (track_h - thumb_h) * static_cast<int>(window) / std::max(1, max_top);
+      vita2d_draw_rectangle(946, thumb_y, 3, thumb_h, kColorAccent);
+    }
+  }
+
+  vita2d_draw_rectangle(0, 508, 960, 36, RGBA8(5, 10, 18, 230));
+  const ButtonSymbol cancel = enter_is_cross ? ButtonSymbol::Circle : ButtonSymbol::Cross;
+  const ButtonSymbol primary = enter_is_cross ? ButtonSymbol::Cross : ButtonSymbol::Circle;
+  const bool at_root = state.current_path == "ux0:data";
+  const DirectoryBrowserState::Row *focused_row =
+      state.selected < state.rows.size() ? &state.rows[state.selected] : nullptr;
+  std::vector<HintSpec> hints;
+  hints.push_back({cancel, at_root ? "Close" : "Up", nullptr, nullptr});
+  hints.push_back({ButtonSymbol::Triangle, "Close", nullptr, nullptr});
+  if (focused_row && !focused_row->already_tracked) {
+    hints.push_back({ButtonSymbol::Square, "Track folder", nullptr, nullptr});
+  }
+  if (focused_row) {
+    hints.push_back({primary, "Open", nullptr, nullptr});
+  }
+  const int hints_left =
+      draw_hints_right_aligned(fonts_, hints.data(), static_cast<int>(hints.size()));
+
+  if (!status_message.empty()) {
+    unsigned int color = kColorMuted;
+    if (state.large_confirm_pending) {
+      color = kColorAccent;
+    } else if (status_kind == StatusKind::Success) {
+      color = kColorSuccess;
+    } else if (status_kind == StatusKind::Error) {
+      color = kColorError;
+    }
+    draw_text(fonts_, 18, 531, color, kTextSizeSmall,
+              fit_text(kTextSizeSmall, status_message, std::max(120, hints_left - 48)).c_str());
+  }
+}
+
 void Ui::draw_header(const UiState &state) {
   vita2d_draw_rectangle(0, 0, 960, 52, kColorHeader);
   vita2d_draw_line(0, 52, 960, 52, RGBA8(255, 255, 255, 20));
@@ -1262,11 +1406,15 @@ void Ui::draw_title_grid(const UiState &state) {
   // 108 splits the vertical slack left by the 10px row gaps: ~15px under the tab underline,
   // ~18px above the footer, instead of pooling it all at the bottom.
   constexpr int kStartY = 108;
-  const std::size_t selected = visible.empty() ? 0 : state.selected_save % visible.size();
-  title_top_row_ = grid_window_top_row(title_top_row_, selected, visible.size(), kColumns, kRows);
+  // The Homebrew tab appends one "+ Add folder" cell after the last save; it is a selectable cell
+  // (index == visible.size()) but not a save, so the grid window and the wrap both size to it.
+  const std::size_t cell_count = visible.size() + (state.show_add_folder_tile ? 1 : 0);
+  const std::size_t selected = cell_count == 0 ? 0 : state.selected_save % cell_count;
+  title_top_row_ = grid_window_top_row(title_top_row_, selected, cell_count, kColumns, kRows);
   const std::size_t first_index = title_top_row_ * kColumns;
 
-  if (!visible.empty()) {
+  // Only a real save carries a position count; the add-folder tile shows none.
+  if (!visible.empty() && selected < visible.size()) {
     const std::string count =
         std::to_string(selected + 1) + "/" + std::to_string(visible.size());
     draw_text(fonts_, 512 - 16 - measure_text(kTextSizeSmall, count.c_str()), 84,
@@ -1278,7 +1426,7 @@ void Ui::draw_title_grid(const UiState &state) {
       const std::size_t index = first_index + static_cast<std::size_t>(row * kColumns + col);
       const int x = kStartX + col * (kTileSize + kGapX);
       const int y = kStartY + row * (kTileSize + kGapY);
-      if (index >= visible.size()) {
+      if (index >= cell_count) {
         // Empty slot: a faint on-ramp navy (hue 216, one notch above the pane) instead of a white
         // wash, toned down so the raised frame on filled tiles is what reads as "a game is here".
         vita2d_draw_rectangle(x, y, kTileSize, kTileSize, RGBA8(19, 28, 42, 255));
@@ -1286,6 +1434,24 @@ void Ui::draw_title_grid(const UiState &state) {
       }
 
       const bool is_selected = index == selected;
+      if (index == visible.size()) {
+        // The add-folder tile: same footprint and selection border as a save, a muted face, a "+"
+        // mark, and a caption instead of an icon. Reached only when show_add_folder_tile is set,
+        // since otherwise cell_count == visible.size() and this index is unreachable.
+        vita2d_draw_rectangle(x - 3, y - 3, kTileSize + 6, kTileSize + 6,
+                              is_selected ? kColorAccent : RGBA8(255, 255, 255, 14));
+        vita2d_draw_rectangle(x, y, kTileSize, kTileSize,
+                              is_selected ? RGBA8(25, 45, 64, 255) : RGBA8(255, 255, 255, 10));
+        const unsigned int mark = is_selected ? kColorText : kColorMuted;
+        const int plus_cx = x + kTileSize / 2;
+        const int plus_cy = y + kTileSize / 2 - 8;
+        vita2d_draw_rectangle(plus_cx - 13, plus_cy - 2, 26, 4, mark);
+        vita2d_draw_rectangle(plus_cx - 2, plus_cy - 13, 4, 26, mark);
+        const char *caption = "Add folder";
+        draw_text(fonts_, x + (kTileSize - measure_text(kTextSizeTiny, caption)) / 2,
+                  y + kTileSize - 12, mark, kTextSizeTiny, caption);
+        continue;
+      }
       const SaveRecord &save = saves[visible[index]];
       vita2d_draw_rectangle(x - 3, y - 3, kTileSize + 6, kTileSize + 6,
                             is_selected ? kColorAccent : RGBA8(255, 255, 255, 14));
@@ -1316,9 +1482,10 @@ void Ui::draw_title_grid(const UiState &state) {
     }
   }
 
-  if (visible.empty()) {
+  if (cell_count == 0) {
     // Selected-save details live at the top of the right pane; the grid area only needs the
-    // empty states.
+    // empty states. The add-folder tile keeps cell_count non-zero, so this never fires while it
+    // is the only cell on the Homebrew tab.
     if (saves.empty()) {
       draw_text(fonts_, 120, 280, kColorText, kTextSizeNormal, "No saves found");
       draw_text(fonts_, 120, 306, kColorMuted, kTextSizeSmall,
@@ -1343,8 +1510,12 @@ void Ui::draw_backup_panel(const UiState &state) {
 
   const SaveRecord *save = selected_visible_record(state);
   if (!save) {
+    // The add-folder tile has no backups; the pane stays empty save for a one-line prompt, rather
+    // than the "no saves at all" copy.
     draw_text(fonts_, 532, 96, kColorMuted, kTextSizeSmall,
-              "Install or create saves, then reopen Save Keeper.");
+              add_folder_tile_focused(state)
+                  ? "Pick a data folder under ux0:data to start backing it up."
+                  : "Install or create saves, then reopen Save Keeper.");
     draw_status_line(state);
     return;
   }
@@ -1613,6 +1784,12 @@ void Ui::draw_footer(const UiState &state) {
   if (state.duplicate_backup_confirmation_pending) {
     const HintSpec hints[] = {{cancel, "Cancel"}, {confirm, "Create New Backup Anyway"}};
     draw_hints_right_aligned(fonts_, hints, 2);
+    return;
+  }
+  if (add_folder_tile_focused(state)) {
+    // The add-folder tile has no backup menu; the action button opens the directory browser.
+    const HintSpec hints[] = {{confirm, "Add folder"}};
+    draw_hints_right_aligned(fonts_, hints, 1);
     return;
   }
 

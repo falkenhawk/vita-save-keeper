@@ -30,7 +30,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <dirent.h>
 #include <new>
+#include <set>
 #include <string>
 #include <sys/stat.h>
 #include <unordered_set>
@@ -447,6 +449,33 @@ std::string drive_folder_name_for(const std::string &save_id) {
     folder_name = "unknown-save";
   }
   return folder_name;
+}
+
+// Sorted names of the immediate child directories of root_path (dirs only, "." and ".." skipped).
+// The core scanner has an equivalent (SaveScanner.cpp's list_direct_child_directories) but it is
+// file-private, so the directory browser keeps its own. Names come straight from readdir and so can
+// never contain a path separator; the browser builds child paths as current + "/" + name, which is
+// what keeps it from ever escaping above its ux0:data root.
+std::vector<std::string> list_child_directories(const std::string &root_path) {
+  std::vector<std::string> directories;
+  DIR *dir = opendir(root_path.c_str());
+  if (!dir) {
+    return directories;
+  }
+  while (dirent *entry = readdir(dir)) {
+    const std::string name = entry->d_name;
+    if (name == "." || name == "..") {
+      continue;
+    }
+    const std::string child_path = root_path + "/" + name;
+    struct stat info {};
+    if (stat(child_path.c_str(), &info) == 0 && S_ISDIR(info.st_mode)) {
+      directories.push_back(name);
+    }
+  }
+  closedir(dir);
+  std::sort(directories.begin(), directories.end());
+  return directories;
 }
 
 } // namespace
@@ -902,10 +931,12 @@ void App::append_tracked_save_records() {
 }
 
 void App::queue_selected_save_time_read() {
-  if (visible_saves_.empty()) {
+  // An empty tab or the add-folder tile (selected_save_ one past the last save) has nothing to
+  // mount.
+  if (selected_save_ >= visible_saves_.size()) {
     return;
   }
-  const SaveRecord &save = saves_[visible_saves_[selected_save_ % visible_saves_.size()]];
+  const SaveRecord &save = saves_[visible_saves_[selected_save_]];
   if (!save.save_time_requires_mount ||
       std::find(pending_time_reads_.begin(), pending_time_reads_.end(), save.id) !=
           pending_time_reads_.end()) {
@@ -922,9 +953,9 @@ bool App::drain_pending_time_read() {
   // The focused save is the one showing a spinner, so it is read first however long the queue
   // behind it is; after it, the most recently passed saves come before older ones.
   const std::string focused_id =
-      visible_saves_.empty()
+      selected_save_ >= visible_saves_.size()
           ? std::string()
-          : saves_[visible_saves_[selected_save_ % visible_saves_.size()]].id;
+          : saves_[visible_saves_[selected_save_]].id;
   auto next = std::find(pending_time_reads_.begin(), pending_time_reads_.end(), focused_id);
   if (next == pending_time_reads_.end()) {
     // Most recently passed first, not oldest first: after a sweep the newest entries are the
@@ -1118,16 +1149,28 @@ void App::rebuild_visible_saves() {
       visible_saves_.push_back(i);
     }
   }
-  if (selected_save_ >= visible_saves_.size()) {
+  // The Homebrew tab has one extra selectable cell after its saves (the "+ Add folder" tile), so a
+  // focus resting on it (selected_save_ == visible_saves_.size()) is valid there and must survive a
+  // rebuild - e.g. leaving and returning to the tab; every other tab tops out at its last save.
+  const std::size_t cell_count =
+      visible_saves_.size() + (category_ == SaveCategory::Homebrew ? 1 : 0);
+  if (selected_save_ >= cell_count) {
     selected_save_ = 0;
   }
 }
 
 const SaveRecord *App::selected_save_record() const {
-  if (visible_saves_.empty()) {
+  // On the Homebrew tab selected_save_ can reach visible_saves_.size() - the "+ Add folder" tile,
+  // which has no record - so a plain bounds check (not a modulo) is what returns nullptr there and
+  // for an empty tab alike. Every caller already treats nullptr as "no save".
+  if (selected_save_ >= visible_saves_.size()) {
     return nullptr;
   }
-  return &saves_[visible_saves_[selected_save_ % visible_saves_.size()]];
+  return &saves_[visible_saves_[selected_save_]];
+}
+
+bool App::add_folder_tile_focused() const {
+  return category_ == SaveCategory::Homebrew && selected_save_ >= visible_saves_.size();
 }
 
 void App::refresh_local_backups() {
@@ -1148,10 +1191,15 @@ void App::refresh_local_backups() {
 
 void App::move_selected_save(int delta) {
   const std::size_t previous = selected_save_;
-  selected_save_ = move_selection(selected_save_, visible_saves_.size(), delta);
+  // The Homebrew tab has one extra selectable cell after the last save: the "+ Add folder" tile.
+  // The grid renderer and grid-window math size to the same count, so wrap lands on it too.
+  const std::size_t cell_count =
+      visible_saves_.size() + (category_ == SaveCategory::Homebrew ? 1 : 0);
+  selected_save_ = move_selection(selected_save_, cell_count, delta);
   if (selected_save_ != previous) {
     cancel_restore_confirmation();
     cancel_delete_confirmation();
+    cancel_stop_tracking_confirmation();
     cancel_sync_all_confirmation();
     cancel_duplicate_backup_confirmation();
     // A different save means a different backup list; focus its "New Backup" entry. Any status
@@ -1170,7 +1218,9 @@ void App::move_selected_category(int delta) {
   for (int step = 0; step < kSaveCategoryCount; ++step) {
     index = (index + delta + kSaveCategoryCount) % kSaveCategoryCount;
     const SaveCategory candidate = static_cast<SaveCategory>(index);
-    if (category_count(candidate) == 0) {
+    // The Homebrew tab always carries its "+ Add folder" tile, so it stays reachable even with no
+    // tracked saves yet; every other empty tab is skipped so L/R always lands on content.
+    if (category_count(candidate) == 0 && candidate != SaveCategory::Homebrew) {
       continue;
     }
     if (candidate == category_) {
@@ -1180,6 +1230,7 @@ void App::move_selected_category(int delta) {
     category_ = candidate;
     cancel_restore_confirmation();
     cancel_delete_confirmation();
+    cancel_stop_tracking_confirmation();
     cancel_sync_all_confirmation();
     cancel_duplicate_backup_confirmation();
     selected_save_ = category_selection_[static_cast<std::size_t>(category_)];
@@ -1201,6 +1252,7 @@ void App::move_selected_backup(int delta) {
     details_open_pending_ = false;
     cancel_restore_confirmation();
     cancel_delete_confirmation();
+    cancel_stop_tracking_confirmation();
     cancel_sync_all_confirmation();
     // The "press again to force" state refers to the New Backup entry; leaving it must not arm a
     // silent force for later.
@@ -1220,6 +1272,13 @@ void App::cancel_delete_confirmation() {
     delete_confirmation_pending_ = false;
     delete_scope_prompt_pending_ = false;
     set_status(StatusKind::Info, "Delete canceled.");
+  }
+}
+
+void App::cancel_stop_tracking_confirmation() {
+  if (stop_tracking_confirmation_pending_) {
+    stop_tracking_confirmation_pending_ = false;
+    set_status(StatusKind::Info, "Stop tracking canceled.");
   }
 }
 
@@ -1296,6 +1355,70 @@ void App::handle_delete_button() {
   const SaveRecord *selected = selected_save_record();
   if (!selected) {
     set_status(StatusKind::Info, "No save selected.");
+    return;
+  }
+  // A picker-tracked homebrew entry with no backups left has nothing to delete; Start stops tracking
+  // it instead (removing the config entry only - existing backups are never auto-dropped). The
+  // RetroArch builtin is excluded: it re-materializes every launch, so hiding is its tool, not this.
+  // While it still has backups the ordinary delete flow below runs unchanged.
+  const bool stop_trackable =
+      !selected->tracked_paths.empty() && selected->id != "data-retroarch";
+  if (stop_trackable && backup_count() == 0) {
+    const std::string name = selected->display_name;
+    if (!stop_tracking_confirmation_pending_) {
+      restore_confirmation_pending_ = false;
+      delete_confirmation_pending_ = false;
+      delete_scope_prompt_pending_ = false;
+      stop_tracking_confirmation_pending_ = true;
+      set_status(StatusKind::Info,
+                 status_with_name("Stop tracking ", name, "? Press Start again."));
+      return;
+    }
+    stop_tracking_confirmation_pending_ = false;
+    if (tracked_config_load_failed_) {
+      set_status(StatusKind::Info,
+                 "Cannot update tracked-folders.json - fix or delete it first.");
+      return;
+    }
+    const std::string id = selected->id;
+    std::size_t removed_at = tracked_config_.entries.size();
+    for (std::size_t i = 0; i < tracked_config_.entries.size(); ++i) {
+      if (tracked_config_.entries[i].id == id) {
+        removed_at = i;
+        break;
+      }
+    }
+    if (removed_at == tracked_config_.entries.size()) {
+      // A stop-trackable id is always a config entry; guard anyway so a mismatch never writes.
+      set_status(StatusKind::Info, "Not a tracked folder.");
+      return;
+    }
+    const TrackedFolderEntry saved = tracked_config_.entries[removed_at];
+    tracked_config_.entries.erase(tracked_config_.entries.begin() +
+                                  static_cast<long>(removed_at));
+    std::string write_error;
+    if (!write_tracked_folders_json_atomic(kTrackedFoldersPath, tracked_config_, &write_error)) {
+      // The write is atomic, so the file on disk is untouched; put the entry back so memory matches.
+      tracked_config_.entries.insert(
+          tracked_config_.entries.begin() + static_cast<long>(removed_at), saved);
+      set_status(StatusKind::Error, "Could not save tracked-folders.json.");
+      return;
+    }
+    for (std::size_t i = 0; i < saves_.size(); ++i) {
+      if (saves_[i].id == id) {
+        saves_.erase(saves_.begin() + static_cast<long>(i));
+        break;
+      }
+    }
+    // Keep the cursor where the entry was; if it was the last save, land on the add-folder tile.
+    const std::size_t focus_target = selected_save_;
+    rebuild_visible_saves();
+    selected_save_ = std::min(focus_target, visible_saves_.size());
+    category_selection_[static_cast<std::size_t>(category_)] = selected_save_;
+    schedule_selected_save_time_resolve();
+    refresh_local_backups();
+    refresh_remote_backups_view();
+    set_status(StatusKind::Success, status_with_name("Stopped tracking ", name, "."));
     return;
   }
   const BackupRow *row = selected_backup_row();
@@ -1453,6 +1576,11 @@ void App::perform_scoped_delete(bool delete_local, bool delete_remote) {
 void App::handle_action_button() {
   if (sync_all_confirmation_pending_) {
     run_sync_all();
+    return;
+  }
+  // The Homebrew "+ Add folder" tile has no save record; the action button opens the picker.
+  if (add_folder_tile_focused()) {
+    open_directory_browser();
     return;
   }
   const SaveRecord *selected = selected_save_record();
@@ -2566,6 +2694,7 @@ void App::request_save_details() {
   // press across screens.
   restore_confirmation_pending_ = false;
   duplicate_backup_confirmation_pending_ = false;
+  stop_tracking_confirmation_pending_ = false;
   clear_status();
   const BackupRow *row = selected_backup_row();
   const SaveRecord *save = selected_save_record();
@@ -3035,6 +3164,155 @@ void App::toggle_entry_hidden() {
                         : status_with_name("Unhidden ", name, "."));
 }
 
+void App::open_directory_browser() {
+  directory_browser_ = {};
+  directory_browser_.open = true;
+  directory_browser_.current_path = "ux0:data";
+  reload_browser_rows();
+  clear_status();
+}
+
+void App::close_directory_browser() {
+  directory_browser_.open = false;
+  directory_browser_.rows.clear();
+  directory_browser_.large_confirm_pending = false;
+  pending_browser_size_frames_ = -1;
+  // Drop any browser feedback so a stale "Already tracked." or large-folder prompt does not follow
+  // back to the overview; a successful track sets its own status after this returns.
+  clear_status();
+}
+
+void App::reload_browser_rows() {
+  // Paths already covered by an entry - every config entry path plus the RetroArch builtin's live
+  // directories - pulled straight from saves_ so the "tracked" tag always matches what is tracked.
+  std::unordered_set<std::string> tracked_paths;
+  for (const SaveRecord &save : saves_) {
+    for (const TrackedPath &tracked : save.tracked_paths) {
+      tracked_paths.insert(tracked.path);
+    }
+  }
+  directory_browser_.rows.clear();
+  directory_browser_.selected = 0;
+  directory_browser_.large_confirm_pending = false;
+  for (const std::string &name : list_child_directories(directory_browser_.current_path)) {
+    DirectoryBrowserState::Row row;
+    row.name = name;
+    row.already_tracked =
+        tracked_paths.count(directory_browser_.current_path + "/" + name) != 0;
+    directory_browser_.rows.push_back(std::move(row));
+  }
+  schedule_browser_size_resolve();
+}
+
+void App::schedule_browser_size_resolve() {
+  // Debounce the stat-walk until the focused row settles, mirroring the save-time resolve, so
+  // scrolling the list does not size every folder it passes. A row already sized needs no re-walk.
+  if (directory_browser_.selected >= directory_browser_.rows.size() ||
+      directory_browser_.rows[directory_browser_.selected].size_known) {
+    pending_browser_size_frames_ = -1;
+    return;
+  }
+  pending_browser_size_frames_ = kSaveTimeResolveDelayFrames;
+}
+
+void App::resolve_browser_size() {
+  if (directory_browser_.selected >= directory_browser_.rows.size()) {
+    return;
+  }
+  DirectoryBrowserState::Row &row = directory_browser_.rows[directory_browser_.selected];
+  if (row.size_known) {
+    return;
+  }
+  bool ok = false;
+  const std::uint64_t bytes =
+      compute_folder_size(directory_browser_.current_path + "/" + row.name, &ok);
+  if (ok) {
+    row.size_bytes = bytes;
+    row.size_known = true;
+  }
+}
+
+void App::browser_track_selected() {
+  DirectoryBrowserState &browser = directory_browser_;
+  if (browser.selected >= browser.rows.size()) {
+    return;
+  }
+  DirectoryBrowserState::Row &row = browser.rows[browser.selected];
+  if (row.already_tracked) {
+    set_status(StatusKind::Info, "Already tracked.");
+    return;
+  }
+  const std::string full_path = browser.current_path + "/" + row.name;
+  if (!row.size_known) {
+    // The debounce usually has this already; compute inline otherwise, since a stat-walk is fast
+    // for the common case and there is no cheaper way to enforce the size limits below.
+    bool ok = false;
+    const std::uint64_t bytes = compute_folder_size(full_path, &ok);
+    if (ok) {
+      row.size_bytes = bytes;
+      row.size_known = true;
+    }
+  }
+  constexpr std::uint64_t kMebibyte = 1024ULL * 1024ULL;
+  // The ZIP writer has no zip64; a file or the whole archive is capped at 4 GB (BackupArchive.cpp
+  // measure_file), so refuse a folder that would not fit with room to spare for headers.
+  if (row.size_known && row.size_bytes > 3800ULL * kMebibyte) {
+    set_status(StatusKind::Error, "Too large to back up (over 3.8 GB).");
+    return;
+  }
+  if (row.size_known && row.size_bytes > 512ULL * kMebibyte && !browser.large_confirm_pending) {
+    browser.large_confirm_pending = true;
+    set_status(StatusKind::Info, "Large folder (" + ui_.format_size(row.size_bytes) +
+                                     ") - press Square again to track it anyway.");
+    return;
+  }
+  if (tracked_config_load_failed_) {
+    // The config could not be read whole this run, so writing it back would truncate it; refuse.
+    set_status(StatusKind::Info,
+               "Cannot update tracked-folders.json - fix or delete it first.");
+    return;
+  }
+  // Seed the id allocator with everything that could collide: existing config ids, every id already
+  // in saves_ (the RetroArch builtin and any savedata homebrew), and the reserved builtin id - so a
+  // folder literally named "retroarch" can never mint "data-retroarch" and be silently dropped.
+  std::set<std::string> taken_ids;
+  for (const TrackedFolderEntry &entry : tracked_config_.entries) {
+    taken_ids.insert(entry.id);
+  }
+  for (const SaveRecord &save : saves_) {
+    taken_ids.insert(save.id);
+  }
+  taken_ids.insert("data-retroarch");
+  const std::string new_id = make_tracked_entry_id(row.name, taken_ids);
+  const std::string name = row.name;
+
+  TrackedFolderEntry entry;
+  entry.id = new_id;
+  entry.title = name;
+  entry.paths = {{"", full_path}};  // one path, entries at the archive root
+  tracked_config_.entries.push_back(entry);
+  std::string write_error;
+  if (!write_tracked_folders_json_atomic(kTrackedFoldersPath, tracked_config_, &write_error)) {
+    // Atomic write means the file on disk was never touched; drop the entry so memory matches it.
+    tracked_config_.entries.pop_back();
+    set_status(StatusKind::Error, "Could not save tracked-folders.json.");
+    return;
+  }
+  // Fold the new entry into saves_ (idempotent - only the new id is materialized and time-resolved),
+  // re-sort, focus it, and leave the browser for the overview.
+  append_tracked_save_records();
+  apply_sort_and_rebuild();
+  refocus_selection_by_id(new_id);
+  // apply_sort_and_rebuild refreshed the backup panel for whatever it focused first (index 0), so
+  // re-point it at the entry the refocus above actually landed on, the way move_selected_save does.
+  selected_backup_ = 0;
+  schedule_selected_save_time_resolve();
+  refresh_local_backups();
+  refresh_remote_backups_view();
+  close_directory_browser();
+  set_status(StatusKind::Success, status_with_name("Now tracking ", name, "."));
+}
+
 void App::cancel_sync_all_confirmation() {
   if (sync_all_confirmation_pending_) {
     sync_all_confirmation_pending_ = false;
@@ -3302,7 +3580,9 @@ int App::run() {
   }
   // Local backups rank here already; Drive additions re-sort after the index syncs.
   apply_save_sort(&saves_, sort_mode_, newest_backup_by_folder());
-  // Open on the first tab that actually has saves so the app never starts on an empty grid.
+  // Open on the first tab that actually has saves; if none do, fall back to Homebrew so its
+  // "+ Add folder" tile gives the user a starting point instead of a permanently empty grid.
+  category_ = SaveCategory::Homebrew;
   for (int i = 0; i < kSaveCategoryCount; ++i) {
     if (category_count(static_cast<SaveCategory>(i)) > 0) {
       category_ = static_cast<SaveCategory>(i);
@@ -3548,6 +3828,74 @@ int App::run() {
       continue;
     }
 
+    // The add-folder directory picker is its own input/rendering mode, like details: it takes over
+    // the screen and the selection cannot move behind it. Rooted at ux0:data, the cancel button
+    // climbs back up a level at a time and only closes at the root, so a tracked destination can
+    // never end up outside ux0.
+    if (directory_browser_.open) {
+      DirectoryBrowserState &browser = directory_browser_;
+      const std::size_t row_count = browser.rows.size();
+      // Any input but a repeat Square abandons a pending large-folder confirmation, the same way a
+      // second-press confirmation clears in the overview.
+      if ((pressed & ~static_cast<unsigned int>(SCE_CTRL_SQUARE)) != 0) {
+        browser.large_confirm_pending = false;
+      }
+      if (row_count > 0 && (pressed & SCE_CTRL_UP) != 0) {
+        browser.selected = move_selection(browser.selected, row_count, -1);
+        schedule_browser_size_resolve();
+      }
+      if (row_count > 0 && (pressed & SCE_CTRL_DOWN) != 0) {
+        browser.selected = move_selection(browser.selected, row_count, 1);
+        schedule_browser_size_resolve();
+      }
+      bool rows_changed = false;
+      if ((pressed & backup_button) != 0 && browser.selected < browser.rows.size()) {
+        browser.current_path += "/" + browser.rows[browser.selected].name;
+        reload_browser_rows();
+        rows_changed = true;
+      }
+      if (!rows_changed && (pressed & cancel_button) != 0) {
+        if (browser.current_path == "ux0:data") {
+          close_directory_browser();
+        } else {
+          // Names never contain a separator, so the last '/' is always the parent boundary; the
+          // root guard above means this only runs on paths strictly below ux0:data.
+          browser.current_path.erase(browser.current_path.rfind('/'));
+          reload_browser_rows();
+        }
+      }
+      if (directory_browser_.open && (pressed & SCE_CTRL_TRIANGLE) != 0) {
+        close_directory_browser();
+      }
+      if (directory_browser_.open && !rows_changed && (pressed & SCE_CTRL_SQUARE) != 0) {
+        browser_track_selected();
+      }
+      if (!directory_browser_.open) {
+        // Closed this frame (cancel at root, Triangle, or a completed track); skip the partial
+        // browser draw and let the next iteration render the overview with a full UiState.
+        previous_buttons = buttons;
+        sceKernelDelayThread(kFrameDelayUs);
+        continue;
+      }
+      // Fill the focused row's size once the selection settles, then repaint.
+      if (pending_browser_size_frames_ > 0) {
+        --pending_browser_size_frames_;
+      } else if (pending_browser_size_frames_ == 0) {
+        pending_browser_size_frames_ = -1;
+        resolve_browser_size();
+      }
+
+      UiState browser_ui;
+      browser_ui.enter_is_cross = enter_is_cross_;
+      browser_ui.directory_browser = &directory_browser_;
+      browser_ui.status_message = status_message_;
+      browser_ui.status_kind = status_kind_;
+      ui_.draw(browser_ui);
+      previous_buttons = buttons;
+      sceKernelDelayThread(kFrameDelayUs);
+      continue;
+    }
+
     // Any input other than the Triangle press itself cancels a deferred details open, so a change
     // of mind (or moving to another save) never pops the screen open once the time resolves. The
     // right stick browses backups below and cancels it too, via move_selected_backup.
@@ -3610,6 +3958,7 @@ int App::run() {
     if ((pressed & cancel_button) != 0) {
       cancel_restore_confirmation();
       cancel_delete_confirmation();
+      cancel_stop_tracking_confirmation();
       cancel_sync_all_confirmation();
       cancel_duplicate_backup_confirmation();
       cancel_google_auth();
@@ -3738,6 +4087,9 @@ int App::run() {
     ui_state.duplicate_backup_confirmation_pending = duplicate_backup_confirmation_pending_;
     ui_state.enter_is_cross = enter_is_cross_;
     ui_state.slot_details = &slot_details_;
+    // The Homebrew tab carries an extra "+ Add folder" tile after the last save; every other tab
+    // stops at its saves.
+    ui_state.show_add_folder_tile = category_ == SaveCategory::Homebrew;
     ui_state.google_connected = google_connected_;
     ui_state.google_setup_prompt = google_setup_prompt_;
     ui_state.drive_synced = drive_synced_;
