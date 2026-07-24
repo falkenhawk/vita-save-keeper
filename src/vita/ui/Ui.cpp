@@ -362,17 +362,28 @@ void draw_button_shape(int x, int y, ButtonSymbol symbol, unsigned int color) {
   // two rows and its base is exactly the staircase's final step, so no base pixel creeps past
   // the slopes. Only the cross stays at cap height: an X is optically dense enough already.
   case ButtonSymbol::Circle:
-    // A 1px ring painted per pixel (distance from centre in [6.5, 7.5)): fill_circle's
-    // triangle-fan rendering was jagged, and punching a smaller disc out of a bigger one made
-    // a 3px ring that read far heavier than the other glyphs' 1px strokes - and the punch
-    // colour could never match every background it sits on.
-    // Centred on y+8 - the text centre - not bottom-aligned like the flat shapes: a circle has
-    // no flat edge, so the eye reads its centre, and it overshoots the cap band 1px both ways.
-    for (int dy = -7; dy <= 7; ++dy) {
-      for (int dx = -7; dx <= 7; ++dx) {
-        const int d2 = dx * dx + dy * dy;
-        if (d2 >= 43 && d2 < 56) {
-          vita2d_draw_rectangle(x + 8 + dx, y + 8 + dy, 1, 1, color);
+    // A 1px ring painted per pixel: fill_circle's triangle-fan rendering was jagged, and punching
+    // a smaller disc out of a bigger one made a 3px ring far heavier than the other glyphs' 1px
+    // strokes (with a punch colour that could never match every background). A circle has no flat
+    // edge, so the eye reads its centre - and the labels' 12-row cap band centres on a half
+    // pixel, which no odd-diameter ring can hit (525 read high, 526 read low, both measured on
+    // hardware). This 16px ring centres on (7.5, 7.5) exactly: pixels whose distance from that
+    // half-pixel centre lies in [6.75, 7.75), i.e. 4*d^2 in [183, 240], overshooting the cap
+    // band symmetrically by 2px top and bottom.
+    // Two coverage levels fake the anti-aliasing the neighbouring text enjoys: full-strength
+    // pixels on the centreline band, 40% on the bands just inside and outside, which fills the
+    // staircase corners and reads round instead of polygonal.
+    {
+      const unsigned int soft =
+          (color & 0x00FFFFFFu) | (((((color >> 24) & 0xFFu) * 2u) / 5u) << 24);
+      for (int j = 0; j < 16; ++j) {
+        for (int i = 0; i < 16; ++i) {
+          const int d4 = (2 * i - 15) * (2 * i - 15) + (2 * j - 15) * (2 * j - 15);
+          if (d4 >= 183 && d4 <= 240) {
+            vita2d_draw_rectangle(x + i, y + j, 1, 1, color);
+          } else if (d4 >= 157 && d4 <= 272) {
+            vita2d_draw_rectangle(x + i, y + j, 1, 1, soft);
+          }
         }
       }
     }
@@ -952,7 +963,9 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
   draw_text(fonts_, 18, 34, kColorText, kTextSizeTitle, "Save Details");
   // The overview's cloud glyph repeats in the corner so the inspected snapshot's location (card,
   // Cloud, or both) stays visible; the live save shows neither flag and gets no glyph.
-  const bool show_presence = state.snapshot_on_card || state.snapshot_in_cloud;
+  // No Google sign-in, no card/cloud concept: the glyph only draws once an account is connected.
+  const bool show_presence =
+      state.google_connected && (state.snapshot_on_card || state.snapshot_in_cloud);
   const int context_right = show_presence ? 904 : 942;
   const std::string context = fit_text(
       kTextSizeSmall, state.game_title + "  /  " + display_backup_name(state.snapshot_name),
@@ -1391,7 +1404,9 @@ void Ui::draw_backup_panel(const UiState &state) {
       max_text_width = 150;
     } else {
       max_text_width = 340;
-      // The row wash is nearly transparent, so the pane behind it is what the cut-out must match.
+      // The row wash is nearly transparent, so the pane behind it is what the cut-out must
+      // match. Deliberately NOT gated on google_connected: the card-only up arrow doubles as
+      // the nudge that Select uploads a row, sign-in or not.
       draw_presence_glyph(906, y + 9, row.has_local(), row.has_remote(), kColorPanelRight);
     }
     const std::string display = row.display_name();
@@ -1714,9 +1729,9 @@ void Ui::draw_busy(const std::string &label, long long done, long long total,
   draw_modal_backdrop();
 
   constexpr int kBoxX = 280;
-  constexpr int kBoxY = 216;
+  constexpr int kBoxY = 217;
   constexpr int kBoxW = 400;
-  constexpr int kBoxH = 112;
+  constexpr int kBoxH = 111;
   vita2d_draw_rectangle(kBoxX, kBoxY, kBoxW, kBoxH, kColorPanelAlt);
   vita2d_draw_rectangle(kBoxX, kBoxY, kBoxW, 4, kColorAccent);
 
@@ -1749,9 +1764,11 @@ void Ui::draw_busy(const std::string &label, long long done, long long total,
   } else {
     fitted_label = fit_text(kTextSizeNormal, label, title_max_w);
   }
-  // The title block sits so the cap top clears the accent strip by the same 20px the baseline
-  // keeps above the bar (a size-18 cap is ~13px tall); the old +42/+62 layout read heavier on
-  // top. The whole stack below shifts with it, so the slack goes to the box's bottom padding.
+  // Spacing is measured in rendered ink, not cap height: the title's quotes reach above the caps
+  // and its descenders below the baseline, so it occupies 18 rows while the digits occupy 12.
+  // The title gets 19px of air under the accent strip and 16px down to the bar - deliberately
+  // top-heavy, since the strip is a hard edge and the bar is not - and the percent sits on an
+  // even 17/17 in the space below.
   draw_text(fonts_, kBoxX + 24, kBoxY + 37, kColorText, kTextSizeNormal, fitted_label.c_str());
   if (batch_transfer) {
     const int pw = text_width(fonts_, kTextSizeSmall, transfer_pct);
@@ -1762,7 +1779,7 @@ void Ui::draw_busy(const std::string &label, long long done, long long total,
   const int bar_x = kBoxX + 24;
   const int bar_y = kBoxY + 57;
   const int bar_w = kBoxW - 48;
-  const int bar_h = 12;
+  const int bar_h = 8;
   vita2d_draw_rectangle(bar_x, bar_y, bar_w, bar_h, RGBA8(255, 255, 255, 24));
 
   const long long bar_done = batch_active_ ? static_cast<long long>(batch_done_) : done;
@@ -1795,7 +1812,7 @@ void Ui::draw_busy(const std::string &label, long long done, long long total,
     show_overall = true;
   }
   if (show_overall) {
-    draw_text(fonts_, bar_x, kBoxY + 93, kColorMuted, kTextSizeSmall, overall_pct);
+    draw_text(fonts_, bar_x, kBoxY + 94, kColorMuted, kTextSizeSmall, overall_pct);
   }
 
   if (batch_active_) {
@@ -1805,13 +1822,13 @@ void Ui::draw_busy(const std::string &label, long long done, long long total,
     const int hold_w = text_width(fonts_, kTextSizeSmall, hold_text);
     const int cancel_w = text_width(fonts_, kTextSizeSmall, cancel_text);
     int x = kBoxX + kBoxW - 24 - (hold_w + 6 + 22 + cancel_w);
-    draw_text(fonts_, x, kBoxY + 93, kColorMuted, kTextSizeSmall, hold_text);
+    draw_text(fonts_, x, kBoxY + 94, kColorMuted, kTextSizeSmall, hold_text);
     x += hold_w + 6;
-    draw_button_shape(x, kBoxY + 79,
+    draw_button_shape(x, kBoxY + 80,
                       batch_cancel_is_circle_ ? ButtonSymbol::Circle : ButtonSymbol::Cross,
                       kColorMuted);
     x += 22;
-    draw_text(fonts_, x, kBoxY + 93, kColorMuted, kTextSizeSmall, cancel_text);
+    draw_text(fonts_, x, kBoxY + 94, kColorMuted, kTextSizeSmall, cancel_text);
   }
 
   if (cancel_hint != nullptr) {

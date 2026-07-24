@@ -31,6 +31,9 @@ inline constexpr const char *kGoogleSetupGuideUrl =
 
 struct SlotDetailsState {
   bool open{};
+  // Mirrors UiState::google_connected (this screen draws from its own state): without a Google
+  // sign-in the card/cloud distinction does not exist, so the presence glyph stays hidden.
+  bool google_connected{};
   std::string game_title;
   std::string snapshot_name;
   SaveMetadata metadata;

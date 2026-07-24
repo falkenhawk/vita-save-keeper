@@ -2159,6 +2159,7 @@ void App::open_save_details() {
   slot_details_.snapshot_name = row.primary_name();
   slot_details_.snapshot_on_card = row.has_local();
   slot_details_.snapshot_in_cloud = row.has_remote();
+  slot_details_.google_connected = google_connected_;
 
   // A snapshot shows one size: its ZIP file. The archive stores entries uncompressed, so the
   // save content inside differs from the file size only by ZIP header overhead - showing both
@@ -2861,6 +2862,7 @@ int App::run() {
         } else if (row_after) {
           slot_details_.snapshot_on_card = row_after->has_local();
           slot_details_.snapshot_in_cloud = row_after->has_remote();
+          slot_details_.google_connected = google_connected_;
         }
         previous_buttons = buttons;
         sceKernelDelayThread(kFrameDelayUs);
@@ -2882,6 +2884,7 @@ int App::run() {
           // follows the row's new presence.
           slot_details_.snapshot_on_card = row_after->has_local();
           slot_details_.snapshot_in_cloud = row_after->has_remote();
+          slot_details_.google_connected = google_connected_;
         }
         previous_buttons = buttons;
         sceKernelDelayThread(kFrameDelayUs);
