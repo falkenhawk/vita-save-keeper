@@ -2317,6 +2317,49 @@ void test_tracked_folders_json_skips_invalid_and_duplicate_entries() {
   EXPECT_TRUE(!vsm::parse_tracked_folders_json(R"({"version":1})").ok);
 }
 
+void test_tracked_folders_json_atomic_write_roundtrip() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-tracked-folders-atomic-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base);
+  const std::filesystem::path path = base / "tracked-folders.json";
+
+  vsm::TrackedFoldersConfig config;
+  config.entries.push_back({"data-crazy-taxi", "Crazy Taxi", {{"", "ux0:data/ct"}}});
+  config.hidden_ids.insert("data-crazy-taxi");
+
+  std::string error;
+  EXPECT_TRUE(vsm::write_tracked_folders_json_atomic(path.string(), config, &error));
+
+  std::ifstream file(path);
+  const std::string written((std::istreambuf_iterator<char>(file)),
+                            std::istreambuf_iterator<char>());
+  const vsm::TrackedFoldersParseResult parsed = vsm::parse_tracked_folders_json(written);
+  EXPECT_TRUE(parsed.ok);
+  EXPECT_EQ(parsed.config.entries.size(), static_cast<std::size_t>(1));
+  EXPECT_EQ(parsed.config.entries[0].id, "data-crazy-taxi");
+  EXPECT_TRUE(parsed.config.hidden_ids.count("data-crazy-taxi") == 1);
+  // Temp file then rename must never leave the ".tmp" sibling behind on success.
+  EXPECT_TRUE(!std::filesystem::exists(path.string() + ".tmp"));
+
+  // Overwriting an existing file (the toggle path re-saves the same file repeatedly) must succeed
+  // and replace its contents rather than append or fail because the target already exists.
+  vsm::TrackedFoldersConfig second;
+  second.entries.push_back({"data-other", "Other", {{"", "ux0:data/other"}}});
+  EXPECT_TRUE(vsm::write_tracked_folders_json_atomic(path.string(), second, &error));
+  std::ifstream file2(path);
+  const std::string written2((std::istreambuf_iterator<char>(file2)),
+                             std::istreambuf_iterator<char>());
+  const vsm::TrackedFoldersParseResult parsed2 = vsm::parse_tracked_folders_json(written2);
+  EXPECT_TRUE(parsed2.ok);
+  EXPECT_EQ(parsed2.config.entries.size(), static_cast<std::size_t>(1));
+  EXPECT_EQ(parsed2.config.entries[0].id, "data-other");
+  EXPECT_TRUE(parsed2.config.hidden_ids.empty());
+  EXPECT_TRUE(!std::filesystem::exists(path.string() + ".tmp"));
+
+  std::filesystem::remove_all(base);
+}
+
 void test_tracked_entry_id_generation_falls_back_for_empty_normalized_name() {
   std::set<std::string> taken;
   EXPECT_EQ(vsm::make_tracked_entry_id("", taken), "data-folder");
@@ -2895,6 +2938,7 @@ int main() {
   test_tracked_folders_json_roundtrip_and_rejects_bad_input();
   test_tracked_entry_id_generation_normalizes_and_dedupes();
   test_tracked_folders_json_skips_invalid_and_duplicate_entries();
+  test_tracked_folders_json_atomic_write_roundtrip();
   test_tracked_entry_id_generation_falls_back_for_empty_normalized_name();
   test_tracked_metadata_takes_newest_observed_time_across_paths();
   test_tracked_records_classify_homebrew_and_build_from_config();

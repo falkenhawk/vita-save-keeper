@@ -42,6 +42,11 @@ struct TrackedFoldersParseResult {
 // Unknown fields are ignored so older builds can read files written by newer ones.
 TrackedFoldersParseResult parse_tracked_folders_json(const std::string &text);
 std::string serialize_tracked_folders_json(const TrackedFoldersConfig &config);
+// Temp file then rename, same as the metadata sidecars (see SaveTimeCache.cpp's write_json_atomic):
+// a reader never sees a half-written file, so a torn write (power loss, full storage) can never
+// corrupt the user's only copy of tracked-folders.json.
+bool write_tracked_folders_json_atomic(const std::string &path, const TrackedFoldersConfig &config,
+                                       std::string *error);
 // "data-" + normalize_path_component(folder_name), suffixed "-2", "-3", ... until unused.
 std::string make_tracked_entry_id(const std::string &folder_name,
                                   const std::set<std::string> &taken_ids);

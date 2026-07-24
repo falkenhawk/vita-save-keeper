@@ -88,6 +88,11 @@ private:
   // immediately; complete_async_read applies the result on the main thread when it lands.
   void submit_async_save_time_read(const SaveRecord &save);
   void complete_async_read(bool wait);
+  // Re-locates id within visible_saves_, setting selected_save_ to its index (0 when id is empty
+  // or absent) and syncing the current tab's remembered position to match. Shared by
+  // apply_sort_and_rebuild (after a re-sort reorders saves_) and toggle_entry_hidden (after the
+  // hidden/visible split reorders the tab); both call rebuild_visible_saves() first.
+  void refocus_selection_by_id(const std::string &id);
   // Reads tracked-folders.json once at startup (bounded, capped). A present-but-unreadable or
   // unparseable file sets tracked_config_load_failed_ and leaves the config empty, so it is never
   // overwritten later.

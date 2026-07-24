@@ -5,6 +5,7 @@
 
 #include <picojson.h>
 
+#include <cstdio>
 #include <functional>
 #include <set>
 #include <string>
@@ -131,6 +132,43 @@ std::string serialize_tracked_folders_json(const TrackedFoldersConfig &config) {
   }
   root["hidden"] = picojson::value(std::move(hidden));
   return picojson::value(std::move(root)).serialize(true);
+}
+
+namespace {
+
+// Mirrors write_json_atomic in SaveTimeCache.cpp: that helper has internal linkage there, so it is
+// not reachable from this translation unit and this is a minimal copy of the same temp-file-then-
+// rename mechanics rather than a shared call. No size cap here - unlike the save-time cache, this
+// config's size is bounded by how many folders the user has added, not by scan results.
+bool write_json_atomic(const std::string &path, const std::string &json, std::string *error) {
+  const std::string temporary = path + ".tmp";
+  FILE *file = std::fopen(temporary.c_str(), "wb");
+  if (!file) {
+    if (error) *error = "could not create config file";
+    return false;
+  }
+  bool wrote = std::fwrite(json.data(), 1, json.size(), file) == json.size();
+  wrote = std::fflush(file) == 0 && wrote;
+  wrote = std::fclose(file) == 0 && wrote;
+  if (!wrote) {
+    std::remove(temporary.c_str());
+    if (error) *error = "could not write config file";
+    return false;
+  }
+  if (std::rename(temporary.c_str(), path.c_str()) != 0) {
+    std::remove(temporary.c_str());
+    if (error) *error = "could not replace config file";
+    return false;
+  }
+  if (error) error->clear();
+  return true;
+}
+
+} // namespace
+
+bool write_tracked_folders_json_atomic(const std::string &path, const TrackedFoldersConfig &config,
+                                       std::string *error) {
+  return write_json_atomic(path, serialize_tracked_folders_json(config), error);
 }
 
 std::string make_tracked_entry_id(const std::string &folder_name,

@@ -1030,6 +1030,23 @@ bool App::resolve_all_save_times() {
   return true;
 }
 
+// Re-locates id within visible_saves_, or falls back to 0 (also the outcome for an empty id, which
+// never matches a real save) when it is not there. Both call sites already guarantee the id they
+// pass is still present after their respective rebuild_visible_saves() call, so the fallback only
+// exists to give selected_save_ a defined value before the search.
+void App::refocus_selection_by_id(const std::string &id) {
+  selected_save_ = 0;
+  if (!id.empty()) {
+    for (std::size_t i = 0; i < visible_saves_.size(); ++i) {
+      if (saves_[visible_saves_[i]].id == id) {
+        selected_save_ = i;
+        break;
+      }
+    }
+  }
+  category_selection_[static_cast<std::size_t>(category_)] = selected_save_;
+}
+
 void App::apply_sort_and_rebuild() {
   std::string focused_id;
   if (const SaveRecord *current = selected_save_record()) {
@@ -1046,16 +1063,7 @@ void App::apply_sort_and_rebuild() {
   // instead so the focus survives the re-sort (the grid window follows it on the next frame).
   category_selection_.fill(0);
   rebuild_visible_saves();
-  selected_save_ = 0;
-  if (!focused_id.empty()) {
-    for (std::size_t i = 0; i < visible_saves_.size(); ++i) {
-      if (saves_[visible_saves_[i]].id == focused_id) {
-        selected_save_ = i;
-        break;
-      }
-    }
-  }
-  category_selection_[static_cast<std::size_t>(category_)] = selected_save_;
+  refocus_selection_by_id(focused_id);
   queue_selected_save_time_read();
   refresh_local_backups();
   refresh_remote_backups_view();
@@ -2992,7 +3000,7 @@ void App::toggle_entry_hidden() {
     // The config could not be read whole this run, so writing it back would truncate whatever is
     // on disk; refuse the toggle and leave both the file and the in-memory set untouched.
     set_status(StatusKind::Info,
-               "Cannot update tracked-folders.json - fix or delete it first");
+               "Cannot update tracked-folders.json - fix or delete it first.");
     return;
   }
   const std::string id = selected->id;
@@ -3003,8 +3011,10 @@ void App::toggle_entry_hidden() {
   } else {
     tracked_config_.hidden_ids.erase(id);
   }
-  if (!write_text_file(kTrackedFoldersPath, serialize_tracked_folders_json(tracked_config_))) {
-    // Undo the flip so the UI and disk stay consistent after a failed write.
+  std::string write_error;
+  if (!write_tracked_folders_json_atomic(kTrackedFoldersPath, tracked_config_, &write_error)) {
+    // The write is atomic, so a failure here means tracked-folders.json on disk was never touched;
+    // undoing the flip keeps the in-memory set matching what is still there.
     if (now_hidden) {
       tracked_config_.hidden_ids.erase(id);
     } else {
@@ -3018,15 +3028,8 @@ void App::toggle_entry_hidden() {
   rebuild_visible_saves();
   // The reorder moved this entry within the tab while selected_save_ stayed a frozen index (the
   // details screen never re-syncs it via navigation), so re-locate the focus by id - the entry is
-  // demoted, never removed, so it is always still present. Mirrors apply_sort_and_rebuild's
-  // id-based refocus, including keeping the remembered per-tab position in step.
-  for (std::size_t i = 0; i < visible_saves_.size(); ++i) {
-    if (saves_[visible_saves_[i]].id == id) {
-      selected_save_ = i;
-      break;
-    }
-  }
-  category_selection_[static_cast<std::size_t>(category_)] = selected_save_;
+  // demoted, never removed, so it is always still present.
+  refocus_selection_by_id(id);
   set_status(StatusKind::Info,
              now_hidden ? status_with_name("Hidden ", name, " - moved to the end of the tab.")
                         : status_with_name("Unhidden ", name, "."));
