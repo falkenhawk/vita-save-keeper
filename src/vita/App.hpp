@@ -89,20 +89,21 @@ private:
   void submit_async_save_time_read(const SaveRecord &save);
   void complete_async_read(bool wait);
   // Re-locates id within visible_saves_, setting selected_save_ to its index (0 when id is empty
-  // or absent) and syncing the current tab's remembered position to match. Shared by
-  // apply_sort_and_rebuild (after a re-sort reorders saves_) and toggle_entry_hidden (after the
-  // hidden/visible split reorders the tab); both call rebuild_visible_saves() first.
+  // or absent) and syncing the current tab's remembered position to match. Used after a re-sort
+  // reorders saves_ and after attaching a folder; callers call rebuild_visible_saves() first.
   void refocus_selection_by_id(const std::string &id);
+  // The current tab's entries minus those marked to skip - what the hold-Select batch runs over.
+  std::vector<std::size_t> batch_targets() const;
   // Reads tracked-folders.json once at startup (bounded, capped). A present-but-unreadable or
   // unparseable file sets tracked_config_load_failed_ and leaves the config empty, so it is never
   // overwritten later.
   void load_tracked_folders();
-  // Folds the tracked homebrew data folders (RetroArch builtin + config entries) into saves_ and
-  // resolves each one's time from its live directories. Idempotent: safe to call again after
-  // tracked_config_ gains entries, since only ids not already in saves_ are appended and
-  // time-resolved - callers still need to re-sort afterwards. Must run after a scan populates
-  // saves_ and before the sort/rebuild. This is the seam a later single-entry add reuses.
-  void append_tracked_save_records();
+  // Attaches each config entry's extra data folders to its app's record in saves_, synthesizes
+  // records for configured apps the scan found no savedata folder for, and resolves the time of
+  // every entry that ends up with extras. Idempotent, and it *assigns* rather than appends, so a
+  // repeat call after a detach also drops what an earlier call attached. Must run after a scan
+  // populates saves_ and before the sort/rebuild; callers re-sort afterwards.
+  void apply_tracked_folders();
   // Returns false if the user canceled (Square) mid-read, so the caller can keep the name order.
   bool resolve_all_save_times();
   bool resolve_save_time(SaveRecord *save);
@@ -122,15 +123,17 @@ private:
   void invalidate_save_time(const SaveRecord &restored);
   std::size_t category_count(SaveCategory category) const;
   const SaveRecord *selected_save_record() const;
-  // True when the Homebrew tab's "+ Add folder" tile is the focused cell (selected_save_ sits one
-  // past the visible saves). Only the Homebrew tab grows that extra cell.
-  bool add_folder_tile_focused() const;
   void cancel_restore_confirmation();
   void cancel_delete_confirmation();
   void cancel_stop_tracking_confirmation();
-  // Directory picker for adding a homebrew data folder. Opens rooted at ux0:data, lists child dirs,
-  // and (Square) tracks the focused one. reload_browser_rows re-lists after a drill/climb; the size
-  // of the focused row is filled in lazily by resolve_browser_size a few frames after it settles.
+  // Where the folder picker opens for this entry: beside a folder it already has, else the closest
+  // ux0:data name match for its title, else ux0:data itself. app.db stores no data-folder path, so
+  // this is a guess and only ever picks a starting point.
+  std::string browser_start_path(const SaveRecord &save) const;
+  // Directory picker for adding a data folder to the focused homebrew entry. Confined to ux0:data,
+  // lists child dirs, and (Square) attaches the focused one to that entry. reload_browser_rows
+  // re-lists after a drill/climb; the focused row's size is filled in lazily by
+  // resolve_browser_size a few frames after it settles.
   void open_directory_browser();
   void close_directory_browser();
   void reload_browser_rows();
@@ -174,10 +177,11 @@ private:
   long long remote_size_for(const std::string &remote_name) const;
   void perform_scoped_delete(bool delete_local, bool delete_remote);
   void begin_label_edit();
-  // Flips the focused save's id in tracked_config_.hidden_ids and persists the config, then
-  // rebuilds the visible list so the entry moves to (or back from) the end of the tab. Refuses to
-  // write while tracked_config_load_failed_ is set, so an unreadable file is never truncated.
-  void toggle_entry_hidden();
+  // Flips the focused save's id in tracked_config_.skipped_ids and persists the config, leaving
+  // the entry exactly where it sits in the grid - skipping only removes it from the hold-Select
+  // batch. Refuses to write while tracked_config_load_failed_ is set, so an unreadable file is
+  // never truncated.
+  void toggle_entry_skipped();
   bool rename_remote_backup(const SaveRecord &save, const std::string &remote_name,
                             const std::string &new_name);
   void handle_transfer_button();

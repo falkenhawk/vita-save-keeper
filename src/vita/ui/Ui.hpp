@@ -56,14 +56,13 @@ struct SlotDetailsState {
   bool snapshot_on_card{};
   bool snapshot_in_cloud{};
   // Describe the inspected save itself (not the snapshot row), so the live row's footer can offer
-  // the hide/unhide toggle only for homebrew entries and label it by the current state.
+  // the batch-skip toggle only for homebrew entries and label it by the current state.
   bool entry_is_homebrew{};
-  bool entry_hidden{};
-  // A tracked entry's data-folder paths (SaveRecord.tracked_paths, path only). A homebrew data
-  // folder has no sdslot metadata, so when this is non-empty the renderer lists these in place of
-  // the slot table instead of showing the "no readable slot metadata" fallback. Empty for every
-  // other save.
-  std::vector<std::string> tracked_paths;
+  bool entry_skipped{};
+  // The entry's extra ux0:data folders (SaveRecord.extra_paths, path only). A data folder has no
+  // sdslot metadata, so when this is non-empty the renderer lists these alongside the slot table
+  // rather than falling back to "no readable slot metadata". Empty for every entry with none.
+  std::vector<std::string> extra_paths;
 };
 
 // Directory-picker modal for adding a homebrew data folder to track. Rooted at "ux0:data" and never
@@ -72,12 +71,18 @@ struct SlotDetailsState {
 // settles, so browsing a folder full of huge trees does not stat-walk every one at once.
 struct DirectoryBrowserState {
   bool open{};
-  std::string current_path;  // starts at "ux0:data"; the cancel button climbs back up to it
+  // The entry the picked folder is attached to, captured when the browser opens so a later
+  // re-sort or refresh cannot retarget an in-flight pick.
+  std::string entry_id;
+  std::string entry_name;
+  // Opens at the best guess for this entry (see App::browser_start_path); the cancel button climbs
+  // back up and closes at "ux0:data".
+  std::string current_path;
   struct Row {
     std::string name;
     bool size_known{};
     std::uint64_t size_bytes{};
-    bool already_tracked{};  // exact path already in a tracked entry or a RetroArch builtin path
+    bool already_tracked{};  // exact path already attached to some entry
   };
   std::vector<Row> rows;
   std::size_t selected{};
@@ -96,8 +101,9 @@ struct UiState {
   const std::vector<SaveRecord> *saves{};
   // Indices into saves for the active category tab; selected_save indexes this list.
   const std::vector<std::size_t> *visible_saves{};
-  // Save ids demoted to the end of the tab; their grid tiles render dimmed with a "hidden" tag.
-  const std::set<std::string> *hidden_ids{};
+  // Save ids left out of the hold-Select batch; their grid tiles carry a small "skip" tag. Grid
+  // order is unaffected - skipping changes what the sweep touches, nothing else.
+  const std::set<std::string> *skipped_ids{};
   SaveCategory active_category{SaveCategory::VitaGame};
   SaveSortMode sort_mode{SaveSortMode::Name};
   std::array<std::size_t, kSaveCategoryCount> category_counts{};
@@ -128,9 +134,6 @@ struct UiState {
   bool enter_is_cross{true};
   const SlotDetailsState *slot_details{};
   const DirectoryBrowserState *directory_browser{};
-  // The Homebrew tab draws an extra "+ Add folder" tile after the last save; selected_save may then
-  // index one past the visible saves (the tile). Off for every other tab.
-  bool show_add_folder_tile{};
   std::string google_verification_url;
   std::string google_user_code;
   int auth_seconds_left{};

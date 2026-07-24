@@ -247,18 +247,8 @@ std::string truncate_label(const std::string &text, std::size_t max_length) {
   return truncate_utf8_label(text, max_length);
 }
 
-// True when the Homebrew tab's extra "+ Add folder" tile is the focused cell: selected_save sits
-// one past the last visible save (or at 0 when the tab has only the tile). Shared by the grid, the
-// backup pane, and the footer so all three agree on when no real save is selected.
-// Mirrors App::add_folder_tile_focused() in App.cpp - keep both conditions in sync.
-bool add_folder_tile_focused(const UiState &state) {
-  return state.show_add_folder_tile && state.visible_saves &&
-         state.selected_save >= state.visible_saves->size();
-}
-
 const SaveRecord *selected_visible_record(const UiState &state) {
-  // selected_save can index one past the visible saves on the Homebrew tab (the add-folder tile),
-  // which has no record; every other tab keeps it in range.
+  // An empty tab leaves selected_save out of range; every other case keeps it in.
   if (!state.visible_saves || state.selected_save >= state.visible_saves->size()) {
     return nullptr;
   }
@@ -979,9 +969,9 @@ void Ui::draw_modal_backdrop() {
 }
 
 int Ui::details_max_scroll(const SlotDetailsState &state) const {
-  if (!state.tracked_paths.empty()) {
-    // The tracked-folders list is static (a handful of paths always fits in the metadata pane);
-    // nothing on this screen scrolls for a tracked entry.
+  if (!state.extra_paths.empty()) {
+    // The data-folder list is static (a handful of paths always fits in the metadata pane);
+    // nothing on this screen scrolls when an entry has them.
     return 0;
   }
   if (state.metadata.slots.empty()) {
@@ -1071,13 +1061,13 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
   const int slots_heading_y = 72 + card_h + 24;
   const int slots_list_y = slots_heading_y + 12;
   draw_text(fonts_, 18, slots_heading_y, kColorMuted, kTextSizeTiny,
-            state.tracked_paths.empty() ? "SLOTS" : "TRACKED FOLDERS");
-  if (!state.tracked_paths.empty()) {
+            state.extra_paths.empty() ? "SLOTS" : "DATA FOLDERS");
+  if (!state.extra_paths.empty()) {
     // The paths themselves render in the metadata pane on the right; this column just echoes how
-    // many are tracked, keeping the same empty look a slotless save already has here.
-    const std::string count = state.tracked_paths.size() == 1
+    // many there are, keeping the same empty look a slotless save already has here.
+    const std::string count = state.extra_paths.size() == 1
                                    ? "1 folder"
-                                   : std::to_string(state.tracked_paths.size()) + " folders";
+                                   : std::to_string(state.extra_paths.size()) + " folders";
     draw_text(fonts_, 34, slots_list_y + 22, kColorMuted, kTextSizeSmall, count.c_str());
   } else if (state.metadata.slots.empty()) {
     draw_text(fonts_, 34, slots_list_y + 22, kColorMuted, kTextSizeSmall, "No slot details");
@@ -1111,16 +1101,16 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
     }
   }
 
-  if (!state.tracked_paths.empty()) {
+  if (!state.extra_paths.empty()) {
     // Same origin as the "no slot metadata" fallback this replaces, styled as a small label like
     // the pane's other labeled blocks (TITLE/SUBTITLE/DETAILS) rather than that fallback's big
     // heading: a homebrew data folder has no sdslot metadata, so this explains what is backed up
     // instead of reporting the absence as a problem. A handful of paths always fits on screen, so
-    // this never scrolls (details_max_scroll returns 0 for a tracked entry).
-    draw_text(fonts_, kRightX, 116, kColorMuted, kTextSizeTiny, "TRACKED FOLDERS");
-    for (std::size_t i = 0; i < state.tracked_paths.size() && i < 14; ++i) {
+    // this never scrolls (details_max_scroll returns 0 then).
+    draw_text(fonts_, kRightX, 116, kColorMuted, kTextSizeTiny, "DATA FOLDERS");
+    for (std::size_t i = 0; i < state.extra_paths.size() && i < 14; ++i) {
       draw_text(fonts_, kRightX, 142 + static_cast<int>(i) * 24, kColorText, kTextSizeSmall,
-                fit_text_left(kTextSizeSmall, state.tracked_paths[i], kRightTextWidth).c_str());
+                fit_text_left(kTextSizeSmall, state.extra_paths[i], kRightTextWidth).c_str());
     }
   } else if (state.metadata.slots.empty()) {
     const std::string heading = state.unavailable_message.empty()
@@ -1223,8 +1213,10 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
         hints.push_back({ButtonSymbol::Select, "Upload"});
       }
     } else if (state.entry_is_homebrew) {
-      // The live row of a homebrew entry can hide or unhide it, matching the Square action there.
-      hints.push_back({ButtonSymbol::Square, state.entry_hidden ? "Unhide" : "Hide"});
+      // The live row of a homebrew entry toggles whether the batch sweep includes it, and L opens
+      // the picker for folding extra ux0:data folders into its backups.
+      hints.push_back({ButtonSymbol::Square, state.entry_skipped ? "Include" : "Skip"});
+      hints.push_back({ButtonSymbol::Label, "L  Add folder"});
     }
     hints.push_back({primary, is_snapshot ? "Restore" : "Backup"});
     hints.push_back({cancel, "Back"});
@@ -1434,15 +1426,11 @@ void Ui::draw_title_grid(const UiState &state) {
   // 108 splits the vertical slack left by the 10px row gaps: ~15px under the tab underline,
   // ~18px above the footer, instead of pooling it all at the bottom.
   constexpr int kStartY = 108;
-  // The Homebrew tab appends one "+ Add folder" cell after the last save; it is a selectable cell
-  // (index == visible.size()) but not a save, so the grid window and the wrap both size to it.
-  const std::size_t cell_count = visible.size() + (state.show_add_folder_tile ? 1 : 0);
-  const std::size_t selected = cell_count == 0 ? 0 : state.selected_save % cell_count;
-  title_top_row_ = grid_window_top_row(title_top_row_, selected, cell_count, kColumns, kRows);
+  const std::size_t selected = visible.empty() ? 0 : state.selected_save % visible.size();
+  title_top_row_ = grid_window_top_row(title_top_row_, selected, visible.size(), kColumns, kRows);
   const std::size_t first_index = title_top_row_ * kColumns;
 
-  // Only a real save carries a position count; the add-folder tile shows none.
-  if (!visible.empty() && selected < visible.size()) {
+  if (!visible.empty()) {
     const std::string count =
         std::to_string(selected + 1) + "/" + std::to_string(visible.size());
     draw_text(fonts_, 512 - 16 - measure_text(kTextSizeSmall, count.c_str()), 84,
@@ -1454,7 +1442,7 @@ void Ui::draw_title_grid(const UiState &state) {
       const std::size_t index = first_index + static_cast<std::size_t>(row * kColumns + col);
       const int x = kStartX + col * (kTileSize + kGapX);
       const int y = kStartY + row * (kTileSize + kGapY);
-      if (index >= cell_count) {
+      if (index >= visible.size()) {
         // Empty slot: a faint on-ramp navy (hue 216, one notch above the pane) instead of a white
         // wash, toned down so the raised frame on filled tiles is what reads as "a game is here".
         vita2d_draw_rectangle(x, y, kTileSize, kTileSize, RGBA8(19, 28, 42, 255));
@@ -1462,24 +1450,6 @@ void Ui::draw_title_grid(const UiState &state) {
       }
 
       const bool is_selected = index == selected;
-      if (index == visible.size()) {
-        // The add-folder tile: same footprint and selection border as a save, a muted face, a "+"
-        // mark, and a caption instead of an icon. Reached only when show_add_folder_tile is set,
-        // since otherwise cell_count == visible.size() and this index is unreachable.
-        vita2d_draw_rectangle(x - 3, y - 3, kTileSize + 6, kTileSize + 6,
-                              is_selected ? kColorAccent : RGBA8(255, 255, 255, 14));
-        vita2d_draw_rectangle(x, y, kTileSize, kTileSize,
-                              is_selected ? RGBA8(25, 45, 64, 255) : RGBA8(255, 255, 255, 10));
-        const unsigned int mark = is_selected ? kColorText : kColorMuted;
-        const int plus_cx = x + kTileSize / 2;
-        const int plus_cy = y + kTileSize / 2 - 8;
-        vita2d_draw_rectangle(plus_cx - 13, plus_cy - 2, 26, 4, mark);
-        vita2d_draw_rectangle(plus_cx - 2, plus_cy - 13, 4, 26, mark);
-        const char *caption = "Add folder";
-        draw_text(fonts_, x + (kTileSize - measure_text(kTextSizeTiny, caption)) / 2,
-                  y + kTileSize - 12, mark, kTextSizeTiny, caption);
-        continue;
-      }
       const SaveRecord &save = saves[visible[index]];
       vita2d_draw_rectangle(x - 3, y - 3, kTileSize + 6, kTileSize + 6,
                             is_selected ? kColorAccent : RGBA8(255, 255, 255, 14));
@@ -1497,12 +1467,11 @@ void Ui::draw_title_grid(const UiState &state) {
                               is_selected);
       }
 
-      // Hidden entries are demoted to the end of the tab and drawn muted with a tag - a reversible
-      // state, not removal. The overlay covers the tile face but not the selection border, so a
-      // focused hidden tile still reads as focused.
-      if (state.hidden_ids && state.hidden_ids->count(save.id) != 0) {
-        vita2d_draw_rectangle(x, y, kTileSize, kTileSize, RGBA8(5, 10, 18, 165));
-        const char *tag = "hidden";
+      // A skipped entry keeps its place and its icon - it is still backed up on demand, it just
+      // sits out the batch sweep - so it gets a corner tag and no dimming overlay. Marking it any
+      // heavier would read as "excluded", which is what the old "hidden" state got wrong.
+      if (state.skipped_ids && state.skipped_ids->count(save.id) != 0) {
+        const char *tag = "skip";
         const int tag_w = measure_text(kTextSizeTiny, tag);
         vita2d_draw_rectangle(x, y + kTileSize - 18, tag_w + 12, 18, RGBA8(5, 10, 18, 210));
         draw_text(fonts_, x + 6, y + kTileSize - 5, kColorMuted, kTextSizeTiny, tag);
@@ -1510,10 +1479,9 @@ void Ui::draw_title_grid(const UiState &state) {
     }
   }
 
-  if (cell_count == 0) {
+  if (visible.empty()) {
     // Selected-save details live at the top of the right pane; the grid area only needs the
-    // empty states. The add-folder tile keeps cell_count non-zero, so this never fires while it
-    // is the only cell on the Homebrew tab.
+    // empty states.
     if (saves.empty()) {
       draw_text(fonts_, 120, 280, kColorText, kTextSizeNormal, "No saves found");
       draw_text(fonts_, 120, 306, kColorMuted, kTextSizeSmall,
@@ -1538,12 +1506,8 @@ void Ui::draw_backup_panel(const UiState &state) {
 
   const SaveRecord *save = selected_visible_record(state);
   if (!save) {
-    // The add-folder tile has no backups; the pane stays empty save for a one-line prompt, rather
-    // than the "no saves at all" copy.
     draw_text(fonts_, 532, 96, kColorMuted, kTextSizeSmall,
-              add_folder_tile_focused(state)
-                  ? "Pick a data folder under ux0:data to start backing it up."
-                  : "Install or create saves, then reopen Save Keeper.");
+              "Install or create saves, then reopen Save Keeper.");
     draw_status_line(state);
     return;
   }
@@ -1814,13 +1778,6 @@ void Ui::draw_footer(const UiState &state) {
     draw_hints_right_aligned(fonts_, hints, 2);
     return;
   }
-  if (add_folder_tile_focused(state)) {
-    // The add-folder tile has no backup menu; the action button opens the directory browser.
-    const HintSpec hints[] = {{confirm, "Add folder"}};
-    draw_hints_right_aligned(fonts_, hints, 1);
-    return;
-  }
-
   // One context action: create a backup on the "New Backup" entry, restore on a backup entry.
   const std::string sort_label =
       std::string("Sort: ") + save_sort_mode_label(state.sort_mode);

@@ -42,11 +42,12 @@ struct SaveRecord {
   // restored from a cache entry). Decides a rebuilt cache entry's freshness rule: db-derived
   // entries follow the database stamp, sfo-derived ones follow the folder fingerprint.
   bool title_from_app_db{};
-  // Non-empty marks a tracked data-folder entry (homebrew data backups). Each path's full tree
-  // is archived under its prefix; save.path holds the single path for one-path entries, the first
-  // path on multi-path config entries, and the common parent for the RetroArch builtin. Tracked
-  // saves never touch the PFS mount.
-  std::vector<TrackedPath> tracked_paths;
+  // Extra ux0:data folders folded into this entry's own backup, each with the zip prefix allocated
+  // when it was attached. Independent of `path`, which stays the app's savedata folder: an entry
+  // can have both, or only extras when the app keeps everything in ux0:data and so has no savedata
+  // folder (then `path` is empty). See archive_layout_for_record for how the two combine.
+  // Extras are plain directories and never touch the PFS mount.
+  std::vector<TrackedPath> extra_paths;
 };
 
 } // namespace vsm

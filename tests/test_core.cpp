@@ -2393,38 +2393,59 @@ void test_app_settings_roundtrip_and_unknown_keys() {
 
 void test_tracked_folders_json_roundtrip_and_rejects_bad_input() {
   vsm::TrackedFoldersConfig config;
-  config.entries.push_back({"data-crazy-taxi", "Crazy Taxi", {{"", "ux0:data/ct"}}});
-  config.entries.push_back({"data-retroarch", "RetroArch",
+  // Ids are real app save ids now - no synthetic "data-" prefix and no allocator.
+  config.entries.push_back({"VITADBDLD", "", {{"VitaDB", "ux0:data/VitaDB"}}});
+  config.entries.push_back({"RETROVITA", "RetroArch",
                             {{"savefiles", "ux0:data/retroarch/savefiles"},
                              {"savestates", "ux0:data/retroarch/savestates"}}});
-  config.hidden_ids.insert("VITADBDLD");
+  config.skipped_ids.insert("VITASHELL");
 
   const std::string json = vsm::serialize_tracked_folders_json(config);
   const vsm::TrackedFoldersParseResult parsed = vsm::parse_tracked_folders_json(json);
   EXPECT_TRUE(parsed.ok);
   EXPECT_EQ(parsed.config.entries.size(), static_cast<std::size_t>(2));
-  EXPECT_EQ(parsed.config.entries[0].id, "data-crazy-taxi");
+  EXPECT_EQ(parsed.config.entries[0].id, "VITADBDLD");
   EXPECT_EQ(parsed.config.entries[1].paths.size(), static_cast<std::size_t>(2));
   EXPECT_EQ(parsed.config.entries[1].paths[0].prefix, "savefiles");
-  EXPECT_TRUE(parsed.config.hidden_ids.count("VITADBDLD") == 1);
+  EXPECT_TRUE(parsed.config.skipped_ids.count("VITASHELL") == 1);
 
   EXPECT_TRUE(!vsm::parse_tracked_folders_json("not json").ok);
   EXPECT_TRUE(!vsm::parse_tracked_folders_json("[]").ok);
   // entries missing a path are dropped, not fatal; unknown fields are ignored
   const vsm::TrackedFoldersParseResult partial = vsm::parse_tracked_folders_json(
-      R"({"version":1,"future":true,"entries":[{"id":"data-x","title":"X","paths":[]},)"
-      R"({"id":"data-y","title":"Y","paths":[{"prefix":"","path":"ux0:data/y"}]}],"hidden":[]})");
+      R"({"version":1,"future":true,"entries":[{"id":"APPX","title":"X","paths":[]},)"
+      R"({"id":"APPY","title":"Y","paths":[{"prefix":"","path":"ux0:data/y"}]}],"skipped":[]})");
   EXPECT_TRUE(partial.ok);
   EXPECT_EQ(partial.config.entries.size(), static_cast<std::size_t>(1));
-  EXPECT_EQ(partial.config.entries[0].id, "data-y");
+  EXPECT_EQ(partial.config.entries[0].id, "APPY");
 }
 
-void test_tracked_entry_id_generation_normalizes_and_dedupes() {
-  std::set<std::string> taken{"data-crazy-taxi"};
-  EXPECT_EQ(vsm::make_tracked_entry_id("Crazy/Taxi", taken), "data-Crazy_Taxi");
-  EXPECT_EQ(vsm::make_tracked_entry_id("crazy-taxi", taken), "data-crazy-taxi-2");
-  taken.insert("data-crazy-taxi-2");
-  EXPECT_EQ(vsm::make_tracked_entry_id("crazy-taxi", taken), "data-crazy-taxi-3");
+void test_tracked_folders_json_reads_legacy_hidden_as_skipped() {
+  // The earlier draft of this feature wrote the same list under "hidden". A config written by that
+  // build must keep its exclusions rather than silently resetting them, and both spellings merge.
+  const vsm::TrackedFoldersParseResult parsed = vsm::parse_tracked_folders_json(
+      R"({"entries":[{"id":"APPY","paths":[{"path":"ux0:data/y"}]}],)"
+      R"("hidden":["VITASHELL"],"skipped":["AUTOPLUG2"]})");
+  EXPECT_TRUE(parsed.ok);
+  EXPECT_EQ(parsed.config.skipped_ids.size(), static_cast<std::size_t>(2));
+  EXPECT_TRUE(parsed.config.skipped_ids.count("VITASHELL") == 1);
+  EXPECT_TRUE(parsed.config.skipped_ids.count("AUTOPLUG2") == 1);
+
+  // Only "skipped" is ever written back.
+  const std::string json = vsm::serialize_tracked_folders_json(parsed.config);
+  EXPECT_TRUE(json.find("\"skipped\"") != std::string::npos);
+  EXPECT_TRUE(json.find("\"hidden\"") == std::string::npos);
+}
+
+void test_extra_prefix_allocation_normalizes_and_reserves_savedata() {
+  std::set<std::string> taken{"savefiles"};
+  EXPECT_EQ(vsm::make_extra_prefix("save/files", taken), "save_files");
+  EXPECT_EQ(vsm::make_extra_prefix("savefiles", taken), "savefiles-2");
+  taken.insert("savefiles-2");
+  EXPECT_EQ(vsm::make_extra_prefix("savefiles", taken), "savefiles-3");
+  // "savedata" belongs to the entry's own save folder, so a data folder of that name steps aside
+  // even when nothing else has claimed it.
+  EXPECT_EQ(vsm::make_extra_prefix("savedata", {}), "savedata-2");
 }
 
 void test_tracked_folders_json_skips_invalid_and_duplicate_entries() {
@@ -2458,7 +2479,7 @@ void test_tracked_folders_json_atomic_write_roundtrip() {
 
   vsm::TrackedFoldersConfig config;
   config.entries.push_back({"data-crazy-taxi", "Crazy Taxi", {{"", "ux0:data/ct"}}});
-  config.hidden_ids.insert("data-crazy-taxi");
+  config.skipped_ids.insert("data-crazy-taxi");
 
   std::string error;
   EXPECT_TRUE(vsm::write_tracked_folders_json_atomic(path.string(), config, &error));
@@ -2470,7 +2491,7 @@ void test_tracked_folders_json_atomic_write_roundtrip() {
   EXPECT_TRUE(parsed.ok);
   EXPECT_EQ(parsed.config.entries.size(), static_cast<std::size_t>(1));
   EXPECT_EQ(parsed.config.entries[0].id, "data-crazy-taxi");
-  EXPECT_TRUE(parsed.config.hidden_ids.count("data-crazy-taxi") == 1);
+  EXPECT_TRUE(parsed.config.skipped_ids.count("data-crazy-taxi") == 1);
   // Temp file then rename must never leave the ".tmp" sibling behind on success.
   EXPECT_TRUE(!std::filesystem::exists(path.string() + ".tmp"));
 
@@ -2486,17 +2507,17 @@ void test_tracked_folders_json_atomic_write_roundtrip() {
   EXPECT_TRUE(parsed2.ok);
   EXPECT_EQ(parsed2.config.entries.size(), static_cast<std::size_t>(1));
   EXPECT_EQ(parsed2.config.entries[0].id, "data-other");
-  EXPECT_TRUE(parsed2.config.hidden_ids.empty());
+  EXPECT_TRUE(parsed2.config.skipped_ids.empty());
   EXPECT_TRUE(!std::filesystem::exists(path.string() + ".tmp"));
 
   std::filesystem::remove_all(base);
 }
 
-void test_tracked_entry_id_generation_falls_back_for_empty_normalized_name() {
+void test_extra_prefix_falls_back_for_empty_normalized_name() {
   std::set<std::string> taken;
-  EXPECT_EQ(vsm::make_tracked_entry_id("", taken), "data-folder");
-  taken.insert("data-folder");
-  EXPECT_EQ(vsm::make_tracked_entry_id("", taken), "data-folder-2");
+  EXPECT_EQ(vsm::make_extra_prefix("", taken), "folder");
+  taken.insert("folder");
+  EXPECT_EQ(vsm::make_extra_prefix("   ", taken), "folder-2");
 }
 
 void test_tracked_metadata_takes_newest_observed_time_across_paths() {
@@ -2536,44 +2557,141 @@ void test_tracked_metadata_takes_newest_observed_time_across_paths() {
   std::filesystem::remove_all(base);
 }
 
-void test_tracked_records_classify_homebrew_and_build_from_config() {
+void test_orphan_app_records_only_for_apps_the_scan_missed() {
   vsm::TrackedFoldersConfig config;
-  config.entries.push_back({"data-crazy-taxi", "Crazy Taxi", {{"", "ux0:data/ct"}}});
-  const auto exists = [](const std::string &path) { return path == "ux0:data/retroarch"; };
-  const std::vector<vsm::SaveRecord> records = vsm::build_tracked_save_records(config, exists);
-  EXPECT_EQ(records.size(), static_cast<std::size_t>(2));
-  EXPECT_EQ(records[0].id, "data-retroarch");
+  // VITADBDLD has a savedata folder, so the scan already produced its record and its folders get
+  // attached there. RETROVITA keeps everything in ux0:data, so it needs a record synthesized.
+  config.entries.push_back({"VITADBDLD", "", {{"VitaDB", "ux0:data/VitaDB"}}});
+  config.entries.push_back({"RETROVITA", "RetroArch",
+                            {{"savefiles", "ux0:data/retroarch/savefiles"},
+                             {"savestates", "ux0:data/retroarch/savestates"}}});
+
+  const auto scanned = [](const std::string &id) { return id == "VITADBDLD"; };
+  const std::vector<vsm::SaveRecord> records = vsm::build_orphan_app_records(config, scanned);
+  EXPECT_EQ(records.size(), static_cast<std::size_t>(1));
+  EXPECT_EQ(records[0].id, "RETROVITA");
   EXPECT_EQ(records[0].display_name, "RetroArch");
-  EXPECT_EQ(records[0].tracked_paths.size(), static_cast<std::size_t>(2));
-  EXPECT_EQ(records[0].tracked_paths[0].path, "ux0:data/retroarch/savefiles");
-  EXPECT_EQ(records[1].path, "ux0:data/ct");
-  for (const vsm::SaveRecord &record : records) {
-    EXPECT_TRUE(vsm::classify_save(record) == vsm::SaveCategory::Homebrew);
-    EXPECT_TRUE(!record.save_time_requires_mount);
-  }
-  const auto nothing = [](const std::string &) { return false; };
-  EXPECT_EQ(vsm::build_tracked_save_records(config, nothing).size(), static_cast<std::size_t>(1));
+  // No savedata folder, so no path and nothing that could ever ask for a PFS mount.
+  EXPECT_TRUE(records[0].path.empty());
+  EXPECT_TRUE(!records[0].save_time_requires_mount);
+  EXPECT_EQ(records[0].extra_paths.size(), static_cast<std::size_t>(2));
+  // Id-shape classification alone puts it on the Homebrew tab - RETROVITA is not PCS-shaped - so
+  // no special-casing survives in classify_save.
+  EXPECT_TRUE(vsm::classify_save(records[0]) == vsm::SaveCategory::Homebrew);
+
+  // Once the scan does find it (the app gained a savedata folder), no record is synthesized.
+  const auto all_scanned = [](const std::string &) { return true; };
+  EXPECT_TRUE(vsm::build_orphan_app_records(config, all_scanned).empty());
 }
 
-void test_tracked_records_skip_config_entry_duplicating_builtin_retroarch() {
-  // a stale hand-edited config carrying the builtin's id must never produce a second
-  // data-retroarch record, whether the builtin's real directory is present or not.
-  vsm::TrackedFoldersConfig config;
-  config.entries.push_back({"data-retroarch", "Old RetroArch", {{"", "ux0:data/retroarch-old"}}});
+void test_archive_layout_keeps_plain_saves_flat_and_prefixes_the_rest() {
+  // No extras: one flat source, no sidecar targets. This is what keeps a homebrew backup
+  // byte-identical to one written before extra folders existed, so old archives and dedup
+  // signatures both still match.
+  vsm::SaveRecord plain;
+  plain.id = "VITADBDLD";
+  plain.path = "ux0:user/00/savedata/VITADBDLD";
+  const vsm::ArchiveLayout plain_layout = vsm::archive_layout_for_record(plain);
+  EXPECT_EQ(plain_layout.sources.size(), static_cast<std::size_t>(1));
+  EXPECT_TRUE(plain_layout.sources[0].prefix.empty());
+  EXPECT_EQ(plain_layout.sources[0].path, "ux0:user/00/savedata/VITADBDLD");
+  EXPECT_TRUE(plain_layout.extra_targets.empty());
 
-  const auto exists = [](const std::string &path) { return path == "ux0:data/retroarch"; };
-  const std::vector<vsm::SaveRecord> with_builtin =
-      vsm::build_tracked_save_records(config, exists);
-  EXPECT_EQ(with_builtin.size(), static_cast<std::size_t>(1));
-  EXPECT_EQ(with_builtin[0].id, "data-retroarch");
-  EXPECT_EQ(with_builtin[0].display_name, "RetroArch");
-  EXPECT_EQ(with_builtin[0].tracked_paths.size(), static_cast<std::size_t>(2));
-  EXPECT_EQ(with_builtin[0].tracked_paths[0].path, "ux0:data/retroarch/savefiles");
+  // Savedata plus an extra: everything prefixed, savedata under the reserved name, and only the
+  // extra recorded for the sidecar.
+  vsm::SaveRecord mixed = plain;
+  mixed.extra_paths = {{"VitaDB", "ux0:data/VitaDB"}};
+  const vsm::ArchiveLayout mixed_layout = vsm::archive_layout_for_record(mixed);
+  EXPECT_EQ(mixed_layout.sources.size(), static_cast<std::size_t>(2));
+  EXPECT_EQ(mixed_layout.sources[0].prefix, std::string(vsm::kSavedataPrefix));
+  EXPECT_EQ(mixed_layout.sources[0].path, "ux0:user/00/savedata/VITADBDLD");
+  EXPECT_EQ(mixed_layout.sources[1].prefix, "VitaDB");
+  EXPECT_EQ(mixed_layout.extra_targets.size(), static_cast<std::size_t>(1));
+  EXPECT_EQ(mixed_layout.extra_targets[0].prefix, "VitaDB");
+  EXPECT_TRUE(vsm::tracked_paths_are_well_formed(mixed_layout.sources));
 
-  const auto nothing = [](const std::string &) { return false; };
-  const std::vector<vsm::SaveRecord> without_builtin =
-      vsm::build_tracked_save_records(config, nothing);
-  EXPECT_TRUE(without_builtin.empty());
+  // An app with no savedata and one extra is a single directory too, so it stays flat - and the
+  // sidecar records that empty prefix so the archive can be mapped back.
+  vsm::SaveRecord solo;
+  solo.id = "RETROVITA";
+  solo.extra_paths = {{"retroarch", "ux0:data/retroarch"}};
+  const vsm::ArchiveLayout solo_layout = vsm::archive_layout_for_record(solo);
+  EXPECT_EQ(solo_layout.sources.size(), static_cast<std::size_t>(1));
+  EXPECT_TRUE(solo_layout.sources[0].prefix.empty());
+  EXPECT_EQ(solo_layout.extra_targets.size(), static_cast<std::size_t>(1));
+  EXPECT_TRUE(solo_layout.extra_targets[0].prefix.empty());
+
+  // Several extras and no savedata: all prefixed, no root content.
+  vsm::SaveRecord multi = solo;
+  multi.extra_paths = {{"savefiles", "ux0:data/retroarch/savefiles"},
+                       {"savestates", "ux0:data/retroarch/savestates"}};
+  const vsm::ArchiveLayout multi_layout = vsm::archive_layout_for_record(multi);
+  EXPECT_EQ(multi_layout.sources.size(), static_cast<std::size_t>(2));
+  EXPECT_EQ(multi_layout.extra_targets.size(), static_cast<std::size_t>(2));
+  EXPECT_TRUE(vsm::tracked_paths_are_well_formed(multi_layout.sources));
+
+  // Nothing at all to back up yields nothing rather than an empty-prefix phantom source.
+  EXPECT_TRUE(vsm::archive_layout_for_record({}).sources.empty());
+}
+
+void test_restore_targets_add_savedata_without_trusting_the_sidecar() {
+  // No recorded extras means the archive is flat: the caller restores to destination_path, so an
+  // empty mapping is the signal for that and nothing is fabricated here.
+  EXPECT_TRUE(vsm::restore_targets_for_backup("ux0:user/00/savedata/VITADBDLD", {}).empty());
+
+  // With extras, the savedata destination is prepended from the live entry - it is never read back
+  // from the user-editable sidecar, so a tampered file can only ever aim inside ux0:data.
+  const std::vector<vsm::TrackedPath> recorded = {{"VitaDB", "ux0:data/VitaDB"}};
+  const std::vector<vsm::TrackedPath> targets =
+      vsm::restore_targets_for_backup("ux0:user/00/savedata/VITADBDLD", recorded);
+  EXPECT_EQ(targets.size(), static_cast<std::size_t>(2));
+  EXPECT_EQ(targets[0].prefix, std::string(vsm::kSavedataPrefix));
+  EXPECT_EQ(targets[0].path, "ux0:user/00/savedata/VITADBDLD");
+  EXPECT_EQ(targets[1].prefix, "VitaDB");
+  EXPECT_TRUE(vsm::tracked_paths_are_well_formed(targets));
+
+  // A single empty-prefix extra means the archive was written flat, by an app that had no savedata
+  // folder then. Adding a savedata target would contradict that layout and break the "empty prefix
+  // only when sole" rule, so the savedata it has acquired since is deliberately left out.
+  const std::vector<vsm::TrackedPath> flat = {{"", "ux0:data/retroarch"}};
+  const std::vector<vsm::TrackedPath> flat_targets =
+      vsm::restore_targets_for_backup("ux0:user/00/savedata/RETROVITA", flat);
+  EXPECT_EQ(flat_targets.size(), static_cast<std::size_t>(1));
+  EXPECT_TRUE(flat_targets[0].prefix.empty());
+  EXPECT_TRUE(vsm::tracked_paths_are_well_formed(flat_targets));
+
+  // An app that still has no savedata folder contributes no savedata target either.
+  const std::vector<vsm::TrackedPath> no_savedata = vsm::restore_targets_for_backup(
+      "", {{"savefiles", "ux0:data/retroarch/savefiles"},
+           {"savestates", "ux0:data/retroarch/savestates"}});
+  EXPECT_EQ(no_savedata.size(), static_cast<std::size_t>(2));
+  EXPECT_EQ(no_savedata[0].prefix, "savefiles");
+}
+
+void test_data_folder_name_match_guesses_owner_conservatively() {
+  // The folder names on the user's own device, checked against their app.db titles.
+  const std::vector<std::string> folders = {
+      "ABM",   "AUTOPLUGIN2", "betterHomebrewBrowser", "cscrecon",  "jav",
+      "ONEMENU", "save-keeper", "savegames",           "savemgr",   "VitaDB",
+      "VitaGrafix", "vitawarm"};
+
+  EXPECT_EQ(vsm::best_data_folder_match("Save Keeper", folders), "save-keeper");
+  EXPECT_EQ(vsm::best_data_folder_match("VitaDB Downloader", folders), "VitaDB");
+  EXPECT_EQ(vsm::best_data_folder_match("VitaGrafix Configurator", folders), "VitaGrafix");
+  EXPECT_EQ(vsm::best_data_folder_match("Homebrew Browser", folders), "betterHomebrewBrowser");
+  EXPECT_EQ(vsm::best_data_folder_match("CSC Recon Loader", folders), "cscrecon");
+  EXPECT_EQ(vsm::best_data_folder_match("vitawarm loader", folders), "vitawarm");
+
+  // Known misses: an abbreviation, a roman numeral, and an initialism. Guessing at these would be
+  // worse than not guessing, since the user would have to notice and undo it.
+  EXPECT_EQ(vsm::best_data_folder_match("Save Manager", folders), "");
+  EXPECT_EQ(vsm::best_data_folder_match("AutoPlugin II", folders), "");
+  EXPECT_EQ(vsm::best_data_folder_match("Adrenaline Bubbles Manager", folders), "");
+
+  // Short names cannot latch onto an unrelated title: "jav" is three folded characters, under the
+  // containment floor, so a title merely containing those letters does not match it.
+  EXPECT_EQ(vsm::best_data_folder_match("Java Runtime", folders), "");
+  EXPECT_EQ(vsm::best_data_folder_match("", folders), "");
 }
 
 void test_backup_archive_zips_multiple_sources_under_prefixes() {
@@ -2586,7 +2704,7 @@ void test_backup_archive_zips_multiple_sources_under_prefixes() {
 
   vsm::BackupRequest request;
   request.backup_root = (base / "backups").string();
-  request.save_id = "data-retroarch";
+  request.save_id = "RETROVITA";
   request.timestamp = {2026, 7, 23, 10, 0, 0};
   // one source missing on disk: tolerated, contributes nothing
   request.sources = {{"savefiles", (base / "saves").string()},
@@ -2614,7 +2732,7 @@ void test_backup_archive_restores_prefixes_to_mapped_directories_only() {
   { std::ofstream(base / "saves" / "game.srm", std::ios::binary) << "old"; }
   vsm::BackupRequest request;
   request.backup_root = (base / "backups").string();
-  request.save_id = "data-retroarch";
+  request.save_id = "RETROVITA";
   request.timestamp = {2026, 7, 23, 10, 0, 0};
   request.sources = {{"savefiles", (base / "saves").string()}};
   const vsm::BackupResult created = vsm::create_backup_archive(request);
@@ -2651,7 +2769,7 @@ void test_backup_archive_restore_clears_destination_for_absent_prefix() {
 
   vsm::BackupRequest request;
   request.backup_root = (base / "backups").string();
-  request.save_id = "data-retroarch";
+  request.save_id = "RETROVITA";
   request.timestamp = {2026, 7, 23, 10, 0, 0};
   request.sources = {{"savefiles", (base / "saves").string()}};
   const vsm::BackupResult created = vsm::create_backup_archive(request);
@@ -3071,13 +3189,16 @@ int main() {
   test_auto_backup_suffix_display_and_content_matching();
   test_app_settings_roundtrip_and_unknown_keys();
   test_tracked_folders_json_roundtrip_and_rejects_bad_input();
-  test_tracked_entry_id_generation_normalizes_and_dedupes();
+  test_tracked_folders_json_reads_legacy_hidden_as_skipped();
+  test_extra_prefix_allocation_normalizes_and_reserves_savedata();
   test_tracked_folders_json_skips_invalid_and_duplicate_entries();
   test_tracked_folders_json_atomic_write_roundtrip();
-  test_tracked_entry_id_generation_falls_back_for_empty_normalized_name();
+  test_extra_prefix_falls_back_for_empty_normalized_name();
   test_tracked_metadata_takes_newest_observed_time_across_paths();
-  test_tracked_records_classify_homebrew_and_build_from_config();
-  test_tracked_records_skip_config_entry_duplicating_builtin_retroarch();
+  test_orphan_app_records_only_for_apps_the_scan_missed();
+  test_archive_layout_keeps_plain_saves_flat_and_prefixes_the_rest();
+  test_restore_targets_add_savedata_without_trusting_the_sidecar();
+  test_data_folder_name_match_guesses_owner_conservatively();
   test_backup_archive_zips_multiple_sources_under_prefixes();
   test_backup_archive_restores_prefixes_to_mapped_directories_only();
   test_backup_archive_restore_clears_destination_for_absent_prefix();

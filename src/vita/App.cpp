@@ -35,6 +35,7 @@
 #include <set>
 #include <string>
 #include <sys/stat.h>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -58,6 +59,9 @@ constexpr const char *kSaveIndexPath = "ux0:data/save-keeper/save-titles.json";
 // The retired times half of the old two-file layout, removed at every boot.
 constexpr const char *kLegacySaveTimesPath = "ux0:data/save-keeper/save-times.json";
 constexpr const char *kTrackedFoldersPath = "ux0:data/save-keeper/tracked-folders.json";
+// The homebrew data convention root the folder browser is confined to. Distinct from kDataRoot
+// above, which is this app's own config directory inside it.
+constexpr const char *kUserDataRoot = "ux0:data";
 // Bound the tracked-folders read: a truncated or absurdly large file must never be pulled whole
 // into memory before parsing.
 constexpr std::size_t kMaxTrackedFoldersJsonSize = 256 * 1024;
@@ -127,56 +131,65 @@ BackupTimestamp backup_timestamp_from(const SaveDateTime &value) {
   return {value.year, value.month, value.day, value.hour, value.minute, value.second};
 }
 
-// The live directories of a tracked entry, each under its own zip path prefix, ready for the
-// multi-source archive writer and the folder-signature check.
-std::vector<BackupSource> tracked_sources(const SaveRecord &save) {
+// The live directories of an entry's archive, each under its allocated zip path prefix, ready for
+// the multi-source archive writer and the folder-signature check. An entry with no extra folders
+// yields one flat source, so its archive stays byte-identical to one written before this feature.
+std::vector<BackupSource> archive_sources(const SaveRecord &save) {
+  const ArchiveLayout layout = archive_layout_for_record(save);
   std::vector<BackupSource> sources;
-  sources.reserve(save.tracked_paths.size());
-  for (const TrackedPath &tracked : save.tracked_paths) {
-    sources.push_back({tracked.prefix, tracked.path});
+  sources.reserve(layout.sources.size());
+  for (const TrackedPath &source : layout.sources) {
+    sources.push_back({source.prefix, source.path});
   }
   return sources;
 }
 
-// Just the paths of a tracked entry, for resolve_tracked_metadata (which takes the newest observed
-// time across all of them).
-std::vector<std::string> tracked_path_list(const SaveRecord &save) {
+// Every live directory an entry covers - its savedata folder, then its extras - for
+// resolve_tracked_metadata, which keeps the newest observed time across all of them.
+std::vector<std::string> save_path_list(const SaveRecord &save) {
   std::vector<std::string> paths;
-  paths.reserve(save.tracked_paths.size());
-  for (const TrackedPath &tracked : save.tracked_paths) {
-    paths.push_back(tracked.path);
+  paths.reserve(save.extra_paths.size() + 1);
+  if (!save.path.empty()) {
+    paths.push_back(save.path);
+  }
+  for (const TrackedPath &extra : save.extra_paths) {
+    paths.push_back(extra.path);
   }
   return paths;
 }
 
-// Each zip path prefix mapped back to the live directory it repopulates on restore.
-std::vector<RestoreTarget> tracked_restore_targets(const SaveRecord &save) {
+// Restore mapping derived from the live entry rather than the backup, used only as the fallback
+// when a backup's sidecar carries no usable mapping of its own.
+std::vector<RestoreTarget> entry_restore_targets(const SaveRecord &save) {
+  const std::vector<TrackedPath> mapping =
+      restore_targets_for_backup(save.path, archive_layout_for_record(save).extra_targets);
   std::vector<RestoreTarget> targets;
-  targets.reserve(save.tracked_paths.size());
-  for (const TrackedPath &tracked : save.tracked_paths) {
-    targets.push_back({tracked.prefix, tracked.path});
+  targets.reserve(mapping.size());
+  for (const TrackedPath &target : mapping) {
+    targets.push_back({target.prefix, target.path});
   }
   return targets;
 }
 
-// Content signature over a save's live directories - a flat single folder for an ordinary save,
-// the per-prefix multi-source set for a tracked entry - so the duplicate/skip checks and the
-// archive writer always measure the same files. Progress reaches the single-folder walk; the
-// multi-source one is bounded by the picker's size caps and stays quick.
+// Content signature over a save's live directories - a flat single folder when it has no extras,
+// the per-prefix multi-source set once it does - so the duplicate/skip checks and the archive
+// writer always measure the same files. Progress reaches the single-folder walk; the multi-source
+// one is bounded by the picker's size caps and stays quick.
 std::vector<ArchiveEntryInfo> compute_save_entries(
     const SaveRecord &save, bool *ok,
     const std::function<void(std::uint64_t, std::uint64_t)> &progress = {}) {
-  if (!save.tracked_paths.empty()) {
-    return compute_sources_entries(tracked_sources(save), ok);
+  if (!save.extra_paths.empty()) {
+    return compute_sources_entries(archive_sources(save), ok);
   }
   return compute_folder_entries(save.path, ok, progress);
 }
 
-// Resolves and stores a tracked record's save time from its live directories (newest observed file
-// time). This is the tracked stand-in for a mount-resolved time; tracked records never mount.
-void resolve_tracked_record_time(SaveRecord *record) {
+// Resolves and stores a record's save time from its live directories (newest observed file time).
+// Used for entries whose time cannot come from a PFS mount: homebrew savedata and every extra
+// data folder, none of which are encrypted.
+void resolve_data_folder_time(SaveRecord *record) {
   const SaveMetadata metadata =
-      resolve_tracked_metadata(tracked_path_list(*record), current_local_datetime());
+      resolve_tracked_metadata(save_path_list(*record), current_local_datetime());
   apply_mounted_save_time(record, metadata);
 }
 
@@ -451,6 +464,11 @@ std::string drive_folder_name_for(const std::string &save_id) {
   return folder_name;
 }
 
+bool path_is_directory(const std::string &path) {
+  struct stat info {};
+  return stat(path.c_str(), &info) == 0 && S_ISDIR(info.st_mode);
+}
+
 // Sorted names of the immediate child directories of root_path (dirs only, "." and ".." skipped).
 // The core scanner has an equivalent (SaveScanner.cpp's list_direct_child_directories) but it is
 // file-private, so the directory browser keeps its own. Names come straight from readdir and so can
@@ -512,19 +530,19 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
   }
   LocalSnapshotResult snapshot;
   // Resolve once so the ZIP name and JSON describe the same moment, even if creating the archive
-  // takes long enough for the wall clock to tick over. Tracked entries resolve across their live
-  // directories instead of a PFS mount.
+  // takes long enough for the wall clock to tick over. An entry carrying extra data folders takes
+  // the newest time across all of its directories instead of going through a PFS mount.
   SaveMetadata metadata =
-      save.tracked_paths.empty()
+      save.extra_paths.empty()
           ? resolve_live_save_metadata(save.path, current_local_datetime(),
                                        save.platform != SavePlatform::Psp, mount_bridge_ready_)
-          : resolve_tracked_metadata(tracked_path_list(save), current_local_datetime());
-  // A tracked backup records the prefix->directory mapping it was made from, so restore reads its
-  // targets from the archive's own sidecar instead of a later, possibly edited, config. Regular
-  // saves leave this empty and their sidecar is byte-identical to before.
-  if (!save.tracked_paths.empty()) {
-    metadata.tracked_targets = save.tracked_paths;
-  }
+          : resolve_tracked_metadata(save_path_list(save), current_local_datetime());
+  // A backup that bundles extra folders records the prefix->directory mapping it was made from, so
+  // restore reads its targets from the archive's own sidecar instead of a later, possibly edited,
+  // config. The savedata destination is deliberately never recorded - the app supplies that from
+  // the live entry - so a hand-edited sidecar can only ever redirect folders inside ux0:data. An
+  // entry with no extras yields an empty list, keeping its sidecar byte-identical to before.
+  metadata.tracked_targets = archive_layout_for_record(save).extra_targets;
 
   bool entries_ok = false;
   const std::vector<ArchiveEntryInfo> entries =
@@ -560,12 +578,13 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
   // otherwise create the pre-allocated name exclusively so a collision can never overwrite it.
   if (!plan.reuse_existing) {
     BackupRequest request;
-    // A tracked entry bundles several live directories under per-prefix paths; an ordinary save is
-    // a single flat folder. A single-path tracked entry has prefix "", matching the flat layout.
-    if (save.tracked_paths.empty()) {
+    // An entry with extra folders bundles several live directories under per-prefix paths; without
+    // them it stays a single flat folder, which is what keeps its archives interchangeable with the
+    // ones written before extra folders existed.
+    if (save.extra_paths.empty()) {
       request.source_path = save.path;
     } else {
-      request.sources = tracked_sources(save);
+      request.sources = archive_sources(save);
     }
     request.backup_root = kBackupRoot;
     request.save_id = save.id;
@@ -829,8 +848,10 @@ bool App::resolve_save_time(SaveRecord *save) {
 
 void App::apply_cached_save_times() {
   for (SaveRecord &save : saves_) {
-    // Tracked entries get their time from resolve_tracked_metadata and never touch this cache.
-    if (!save.tracked_paths.empty()) {
+    // An entry with extra folders takes its time from resolve_tracked_metadata across all of its
+    // directories. The cache is keyed on a fingerprint of the savedata folder alone, which would
+    // not notice an extra folder changing, so those entries stay out of it entirely.
+    if (!save.extra_paths.empty()) {
       continue;
     }
     if (!save.save_time_requires_mount || !save.fingerprint.ok) {
@@ -911,28 +932,40 @@ void App::load_tracked_folders() {
   tracked_config_ = std::move(parsed.config);
 }
 
-void App::append_tracked_save_records() {
-  const auto directory_exists = [](const std::string &path) {
-    struct stat info {};
-    return stat(path.c_str(), &info) == 0 && S_ISDIR(info.st_mode);
-  };
-  // Built once up front so a repeat call (config gained entries since the last run) only pays for
-  // ids actually already present, instead of an O(n) scan of saves_ per candidate record.
-  std::unordered_set<std::string> existing_ids;
-  existing_ids.reserve(saves_.size());
-  for (const SaveRecord &save : saves_) {
-    existing_ids.insert(save.id);
+void App::apply_tracked_folders() {
+  // Attach each config entry's extra folders to the app's own record, matched by id. Doing it by
+  // id (rather than by path) means an entry survives its app gaining or losing a savedata folder
+  // between launches.
+  std::unordered_map<std::string, const TrackedFolderEntry *> configured;
+  configured.reserve(tracked_config_.entries.size());
+  for (const TrackedFolderEntry &entry : tracked_config_.entries) {
+    configured.emplace(entry.id, &entry);
   }
-  std::vector<SaveRecord> tracked = build_tracked_save_records(tracked_config_, directory_exists);
-  for (SaveRecord &record : tracked) {
-    if (existing_ids.count(record.id) != 0) {
-      // Already folded in by an earlier call; only ids new to tracked_config_ get appended.
-      continue;
-    }
-    // Times come from the live directories (newest observed file), the tracked equivalent of a
-    // mount-resolved time. This happens here, at injection, not in the scanner.
-    resolve_tracked_record_time(&record);
+
+  std::unordered_set<std::string> known_ids;
+  known_ids.reserve(saves_.size());
+  for (SaveRecord &save : saves_) {
+    known_ids.insert(save.id);
+    const auto entry = configured.find(save.id);
+    // Assigned, not appended: a repeat call after the user detached a folder has to drop what an
+    // earlier call attached, or a detached folder would keep being backed up until the next launch.
+    save.extra_paths = entry == configured.end() ? std::vector<TrackedPath>() : entry->second->paths;
+  }
+
+  // An app that keeps everything in ux0:data has no savedata folder for the scan to find, so its
+  // row is synthesized from the config here. The app.db pass gives it its real title and icon.
+  for (SaveRecord &record : build_orphan_app_records(
+           tracked_config_,
+           [&](const std::string &id) { return known_ids.count(id) != 0; })) {
     saves_.push_back(std::move(record));
+  }
+
+  // Times come from the live directories (newest observed file across the savedata folder and every
+  // extra). This happens here, after attaching, not in the scanner, which knows nothing about extras.
+  for (SaveRecord &save : saves_) {
+    if (!save.extra_paths.empty()) {
+      resolve_data_folder_time(&save);
+    }
   }
 }
 
@@ -1140,45 +1173,40 @@ std::size_t App::category_count(SaveCategory category) const {
 
 void App::rebuild_visible_saves() {
   visible_saves_.clear();
-  // Two stable passes over saves_: non-hidden entries keep their order at the front, hidden ones
-  // are demoted to the end in that same order. Only homebrew ids ever land in hidden_ids, but the
-  // split runs for every tab so a stray id could never leave a save unreachable.
+  // One pass, grid order untouched. Skipped entries are only left out of the batch sweep, not
+  // reordered or removed: moving them around was the old "hidden" behaviour and it never matched
+  // what the label promised.
   for (std::size_t i = 0; i < saves_.size(); ++i) {
-    if (classify_save(saves_[i]) == category_ &&
-        tracked_config_.hidden_ids.count(saves_[i].id) == 0) {
+    if (classify_save(saves_[i]) == category_) {
       visible_saves_.push_back(i);
     }
   }
-  for (std::size_t i = 0; i < saves_.size(); ++i) {
-    if (classify_save(saves_[i]) == category_ &&
-        tracked_config_.hidden_ids.count(saves_[i].id) != 0) {
-      visible_saves_.push_back(i);
-    }
-  }
-  // The Homebrew tab has one extra selectable cell after its saves (the "+ Add folder" tile), so a
-  // focus resting on it (selected_save_ == visible_saves_.size()) is valid there and must survive a
-  // rebuild - e.g. leaving and returning to the tab; every other tab tops out at its last save.
-  const std::size_t cell_count =
-      visible_saves_.size() + (category_ == SaveCategory::Homebrew ? 1 : 0);
-  if (selected_save_ >= cell_count) {
+  if (selected_save_ >= visible_saves_.size()) {
     selected_save_ = 0;
   }
 }
 
+std::vector<std::size_t> App::batch_targets() const {
+  // The tab's entries minus the ones marked to skip. Skipping exists for homebrew settings noise -
+  // utility configs like VitaShell's or AutoPlugin's that would otherwise be re-zipped and
+  // re-uploaded on every sweep - so it filters the batch and nothing else.
+  std::vector<std::size_t> targets;
+  targets.reserve(visible_saves_.size());
+  for (const std::size_t index : visible_saves_) {
+    if (tracked_config_.skipped_ids.count(saves_[index].id) == 0) {
+      targets.push_back(index);
+    }
+  }
+  return targets;
+}
+
 const SaveRecord *App::selected_save_record() const {
-  // On the Homebrew tab selected_save_ can reach visible_saves_.size() - the "+ Add folder" tile,
-  // which has no record - so a plain bounds check (not a modulo) is what returns nullptr there and
-  // for an empty tab alike. Every caller already treats nullptr as "no save".
+  // A bounds check rather than a modulo, so an empty tab returns nullptr instead of indexing an
+  // empty vector. Every caller already treats nullptr as "no save".
   if (selected_save_ >= visible_saves_.size()) {
     return nullptr;
   }
   return &saves_[visible_saves_[selected_save_]];
-}
-
-bool App::add_folder_tile_focused() const {
-  // Mirrors the free function add_folder_tile_focused(const UiState &) in Ui.cpp - keep both
-  // conditions in sync.
-  return category_ == SaveCategory::Homebrew && selected_save_ >= visible_saves_.size();
 }
 
 void App::refresh_local_backups() {
@@ -1199,11 +1227,7 @@ void App::refresh_local_backups() {
 
 void App::move_selected_save(int delta) {
   const std::size_t previous = selected_save_;
-  // The Homebrew tab has one extra selectable cell after the last save: the "+ Add folder" tile.
-  // The grid renderer and grid-window math size to the same count, so wrap lands on it too.
-  const std::size_t cell_count =
-      visible_saves_.size() + (category_ == SaveCategory::Homebrew ? 1 : 0);
-  selected_save_ = move_selection(selected_save_, cell_count, delta);
+  selected_save_ = move_selection(selected_save_, visible_saves_.size(), delta);
   if (selected_save_ != previous) {
     cancel_restore_confirmation();
     cancel_delete_confirmation();
@@ -1366,13 +1390,20 @@ void App::handle_delete_button() {
     set_status(StatusKind::Info, "No save selected.");
     return;
   }
-  // A picker-tracked homebrew entry with no backups left has nothing to delete; Start stops tracking
-  // it instead (removing the config entry only - existing backups are never auto-dropped). The
-  // RetroArch builtin is excluded: it re-materializes every launch, so hiding is its tool, not this.
-  // While it still has backups the ordinary delete flow below runs unchanged.
-  const bool stop_trackable =
-      !selected->tracked_paths.empty() && selected->id != "data-retroarch";
-  if (stop_trackable && backup_count() == 0) {
+  // Start on an entry that has extra data folders detaches them, removing the config entry only -
+  // existing backups are never auto-dropped. An entry with its own savedata folder simply loses its
+  // extras and keeps its row. An entry that exists *because* of those folders (an app with no
+  // savedata folder) loses its row with them, so detaching is refused while it still has backups:
+  // there would be no row left to reach them from.
+  const bool has_extras = !selected->extra_paths.empty();
+  const bool row_is_config_only = selected->path.empty();
+  if (has_extras && row_is_config_only && backup_count() != 0) {
+    set_status(StatusKind::Info,
+               status_with_name("Delete the backups of ", selected->display_name,
+                                " before removing its folders."));
+    return;
+  }
+  if (has_extras) {
     const std::string name = selected->display_name;
     if (!stop_tracking_confirmation_pending_) {
       restore_confirmation_pending_ = false;
@@ -1380,7 +1411,7 @@ void App::handle_delete_button() {
       delete_scope_prompt_pending_ = false;
       stop_tracking_confirmation_pending_ = true;
       set_status(StatusKind::Info,
-                 status_with_name("Stop tracking ", name, "? Press Start again."));
+                 status_with_name("Remove data folders from ", name, "? Press Start again."));
       return;
     }
     stop_tracking_confirmation_pending_ = false;
@@ -1398,47 +1429,47 @@ void App::handle_delete_button() {
       }
     }
     if (removed_at == tracked_config_.entries.size()) {
-      // A stop-trackable id is always a config entry; guard anyway so a mismatch never writes.
-      set_status(StatusKind::Info, "Not a tracked folder.");
+      // An entry with extras is always a config entry; guard anyway so a mismatch never writes.
+      set_status(StatusKind::Info, "No data folders to remove.");
       return;
     }
     const TrackedFolderEntry saved = tracked_config_.entries[removed_at];
     tracked_config_.entries.erase(tracked_config_.entries.begin() +
                                   static_cast<long>(removed_at));
-    // Forget the hidden flag too, so a re-added folder (which regenerates this same id via
-    // make_tracked_entry_id) starts unhidden instead of coming back pre-hidden, and so hidden_ids
-    // does not accumulate stale ids for entries that no longer exist.
-    const bool was_hidden = tracked_config_.hidden_ids.count(id) != 0;
-    if (was_hidden) {
-      tracked_config_.hidden_ids.erase(id);
-    }
     std::string write_error;
     if (!write_tracked_folders_json_atomic(kTrackedFoldersPath, tracked_config_, &write_error)) {
-      // The write is atomic, so the file on disk is untouched; put the entry (and its hidden flag,
-      // if it had one) back so memory matches.
+      // The write is atomic, so the file on disk is untouched; put the entry back so memory matches.
       tracked_config_.entries.insert(
           tracked_config_.entries.begin() + static_cast<long>(removed_at), saved);
-      if (was_hidden) {
-        tracked_config_.hidden_ids.insert(id);
-      }
       set_status(StatusKind::Error, "Could not save tracked-folders.json.");
       return;
     }
     for (std::size_t i = 0; i < saves_.size(); ++i) {
-      if (saves_[i].id == id) {
-        saves_.erase(saves_.begin() + static_cast<long>(i));
-        break;
+      if (saves_[i].id != id) {
+        continue;
       }
+      if (row_is_config_only) {
+        // Nothing but the config was holding this row up, so it goes too. Guarded above: this only
+        // runs when the entry has no backups that would be left unreachable.
+        saves_.erase(saves_.begin() + static_cast<long>(i));
+      } else {
+        // A real savedata row stays; it just stops carrying the extras.
+        saves_[i].extra_paths.clear();
+        resolve_data_folder_time(&saves_[i]);
+      }
+      break;
     }
-    // Keep the cursor where the entry was; if it was the last save, land on the add-folder tile.
+    // Keep the cursor where the entry was, clamped in case the row itself went away.
     const std::size_t focus_target = selected_save_;
     rebuild_visible_saves();
-    selected_save_ = std::min(focus_target, visible_saves_.size());
+    selected_save_ = visible_saves_.empty()
+                         ? 0
+                         : std::min(focus_target, visible_saves_.size() - 1);
     category_selection_[static_cast<std::size_t>(category_)] = selected_save_;
     schedule_selected_save_time_resolve();
     refresh_local_backups();
     refresh_remote_backups_view();
-    set_status(StatusKind::Success, status_with_name("Stopped tracking ", name, "."));
+    set_status(StatusKind::Success, status_with_name("Removed data folders from ", name, "."));
     return;
   }
   const BackupRow *row = selected_backup_row();
@@ -1598,11 +1629,6 @@ void App::handle_action_button() {
     run_sync_all();
     return;
   }
-  // The Homebrew "+ Add folder" tile has no save record; the action button opens the picker.
-  if (add_folder_tile_focused()) {
-    open_directory_browser();
-    return;
-  }
   const SaveRecord *selected = selected_save_record();
   if (!selected) {
     set_status(StatusKind::Info, "No save selected.");
@@ -1712,32 +1738,37 @@ void App::handle_restore() {
   ui_.draw_busy("Restoring save", 0, -1);
   RestoreRequest restore_request;
   restore_request.archive_path = archive_path;
-  // A tracked entry restores each zip prefix back to its own live directory; an ordinary save
-  // restores to its single folder.
+  // Whether an archive is flat or carries prefixes is a property of that archive, not of today's
+  // config, so the sidecar decides - and it is read for every restore, not just entries that
+  // currently have extras. That matters when folders were attached, a backup was taken, and the
+  // folders were then detached: the archive is still prefixed, and consulting the live entry alone
+  // would extract its prefixes as literal subfolders into the savedata directory.
+  //
+  // The archive is already on the card here (a card copy, or the cloud-only copy downloaded just
+  // above), and its sidecar is read off the card with no Drive round-trip. A cloud-only backup's
+  // sidecar is never downloaded, so its targets come up empty and restore falls back to the entry.
   bool sidecar_targets_unsafe = false;
-  if (save.tracked_paths.empty()) {
+  const std::string metadata_path = local_backup_metadata_path(kBackupRoot, save.id, backup_name);
+  const SaveMetadataJsonResult sidecar = read_save_metadata_json(metadata_path);
+  const std::vector<TrackedPath> &recorded = sidecar.metadata.tracked_targets;
+  std::vector<TrackedPath> extra_targets;
+  if (sidecar.ok && !recorded.empty() && tracked_targets_are_safe(recorded)) {
+    extra_targets = recorded;
+  } else {
+    // A sidecar that lists targets yet fails validation is corrupt or hand-tampered: do not honor
+    // it, but still restore to the current entry's folders rather than block the user. With no
+    // sidecar at all this is simply what the entry looks like now - an empty list for an ordinary
+    // save, which is the flat restore path below.
+    sidecar_targets_unsafe = sidecar.ok && !recorded.empty();
+    extra_targets = archive_layout_for_record(save).extra_targets;
+  }
+  if (extra_targets.empty()) {
     restore_request.destination_path = save.path;
   } else {
-    // The backup's own sidecar is the authority on where each prefix restores, so a config edit made
-    // after the backup cannot redirect it and an archive carrying prefixes today's entry no longer
-    // lists still lands correctly. The archive is already on the card here (a card copy, or the
-    // cloud-only copy downloaded just above), and its sidecar is read off the card with no Drive
-    // round-trip. A cloud-only backup's sidecar is never downloaded, so its targets come up empty
-    // and restore falls back to the current entry, exactly like a pre-field tracked backup.
-    const std::string metadata_path =
-        local_backup_metadata_path(kBackupRoot, save.id, backup_name);
-    const SaveMetadataJsonResult sidecar = read_save_metadata_json(metadata_path);
-    const std::vector<TrackedPath> &recorded = sidecar.metadata.tracked_targets;
-    if (sidecar.ok && !recorded.empty() && tracked_targets_are_safe(recorded)) {
-      restore_request.targets.reserve(recorded.size());
-      for (const TrackedPath &target : recorded) {
-        restore_request.targets.push_back({target.prefix, target.path});
-      }
-    } else {
-      // A sidecar that lists targets yet fails validation is corrupt or hand-tampered: do not honor
-      // it, but still restore to the current entry's folders rather than block the user.
-      sidecar_targets_unsafe = sidecar.ok && !recorded.empty();
-      restore_request.targets = tracked_restore_targets(save);
+    // The savedata destination is supplied here from the live entry, never read from the sidecar,
+    // so a tampered sidecar can only ever aim a directory clear inside ux0:data.
+    for (const TrackedPath &target : restore_targets_for_backup(save.path, extra_targets)) {
+      restore_request.targets.push_back({target.prefix, target.path});
     }
   }
   restore_request.progress = [this](std::uint64_t done, std::uint64_t total) {
@@ -1767,12 +1798,12 @@ void App::handle_restore() {
 }
 
 void App::invalidate_save_time(const SaveRecord &restored) {
-  if (!restored.tracked_paths.empty()) {
-    // Tracked entries never live in the save index and never mount. Re-resolve their time from
-    // the (now restored) live directories, the same way injection does.
+  if (!restored.extra_paths.empty()) {
+    // Entries with extra folders never live in the save index and never mount. Re-resolve their
+    // time from the (now restored) live directories, the same way attaching does.
     for (SaveRecord &record : saves_) {
-      if (record.id == restored.id && !record.tracked_paths.empty()) {
-        resolve_tracked_record_time(&record);
+      if (record.id == restored.id && !record.extra_paths.empty()) {
+        resolve_data_folder_time(&record);
         break;
       }
     }
@@ -2768,15 +2799,15 @@ void App::open_save_details() {
   // fetch. A details open that reads a cached companion is instant and must not flash a modal.
   slot_details_ = {};
   slot_details_.game_title = save.display_name;
-  // Describe the inspected save so the live-row footer can offer the homebrew hide/unhide toggle;
-  // these track the save, not the snapshot row, so both details paths set them.
+  // Describe the inspected save so the live-row footer can offer the homebrew skip toggle; these
+  // track the save, not the snapshot row, so both details paths set them.
   slot_details_.entry_is_homebrew = classify_save(save) == SaveCategory::Homebrew;
-  slot_details_.entry_hidden = tracked_config_.hidden_ids.count(save.id) != 0;
-  // Shared by both branches below (the live row and a snapshot are the same tracked entry), so the
-  // details screen can list the backed-up folders regardless of which one is inspected. Left empty
-  // by the reset above for every non-tracked save.
-  for (const TrackedPath &tracked : save.tracked_paths) {
-    slot_details_.tracked_paths.push_back(tracked.path);
+  slot_details_.entry_skipped = tracked_config_.skipped_ids.count(save.id) != 0;
+  // Shared by both branches below (the live row and a snapshot describe the same entry), so the
+  // details screen can list the extra folders regardless of which one is inspected. Left empty by
+  // the reset above for every entry that has none.
+  for (const TrackedPath &extra : save.extra_paths) {
+    slot_details_.extra_paths.push_back(extra.path);
   }
   if (!selected_row) {
     // "New Backup" represents the live save. Resolve its details directly without creating an
@@ -2786,10 +2817,10 @@ void App::open_save_details() {
       ui_.draw_busy("Loading save details", 0, -1);
     }
     slot_details_.metadata =
-        save.tracked_paths.empty()
+        save.extra_paths.empty()
             ? resolve_live_save_metadata(save.path, {}, save.platform != SavePlatform::Psp,
                                          mount_bridge_ready_)
-            : resolve_tracked_metadata(tracked_path_list(save), {});
+            : resolve_tracked_metadata(save_path_list(save), {});
     if (!save_metadata_has_observed_time(slot_details_.metadata)) {
       slot_details_.metadata = {};
       slot_details_.unavailable_message = "No save details available";
@@ -2805,8 +2836,9 @@ void App::open_save_details() {
                 "newest file.";
     }
     // On-demand: the live save's on-disk footprint. No ZIP exists yet, so leave archive_bytes unset.
-    // A tracked entry sums every live directory; unknown only when all of them are unreadable.
-    if (save.tracked_paths.empty()) {
+    // An entry with extras sums its savedata folder and every extra, which is what its next backup
+    // would hold; unknown only when all of those directories are unreadable.
+    if (save.extra_paths.empty()) {
       bool save_size_ok = false;
       const std::uint64_t save_bytes = compute_folder_size(save.path, &save_size_ok);
       if (save_size_ok) {
@@ -2816,9 +2848,9 @@ void App::open_save_details() {
     } else {
       std::uint64_t total = 0;
       bool any_ok = false;
-      for (const TrackedPath &tracked : save.tracked_paths) {
+      for (const std::string &path : save_path_list(save)) {
         bool path_ok = false;
-        const std::uint64_t bytes = compute_folder_size(tracked.path, &path_ok);
+        const std::uint64_t bytes = compute_folder_size(path, &path_ok);
         if (path_ok) {
           total += bytes;
           any_ok = true;
@@ -3174,7 +3206,7 @@ void App::begin_label_edit() {
                  : status_with_name("Labeled ", display_backup_name(new_name), "."));
 }
 
-void App::toggle_entry_hidden() {
+void App::toggle_entry_skipped() {
   const SaveRecord *selected = selected_save_record();
   if (!selected) {
     return;
@@ -3188,40 +3220,70 @@ void App::toggle_entry_hidden() {
   }
   const std::string id = selected->id;
   const std::string name = selected->display_name;
-  const bool now_hidden = tracked_config_.hidden_ids.count(id) == 0;
-  if (now_hidden) {
-    tracked_config_.hidden_ids.insert(id);
+  const bool now_skipped = tracked_config_.skipped_ids.count(id) == 0;
+  if (now_skipped) {
+    tracked_config_.skipped_ids.insert(id);
   } else {
-    tracked_config_.hidden_ids.erase(id);
+    tracked_config_.skipped_ids.erase(id);
   }
   std::string write_error;
   if (!write_tracked_folders_json_atomic(kTrackedFoldersPath, tracked_config_, &write_error)) {
     // The write is atomic, so a failure here means tracked-folders.json on disk was never touched;
     // undoing the flip keeps the in-memory set matching what is still there.
-    if (now_hidden) {
-      tracked_config_.hidden_ids.erase(id);
+    if (now_skipped) {
+      tracked_config_.skipped_ids.erase(id);
     } else {
-      tracked_config_.hidden_ids.insert(id);
+      tracked_config_.skipped_ids.insert(id);
     }
     set_status(StatusKind::Error, "Could not save tracked-folders.json.");
     return;
   }
   // Details, when open, stays on this save; flip its footer hint to match the new state.
-  slot_details_.entry_hidden = now_hidden;
-  rebuild_visible_saves();
-  // The reorder moved this entry within the tab while selected_save_ stayed a frozen index (the
-  // details screen never re-syncs it via navigation), so re-locate the focus by id - the entry is
-  // demoted, never removed, so it is always still present.
-  refocus_selection_by_id(id);
+  slot_details_.entry_skipped = now_skipped;
+  // No rebuild: skipping changes what the batch sweep touches, not where the entry sits in the grid.
   set_status(StatusKind::Info,
-             now_hidden ? status_with_name("Hidden ", name, " - moved to the end of the tab.")
-                        : status_with_name("Unhidden ", name, "."));
+             now_skipped
+                 ? status_with_name("Skipping ", name, " in Back up all.")
+                 : status_with_name("Including ", name, " in Back up all again."));
+}
+
+std::string App::browser_start_path(const SaveRecord &save) const {
+  // app.db carries no ux0:data path for an app - verified against the device, where "ux0:data"
+  // appears nowhere in it - so where to open is necessarily a guess. Best evidence first.
+  if (!save.extra_paths.empty()) {
+    // Beside a folder this entry already has, so adding RetroArch's savestates right after its
+    // savefiles opens in ux0:data/retroarch instead of back at the root.
+    const std::string &first = save.extra_paths.front().path;
+    const std::size_t slash = first.rfind('/');
+    if (slash != std::string::npos && slash > 0) {
+      const std::string parent = first.substr(0, slash);
+      if (path_is_directory(parent)) {
+        return parent;
+      }
+    }
+  }
+  // Otherwise the closest name match between the app's title and the ux0:data children. Only the
+  // starting directory - the user can always navigate out to the root.
+  const std::string match =
+      best_data_folder_match(save.display_name, list_child_directories(kUserDataRoot));
+  return match.empty() ? std::string(kUserDataRoot) : std::string(kUserDataRoot) + "/" + match;
 }
 
 void App::open_directory_browser() {
+  const SaveRecord *selected = selected_save_record();
+  if (!selected) {
+    set_status(StatusKind::Info, "No save selected.");
+    return;
+  }
+  if (classify_save(*selected) != SaveCategory::Homebrew) {
+    set_status(StatusKind::Info, "Extra data folders are for homebrew entries.");
+    return;
+  }
   directory_browser_ = {};
   directory_browser_.open = true;
-  directory_browser_.current_path = "ux0:data";
+  directory_browser_.entry_id = selected->id;
+  directory_browser_.entry_name = selected->display_name;
+  directory_browser_.current_path = browser_start_path(*selected);
   reload_browser_rows();
   clear_status();
 }
@@ -3237,12 +3299,12 @@ void App::close_directory_browser() {
 }
 
 void App::reload_browser_rows() {
-  // Paths already covered by an entry - every config entry path plus the RetroArch builtin's live
-  // directories - pulled straight from saves_ so the "tracked" tag always matches what is tracked.
-  std::unordered_set<std::string> tracked_paths;
+  // Folders already attached to some entry, pulled straight from saves_ so the tag always matches
+  // what is actually attached - including folders on entries other than the one being added to.
+  std::unordered_set<std::string> attached_paths;
   for (const SaveRecord &save : saves_) {
-    for (const TrackedPath &tracked : save.tracked_paths) {
-      tracked_paths.insert(tracked.path);
+    for (const TrackedPath &extra : save.extra_paths) {
+      attached_paths.insert(extra.path);
     }
   }
   directory_browser_.rows.clear();
@@ -3252,7 +3314,7 @@ void App::reload_browser_rows() {
     DirectoryBrowserState::Row row;
     row.name = name;
     row.already_tracked =
-        tracked_paths.count(directory_browser_.current_path + "/" + name) != 0;
+        attached_paths.count(directory_browser_.current_path + "/" + name) != 0;
     directory_browser_.rows.push_back(std::move(row));
   }
   schedule_browser_size_resolve();
@@ -3335,37 +3397,59 @@ void App::browser_track_selected() {
                "Cannot update tracked-folders.json - fix or delete it first.");
     return;
   }
-  // Seed the id allocator with everything that could collide: existing config ids, every id already
-  // in saves_ (the RetroArch builtin and any savedata homebrew), and the reserved builtin id - so a
-  // folder literally named "retroarch" can never mint "data-retroarch" and be silently dropped.
-  std::set<std::string> taken_ids;
-  for (const TrackedFolderEntry &entry : tracked_config_.entries) {
-    taken_ids.insert(entry.id);
+  const std::string entry_id = browser.entry_id;
+  const std::string entry_name = browser.entry_name;
+  if (entry_id.empty()) {
+    // The browser is always opened from an entry; without one there is nothing to attach to.
+    set_status(StatusKind::Info, "No entry to add this folder to.");
+    return;
   }
-  for (const SaveRecord &save : saves_) {
-    taken_ids.insert(save.id);
-  }
-  taken_ids.insert("data-retroarch");
-  const std::string new_id = make_tracked_entry_id(row.name, taken_ids);
   const std::string name = row.name;
 
-  TrackedFolderEntry entry;
-  entry.id = new_id;
-  entry.title = name;
-  entry.paths = {{"", full_path}};  // one path, entries at the archive root
-  tracked_config_.entries.push_back(entry);
+  // Find this app's config entry, or start one. Ids are the app's own save id, so there is no
+  // allocator and nothing to collide with - one entry per app, however many folders it gathers.
+  std::size_t entry_index = tracked_config_.entries.size();
+  for (std::size_t i = 0; i < tracked_config_.entries.size(); ++i) {
+    if (tracked_config_.entries[i].id == entry_id) {
+      entry_index = i;
+      break;
+    }
+  }
+  const bool creating = entry_index == tracked_config_.entries.size();
+  std::set<std::string> taken_prefixes;
+  if (!creating) {
+    for (const TrackedPath &path : tracked_config_.entries[entry_index].paths) {
+      taken_prefixes.insert(path.prefix);
+    }
+  }
+  // Allocated once, here, and stored: renaming the folder later must never repoint an existing
+  // backup's restore mapping. make_extra_prefix also keeps "savedata" reserved for the entry's own
+  // save folder.
+  const TrackedPath added{make_extra_prefix(name, taken_prefixes), full_path};
+  if (creating) {
+    TrackedFolderEntry entry;
+    entry.id = entry_id;
+    entry.title = entry_name;
+    entry.paths.push_back(added);
+    tracked_config_.entries.push_back(std::move(entry));
+  } else {
+    tracked_config_.entries[entry_index].paths.push_back(added);
+  }
   std::string write_error;
   if (!write_tracked_folders_json_atomic(kTrackedFoldersPath, tracked_config_, &write_error)) {
-    // Atomic write means the file on disk was never touched; drop the entry so memory matches it.
-    tracked_config_.entries.pop_back();
+    // Atomic write means the file on disk was never touched; undo so memory matches it.
+    if (creating) {
+      tracked_config_.entries.pop_back();
+    } else {
+      tracked_config_.entries[entry_index].paths.pop_back();
+    }
     set_status(StatusKind::Error, "Could not save tracked-folders.json.");
     return;
   }
-  // Fold the new entry into saves_ (idempotent - only the new id is materialized and time-resolved),
-  // re-sort, focus it, and leave the browser for the overview.
-  append_tracked_save_records();
+  // Re-attach from the config (idempotent), re-sort, focus the entry, and leave the browser.
+  apply_tracked_folders();
   apply_sort_and_rebuild();
-  refocus_selection_by_id(new_id);
+  refocus_selection_by_id(entry_id);
   // apply_sort_and_rebuild refreshed the backup panel for whatever it focused first (index 0), so
   // re-point it at the entry the refocus above actually landed on, the way move_selected_save does.
   selected_backup_ = 0;
@@ -3373,7 +3457,8 @@ void App::browser_track_selected() {
   refresh_local_backups();
   refresh_remote_backups_view();
   close_directory_browser();
-  set_status(StatusKind::Success, status_with_name("Now tracking ", name, "."));
+  set_status(StatusKind::Success,
+             status_with_name("Added " + name + " to ", entry_name, "."));
 }
 
 void App::cancel_sync_all_confirmation() {
@@ -3417,6 +3502,11 @@ void App::begin_sync_all() {
     set_status(StatusKind::Info, "No saves in this tab.");
     return;
   }
+  const std::size_t target_count = batch_targets().size();
+  if (target_count == 0) {
+    set_status(StatusKind::Info, "Every entry in this tab is set to skip.");
+    return;
+  }
   // A sign-in without internet cannot upload; the confirmation says so and the run only backs up.
   const bool drive_online = google_connected_ && HttpClient::network_reachable();
   // Accurate duplicate skipping needs the Drive index; a stored sign-in whose startup sync
@@ -3430,13 +3520,13 @@ void App::begin_sync_all() {
   sync_all_confirmation_pending_ = true;
   sync_all_will_upload_ = drive_online;
   set_status(StatusKind::Info,
-             sync_all_confirm_message(visible_saves_.size(), save_category_label(category_),
+             sync_all_confirm_message(target_count, save_category_label(category_),
                                       drive_online));
 }
 
 void App::run_sync_all() {
   sync_all_confirmation_pending_ = false;
-  const std::vector<std::size_t> targets = visible_saves_;
+  const std::vector<std::size_t> targets = batch_targets();
   const std::size_t total = targets.size();
   SyncRunCounts run;
   std::size_t metadata_warnings = 0;
@@ -3624,9 +3714,9 @@ int App::run() {
   // valid times get written back instead of being reset to "never resolved" and re-mounted.
   apply_cached_save_times();
   rebuild_save_index(app_db_stamped ? app_db_mtime : 0, app_db_stamped ? app_db_size : 0);
-  // Fold the tracked homebrew data folders into saves_ now that the scanner, app-database pass
-  // and index are done - they run only over real savedata - and before the sort/rebuild below.
-  append_tracked_save_records();
+  // Fold the extra data folders into saves_ now that the scanner, app-database pass and index
+  // are done - they run only over real savedata - and before the sort/rebuild below.
+  apply_tracked_folders();
   load_settings();
   // One pass for folders emptied by older versions, which left them behind. Deletes clean up as
   // they go now, so this never needs to run again. It sits under the "Loading saves" modal that is
@@ -3825,15 +3915,24 @@ int App::run() {
         sceKernelDelayThread(kFrameDelayUs);
         continue;
       }
+      // L opens the data-folder picker for a homebrew entry, folding extra ux0:data folders into
+      // this entry's own backups. Nothing else in details uses the triggers.
+      if ((pressed & SCE_CTRL_LTRIGGER) != 0 && slot_details_.entry_is_homebrew) {
+        slot_details_.open = false;
+        open_directory_browser();
+        previous_buttons = buttons;
+        sceKernelDelayThread(kFrameDelayUs);
+        continue;
+      }
       // Square edits the focused snapshot's label directly - the sort tap has no meaning here, so
       // no hold needed. Reopen afterwards so the header shows the new name (metadata is cached by
-      // then). On the live "New Backup" row a homebrew entry toggles hidden instead, staying open.
+      // then). On the live "New Backup" row a homebrew entry toggles its batch skip instead.
       if ((pressed & SCE_CTRL_SQUARE) != 0) {
         if (selected_backup_row()) {
           begin_label_edit();
           open_save_details();
         } else if (slot_details_.entry_is_homebrew) {
-          toggle_entry_hidden();
+          toggle_entry_skipped();
         }
         previous_buttons = buttons;
         sceKernelDelayThread(kFrameDelayUs);
@@ -3919,7 +4018,7 @@ int App::run() {
         rows_changed = true;
       }
       if (!rows_changed && (pressed & cancel_button) != 0) {
-        if (browser.current_path == "ux0:data") {
+        if (browser.current_path == kUserDataRoot) {
           close_directory_browser();
         } else {
           // Names never contain a separator, so the last '/' is always the parent boundary; the
@@ -4134,7 +4233,7 @@ int App::run() {
     UiState ui_state;
     ui_state.saves = &saves_;
     ui_state.visible_saves = &visible_saves_;
-    ui_state.hidden_ids = &tracked_config_.hidden_ids;
+    ui_state.skipped_ids = &tracked_config_.skipped_ids;
     ui_state.active_category = category_;
     ui_state.sort_mode = sort_mode_;
     for (int i = 0; i < kSaveCategoryCount; ++i) {
@@ -4151,9 +4250,6 @@ int App::run() {
     ui_state.duplicate_backup_confirmation_pending = duplicate_backup_confirmation_pending_;
     ui_state.enter_is_cross = enter_is_cross_;
     ui_state.slot_details = &slot_details_;
-    // The Homebrew tab carries an extra "+ Add folder" tile after the last save; every other tab
-    // stops at its saves.
-    ui_state.show_add_folder_tile = category_ == SaveCategory::Homebrew;
     ui_state.google_connected = google_connected_;
     ui_state.google_setup_prompt = google_setup_prompt_;
     ui_state.drive_synced = drive_synced_;
