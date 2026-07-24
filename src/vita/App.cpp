@@ -1095,8 +1095,18 @@ std::size_t App::category_count(SaveCategory category) const {
 
 void App::rebuild_visible_saves() {
   visible_saves_.clear();
+  // Two stable passes over saves_: non-hidden entries keep their order at the front, hidden ones
+  // are demoted to the end in that same order. Only homebrew ids ever land in hidden_ids, but the
+  // split runs for every tab so a stray id could never leave a save unreachable.
   for (std::size_t i = 0; i < saves_.size(); ++i) {
-    if (classify_save(saves_[i]) == category_) {
+    if (classify_save(saves_[i]) == category_ &&
+        tracked_config_.hidden_ids.count(saves_[i].id) == 0) {
+      visible_saves_.push_back(i);
+    }
+  }
+  for (std::size_t i = 0; i < saves_.size(); ++i) {
+    if (classify_save(saves_[i]) == category_ &&
+        tracked_config_.hidden_ids.count(saves_[i].id) != 0) {
       visible_saves_.push_back(i);
     }
   }
@@ -2574,6 +2584,10 @@ void App::open_save_details() {
   // fetch. A details open that reads a cached companion is instant and must not flash a modal.
   slot_details_ = {};
   slot_details_.game_title = save.display_name;
+  // Describe the inspected save so the live-row footer can offer the homebrew hide/unhide toggle;
+  // these track the save, not the snapshot row, so both details paths set them.
+  slot_details_.entry_is_homebrew = classify_save(save) == SaveCategory::Homebrew;
+  slot_details_.entry_hidden = tracked_config_.hidden_ids.count(save.id) != 0;
   if (!selected_row) {
     // "New Backup" represents the live save. Resolve its details directly without creating an
     // archive or JSON companion; this is a read-only preview of what the next backup would use.
@@ -2967,6 +2981,44 @@ void App::begin_label_edit() {
              label.empty()
                  ? std::string("Label removed.")
                  : status_with_name("Labeled ", display_backup_name(new_name), "."));
+}
+
+void App::toggle_entry_hidden() {
+  const SaveRecord *selected = selected_save_record();
+  if (!selected) {
+    return;
+  }
+  if (tracked_config_load_failed_) {
+    // The config could not be read whole this run, so writing it back would truncate whatever is
+    // on disk; refuse the toggle and leave both the file and the in-memory set untouched.
+    set_status(StatusKind::Info,
+               "Cannot update tracked-folders.json - fix or delete it first");
+    return;
+  }
+  const std::string id = selected->id;
+  const std::string name = selected->display_name;
+  const bool now_hidden = tracked_config_.hidden_ids.count(id) == 0;
+  if (now_hidden) {
+    tracked_config_.hidden_ids.insert(id);
+  } else {
+    tracked_config_.hidden_ids.erase(id);
+  }
+  if (!write_text_file(kTrackedFoldersPath, serialize_tracked_folders_json(tracked_config_))) {
+    // Undo the flip so the UI and disk stay consistent after a failed write.
+    if (now_hidden) {
+      tracked_config_.hidden_ids.erase(id);
+    } else {
+      tracked_config_.hidden_ids.insert(id);
+    }
+    set_status(StatusKind::Error, "Could not save tracked-folders.json.");
+    return;
+  }
+  // Details, when open, stays on this save; flip its footer hint to match the new state.
+  slot_details_.entry_hidden = now_hidden;
+  rebuild_visible_saves();
+  set_status(StatusKind::Info,
+             now_hidden ? status_with_name("Hidden ", name, " - moved to the end of the tab.")
+                        : status_with_name("Unhidden ", name, "."));
 }
 
 void App::cancel_sync_all_confirmation() {
@@ -3415,12 +3467,15 @@ int App::run() {
         sceKernelDelayThread(kFrameDelayUs);
         continue;
       }
-      // Square edits the label directly - the sort tap has no meaning here, so no hold needed.
-      // Reopen afterwards so the header shows the new name (the metadata is cached by then).
+      // Square edits the focused snapshot's label directly - the sort tap has no meaning here, so
+      // no hold needed. Reopen afterwards so the header shows the new name (metadata is cached by
+      // then). On the live "New Backup" row a homebrew entry toggles hidden instead, staying open.
       if ((pressed & SCE_CTRL_SQUARE) != 0) {
         if (selected_backup_row()) {
           begin_label_edit();
           open_save_details();
+        } else if (slot_details_.entry_is_homebrew) {
+          toggle_entry_hidden();
         }
         previous_buttons = buttons;
         sceKernelDelayThread(kFrameDelayUs);
@@ -3652,6 +3707,7 @@ int App::run() {
     UiState ui_state;
     ui_state.saves = &saves_;
     ui_state.visible_saves = &visible_saves_;
+    ui_state.hidden_ids = &tracked_config_.hidden_ids;
     ui_state.active_category = category_;
     ui_state.sort_mode = sort_mode_;
     for (int i = 0; i < kSaveCategoryCount; ++i) {

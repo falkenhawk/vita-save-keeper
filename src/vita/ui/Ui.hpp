@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -54,6 +55,10 @@ struct SlotDetailsState {
   // corner. Both false for the live save, which is not a snapshot.
   bool snapshot_on_card{};
   bool snapshot_in_cloud{};
+  // Describe the inspected save itself (not the snapshot row), so the live row's footer can offer
+  // the hide/unhide toggle only for homebrew entries and label it by the current state.
+  bool entry_is_homebrew{};
+  bool entry_hidden{};
 };
 
 // Grid width of the save panel; D-pad up/down moves by one full row, so the input handler in App
@@ -66,6 +71,8 @@ struct UiState {
   const std::vector<SaveRecord> *saves{};
   // Indices into saves for the active category tab; selected_save indexes this list.
   const std::vector<std::size_t> *visible_saves{};
+  // Save ids demoted to the end of the tab; their grid tiles render dimmed with a "hidden" tag.
+  const std::set<std::string> *hidden_ids{};
   SaveCategory active_category{SaveCategory::VitaGame};
   SaveSortMode sort_mode{SaveSortMode::Name};
   std::array<std::size_t, kSaveCategoryCount> category_counts{};

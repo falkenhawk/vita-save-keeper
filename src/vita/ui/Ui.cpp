@@ -1158,6 +1158,9 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
       } else if (!state.snapshot_in_cloud) {
         hints.push_back({ButtonSymbol::Select, "Upload"});
       }
+    } else if (state.entry_is_homebrew) {
+      // The live row of a homebrew entry can hide or unhide it, matching the Square action there.
+      hints.push_back({ButtonSymbol::Square, state.entry_hidden ? "Unhide" : "Hide"});
     }
     hints.push_back({primary, is_snapshot ? "Restore" : "Backup"});
     hints.push_back({cancel, "Back"});
@@ -1298,6 +1301,17 @@ void Ui::draw_title_grid(const UiState &state) {
       } else {
         draw_placeholder_icon(fonts_, save, x + pad, y + pad, icon_size,
                               is_selected);
+      }
+
+      // Hidden entries are demoted to the end of the tab and drawn muted with a tag - a reversible
+      // state, not removal. The overlay covers the tile face but not the selection border, so a
+      // focused hidden tile still reads as focused.
+      if (state.hidden_ids && state.hidden_ids->count(save.id) != 0) {
+        vita2d_draw_rectangle(x, y, kTileSize, kTileSize, RGBA8(5, 10, 18, 165));
+        const char *tag = "hidden";
+        const int tag_w = measure_text(kTextSizeTiny, tag);
+        vita2d_draw_rectangle(x, y + kTileSize - 18, tag_w + 12, 18, RGBA8(5, 10, 18, 210));
+        draw_text(fonts_, x + 6, y + kTileSize - 5, kColorMuted, kTextSizeTiny, tag);
       }
     }
   }

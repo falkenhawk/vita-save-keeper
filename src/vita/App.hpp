@@ -156,6 +156,10 @@ private:
   long long remote_size_for(const std::string &remote_name) const;
   void perform_scoped_delete(bool delete_local, bool delete_remote);
   void begin_label_edit();
+  // Flips the focused save's id in tracked_config_.hidden_ids and persists the config, then
+  // rebuilds the visible list so the entry moves to (or back from) the end of the tab. Refuses to
+  // write while tracked_config_load_failed_ is set, so an unreadable file is never truncated.
+  void toggle_entry_hidden();
   bool rename_remote_backup(const SaveRecord &save, const std::string &remote_name,
                             const std::string &new_name);
   void handle_transfer_button();
