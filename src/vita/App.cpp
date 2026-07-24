@@ -3016,6 +3016,17 @@ void App::toggle_entry_hidden() {
   // Details, when open, stays on this save; flip its footer hint to match the new state.
   slot_details_.entry_hidden = now_hidden;
   rebuild_visible_saves();
+  // The reorder moved this entry within the tab while selected_save_ stayed a frozen index (the
+  // details screen never re-syncs it via navigation), so re-locate the focus by id - the entry is
+  // demoted, never removed, so it is always still present. Mirrors apply_sort_and_rebuild's
+  // id-based refocus, including keeping the remembered per-tab position in step.
+  for (std::size_t i = 0; i < visible_saves_.size(); ++i) {
+    if (saves_[visible_saves_[i]].id == id) {
+      selected_save_ = i;
+      break;
+    }
+  }
+  category_selection_[static_cast<std::size_t>(category_)] = selected_save_;
   set_status(StatusKind::Info,
              now_hidden ? status_with_name("Hidden ", name, " - moved to the end of the tab.")
                         : status_with_name("Unhidden ", name, "."));
