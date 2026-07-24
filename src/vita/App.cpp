@@ -2728,6 +2728,12 @@ void App::open_save_details() {
   // these track the save, not the snapshot row, so both details paths set them.
   slot_details_.entry_is_homebrew = classify_save(save) == SaveCategory::Homebrew;
   slot_details_.entry_hidden = tracked_config_.hidden_ids.count(save.id) != 0;
+  // Shared by both branches below (the live row and a snapshot are the same tracked entry), so the
+  // details screen can list the backed-up folders regardless of which one is inspected. Left empty
+  // by the reset above for every non-tracked save.
+  for (const TrackedPath &tracked : save.tracked_paths) {
+    slot_details_.tracked_paths.push_back(tracked.path);
+  }
   if (!selected_row) {
     // "New Backup" represents the live save. Resolve its details directly without creating an
     // archive or JSON companion; this is a read-only preview of what the next backup would use.

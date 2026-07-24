@@ -59,6 +59,11 @@ struct SlotDetailsState {
   // the hide/unhide toggle only for homebrew entries and label it by the current state.
   bool entry_is_homebrew{};
   bool entry_hidden{};
+  // A tracked entry's data-folder paths (SaveRecord.tracked_paths, path only). A homebrew data
+  // folder has no sdslot metadata, so when this is non-empty the renderer lists these in place of
+  // the slot table instead of showing the "no readable slot metadata" fallback. Empty for every
+  // other save.
+  std::vector<std::string> tracked_paths;
 };
 
 // Directory-picker modal for adding a homebrew data folder to track. Rooted at "ux0:data" and never
