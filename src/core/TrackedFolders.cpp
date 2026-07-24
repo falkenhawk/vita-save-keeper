@@ -7,6 +7,7 @@
 #include <set>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace vsm {
 namespace {
@@ -143,6 +144,27 @@ std::string make_tracked_entry_id(const std::string &folder_name,
       return candidate;
     }
   }
+}
+
+SaveMetadata resolve_tracked_metadata(const std::vector<std::string> &paths,
+                                      const SaveDateTime &backup_clock) {
+  if (paths.empty()) {
+    return resolve_save_metadata("", backup_clock);
+  }
+  SaveMetadata newest = resolve_save_metadata(paths.front(), backup_clock);
+  long long newest_epoch = save_datetime_to_local_epoch(newest.saved_at);
+  for (std::size_t i = 1; i < paths.size(); ++i) {
+    const SaveMetadata candidate = resolve_save_metadata(paths[i], backup_clock);
+    if (!save_metadata_has_observed_time(candidate)) {
+      continue;
+    }
+    const long long candidate_epoch = save_datetime_to_local_epoch(candidate.saved_at);
+    if (!save_metadata_has_observed_time(newest) || candidate_epoch > newest_epoch) {
+      newest = candidate;
+      newest_epoch = candidate_epoch;
+    }
+  }
+  return newest;
 }
 
 } // namespace vsm

@@ -2324,6 +2324,32 @@ void test_tracked_entry_id_generation_falls_back_for_empty_normalized_name() {
   EXPECT_EQ(vsm::make_tracked_entry_id("", taken), "data-folder-2");
 }
 
+void test_tracked_metadata_takes_newest_observed_time_across_paths() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-tracked-time-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "a");
+  std::filesystem::create_directories(base / "b");
+  { std::ofstream(base / "a" / "old.sav", std::ios::binary) << "old"; }
+  { std::ofstream(base / "b" / "new.sav", std::ios::binary) << "new"; }
+  const long long old_epoch = 1750000000, new_epoch = 1760000000;
+  struct utimbuf old_times {old_epoch, old_epoch}, new_times {new_epoch, new_epoch};
+  utime((base / "a" / "old.sav").c_str(), &old_times);
+  utime((base / "b" / "new.sav").c_str(), &new_times);
+
+  const vsm::SaveMetadata metadata = vsm::resolve_tracked_metadata(
+      {(base / "a").string(), (base / "b").string(), (base / "missing").string()},
+      vsm::current_local_datetime());
+  EXPECT_TRUE(vsm::save_metadata_has_observed_time(metadata));
+  EXPECT_EQ(static_cast<std::size_t>(vsm::save_datetime_to_local_epoch(metadata.saved_at)),
+            static_cast<std::size_t>(new_epoch));
+
+  const vsm::SaveMetadata none = vsm::resolve_tracked_metadata(
+      {(base / "missing").string()}, vsm::current_local_datetime());
+  EXPECT_TRUE(!vsm::save_metadata_has_observed_time(none));
+  std::filesystem::remove_all(base);
+}
+
 void test_backup_archive_zips_multiple_sources_under_prefixes() {
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() / "save-keeper-multisource-test";
@@ -2819,6 +2845,7 @@ int main() {
   test_tracked_entry_id_generation_normalizes_and_dedupes();
   test_tracked_folders_json_skips_invalid_and_duplicate_entries();
   test_tracked_entry_id_generation_falls_back_for_empty_normalized_name();
+  test_tracked_metadata_takes_newest_observed_time_across_paths();
   test_backup_archive_zips_multiple_sources_under_prefixes();
   test_backup_archive_restores_prefixes_to_mapped_directories_only();
   test_backup_archive_restore_clears_destination_for_absent_prefix();
