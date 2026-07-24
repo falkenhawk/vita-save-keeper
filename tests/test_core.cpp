@@ -2325,6 +2325,7 @@ void test_tracked_entry_id_generation_falls_back_for_empty_normalized_name() {
 }
 
 void test_tracked_metadata_takes_newest_observed_time_across_paths() {
+  ScopedTimezone timezone("UTC0");
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() / "save-keeper-tracked-time-test";
   std::filesystem::remove_all(base);
@@ -2342,6 +2343,16 @@ void test_tracked_metadata_takes_newest_observed_time_across_paths() {
       vsm::current_local_datetime());
   EXPECT_TRUE(vsm::save_metadata_has_observed_time(metadata));
   EXPECT_EQ(static_cast<std::size_t>(vsm::save_datetime_to_local_epoch(metadata.saved_at)),
+            static_cast<std::size_t>(new_epoch));
+
+  // The missing path resolves first and falls back to the backup clock (effectively "now"),
+  // whose epoch is numerically larger than new_epoch. Without the
+  // !save_metadata_has_observed_time(newest) short-circuit, a bare epoch comparison would wrongly
+  // keep that unobserved backup-clock time instead of the observed one from "b".
+  const vsm::SaveMetadata missing_first = vsm::resolve_tracked_metadata(
+      {(base / "missing").string(), (base / "b").string()}, vsm::current_local_datetime());
+  EXPECT_TRUE(vsm::save_metadata_has_observed_time(missing_first));
+  EXPECT_EQ(static_cast<std::size_t>(vsm::save_datetime_to_local_epoch(missing_first.saved_at)),
             static_cast<std::size_t>(new_epoch));
 
   const vsm::SaveMetadata none = vsm::resolve_tracked_metadata(
