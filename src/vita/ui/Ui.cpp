@@ -44,6 +44,10 @@ constexpr unsigned int kColorIdleDot = RGBA8(100, 116, 139, 255);
 constexpr const char *kBundledFontPath = "app0:sce_sys/resources/Roboto-Regular.ttf";
 
 constexpr unsigned int kTextSizeTiny = 15;
+// Pill labels only: size-16 caps rasterize 12px tall (even; 14 and 15 both hint to 11), which
+// makes the START/SEL pill 20px - even 4px padding AND even 8px centering in the 36px footer
+// band. An odd cap height forces a half-pixel compromise somewhere.
+constexpr unsigned int kTextSizePill = 16;
 constexpr unsigned int kTextSizeSmall = 17;
 constexpr unsigned int kTextSizeNormal = 18;
 constexpr unsigned int kTextSizeTitle = 22;
@@ -352,24 +356,50 @@ void draw_placeholder_icon(const FontSet &fonts, const SaveRecord &save, int x, 
 
 void draw_button_shape(int x, int y, ButtonSymbol symbol, unsigned int color) {
   switch (symbol) {
+  // The glyph box bottoms on the text baseline (kFooterSymbolTop + 14 = baseline). Square and
+  // triangle span 15px from it - level with each other, reaching 2px above the labels' caps -
+  // and the circle matches via a 7.5px radius. The triangle's half-width grows one pixel every
+  // two rows and its base is exactly the staircase's final step, so no base pixel creeps past
+  // the slopes. Only the cross stays at cap height: an X is optically dense enough already.
   case ButtonSymbol::Circle:
-    vita2d_draw_fill_circle(x + 8, y + 8, 8, color);
-    vita2d_draw_fill_circle(x + 8, y + 8, 5, RGBA8(5, 10, 18, 230));
+    // A 1px ring painted per pixel (distance from centre in [6.5, 7.5)): fill_circle's
+    // triangle-fan rendering was jagged, and punching a smaller disc out of a bigger one made
+    // a 3px ring that read far heavier than the other glyphs' 1px strokes - and the punch
+    // colour could never match every background it sits on.
+    // Centred on y+8 - the text centre - not bottom-aligned like the flat shapes: a circle has
+    // no flat edge, so the eye reads its centre, and it overshoots the cap band 1px both ways.
+    for (int dy = -7; dy <= 7; ++dy) {
+      for (int dx = -7; dx <= 7; ++dx) {
+        const int d2 = dx * dx + dy * dy;
+        if (d2 >= 43 && d2 < 56) {
+          vita2d_draw_rectangle(x + 8 + dx, y + 8 + dy, 1, 1, color);
+        }
+      }
+    }
     break;
   case ButtonSymbol::Cross:
     vita2d_draw_line(x + 2, y + 2, x + 14, y + 14, color);
     vita2d_draw_line(x + 14, y + 2, x + 2, y + 14, color);
     break;
   case ButtonSymbol::Square:
-    vita2d_draw_line(x + 1, y + 1, x + 15, y + 1, color);
-    vita2d_draw_line(x + 15, y + 1, x + 15, y + 15, color);
-    vita2d_draw_line(x + 15, y + 15, x + 1, y + 15, color);
-    vita2d_draw_line(x + 1, y + 15, x + 1, y + 1, color);
+    // Four 1px rectangles instead of lines: GPU line endpoints dropped the top-left corner
+    // pixel; rectangles cover every pixel deterministically.
+    vita2d_draw_rectangle(x + 1, y, 15, 1, color);
+    vita2d_draw_rectangle(x + 1, y + 14, 15, 1, color);
+    vita2d_draw_rectangle(x + 1, y + 1, 1, 13, color);
+    vita2d_draw_rectangle(x + 15, y + 1, 1, 13, color);
     break;
   case ButtonSymbol::Triangle:
-    vita2d_draw_line(x + 8, y, x + 16, y + 15, color);
-    vita2d_draw_line(x + 16, y + 15, x, y + 15, color);
-    vita2d_draw_line(x, y + 15, x + 8, y, color);
+    // Scanline outline with a rounded per-row half-width: GPU lines stair-stepped the two
+    // slopes differently, this makes the walls mirror-identical by construction (a regular
+    // two-row staircase). The base row ends exactly 1px past the last wall pixel on each side,
+    // continuing the slope without a spur.
+    for (int i = 0; i < 14; ++i) {
+      const int half = (i + 1) / 2;
+      vita2d_draw_rectangle(x + 8 - half, y + i, 1, 1, color);
+      vita2d_draw_rectangle(x + 8 + half, y + i, 1, 1, color);
+    }
+    vita2d_draw_rectangle(x + 1, y + 14, 15, 1, color);
     break;
   case ButtonSymbol::Select:
   case ButtonSymbol::Start:
@@ -405,9 +435,28 @@ int hint_width(const FontSet &fonts, const HintSpec &hint) {
   }
   if (hint.symbol == ButtonSymbol::Select || hint.symbol == ButtonSymbol::Start) {
     const char *pill_text = hint.symbol == ButtonSymbol::Start ? "START" : "SEL";
-    return text_width(fonts, kTextSizeTiny, pill_text) + 12 + 8 + width;
+    return text_width(fonts, kTextSizePill, pill_text) + 12 + 8 + width;
   }
   return 22 + width;
+}
+
+// Dim parenthesized gesture note like "(hold)" or "(hold: Label)". The paren glyphs draw 1px
+// above the word: parens descend below the baseline by design, which made the note read as
+// sagging next to the text it annotates; lifted, they wrap the lowercase word symmetrically.
+void draw_dim_note(const FontSet &fonts, int x, int baseline, const char *text) {
+  const std::string note = text;
+  const bool wrapped = note.size() >= 2 && note.front() == '(' && note.back() == ')';
+  if (!wrapped) {
+    draw_text(fonts, x, baseline, kColorIdleDot, kTextSizeTiny, note.c_str());
+    return;
+  }
+  const std::string inner = note.substr(1, note.size() - 2);
+  int pen = x;
+  draw_text(fonts, pen, baseline - 1, kColorIdleDot, kTextSizeTiny, "(");
+  pen += text_width(fonts, kTextSizeTiny, "(");
+  draw_text(fonts, pen, baseline, kColorIdleDot, kTextSizeTiny, inner.c_str());
+  pen += text_width(fonts, kTextSizeTiny, inner.c_str());
+  draw_text(fonts, pen, baseline - 1, kColorIdleDot, kTextSizeTiny, ")");
 }
 
 void draw_hint(const FontSet &fonts, int x, const HintSpec &hint) {
@@ -418,15 +467,18 @@ void draw_hint(const FontSet &fonts, int x, const HintSpec &hint) {
   } else if (hint.symbol == ButtonSymbol::Select || hint.symbol == ButtonSymbol::Start) {
     const char *pill_text = hint.symbol == ButtonSymbol::Start ? "START" : "SEL";
     // Size the pill from the measured text so the label never spills past its edge.
-    const int pill_w = text_width(fonts, kTextSizeTiny, pill_text) + 12;
+    const int pill_w = text_width(fonts, kTextSizePill, pill_text) + 12;
+    // All-even geometry: 12px caps + 4px padding each side = 20px box, centred 8/8 in the
+    // 36px footer band. See kTextSizePill.
     vita2d_draw_rectangle(x, 516, pill_w, 20, RGBA8(255, 255, 255, 30));
-    draw_text(fonts, x + 6, 531, kColorMuted, kTextSizeTiny, pill_text);
+    draw_text(fonts, x + 6, 532, kColorMuted, kTextSizePill, pill_text);
     text_x = x + pill_w + 8;
   } else {
     draw_button_shape(x, kFooterSymbolTop, hint.symbol, kColorMuted);
   }
   if (hint.dim_prefix) {
-    draw_text(fonts, text_x, kFooterBaseline, kColorIdleDot, kTextSizeTiny, hint.dim_prefix);
+    // Nudged 1px toward the pill it annotates.
+    draw_dim_note(fonts, text_x - 1, kFooterBaseline, hint.dim_prefix);
     text_x += text_width(fonts, kTextSizeTiny, hint.dim_prefix) + 6;
   }
   if (hint.label) {
@@ -440,7 +492,7 @@ void draw_hint(const FontSet &fonts, int x, const HintSpec &hint) {
     text_x += text_width(fonts, kTextSizeSmall, hint.label);
   }
   if (hint.dim_suffix) {
-    draw_text(fonts, text_x + 6, kFooterBaseline, kColorIdleDot, kTextSizeTiny, hint.dim_suffix);
+    draw_dim_note(fonts, text_x + 6, kFooterBaseline, hint.dim_suffix);
   }
 }
 
@@ -456,7 +508,7 @@ int draw_hints_right_aligned(const FontSet &fonts, const HintSpec *hints, int co
       break;
     }
   }
-  int x = 936;
+  int x = 940;
   int leftmost = x;
   for (int i = count - 1; i >= 0; --i) {
     x -= hint_width(fonts, hints[i]);
@@ -596,8 +648,8 @@ bool Ui::initialize() {
   }
 
   vita2d_set_clear_color(kColorBackground);
-  const unsigned int sizes[] = {kTextSizeTiny, kTextSizeSmall, kTextSizeNormal, kTextSizeTitle,
-                                kTextSizeCode};
+  const unsigned int sizes[] = {kTextSizePill, kTextSizeTiny, kTextSizeSmall, kTextSizeNormal,
+                                kTextSizeTitle, kTextSizeCode};
   bool any_font = false;
   for (const unsigned int size : sizes) {
     fonts_.by_size[size] = vita2d_load_font_file(kBundledFontPath);
@@ -1066,7 +1118,9 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
     }
   }
 
-  vita2d_draw_rectangle(0, 508, 960, 36, RGBA8(5, 10, 18, 230));
+  // Pure black, fully opaque: the footer is the off-stage strip, and on the OLED it melts
+  // into the bezel.
+  vita2d_draw_rectangle(0, 508, 960, 36, RGBA8(0, 0, 0, 255));
   const ButtonSymbol cancel = enter_is_cross ? ButtonSymbol::Circle : ButtonSymbol::Cross;
   const ButtonSymbol primary = enter_is_cross ? ButtonSymbol::Cross : ButtonSymbol::Circle;
   // The overview's per-snapshot actions carry over, with the same button meanings: Select
@@ -1146,7 +1200,8 @@ void Ui::draw_header(const UiState &state) {
     const int cue_w = hold_w + 6 + glyph_w + 6 + connect_w;
     const int cue_x = status_x - 19 - 24 - cue_w;
     draw_text(fonts_, cue_x, 32, kColorMuted, kTextSizeSmall, hold_text);
-    draw_button_shape(cue_x + hold_w + 6, 17, ButtonSymbol::Triangle, kColorMuted);
+    // Top 18 puts the glyph base (top + 14) on the hint text baseline at 32.
+    draw_button_shape(cue_x + hold_w + 6, 18, ButtonSymbol::Triangle, kColorMuted);
     draw_text(fonts_, cue_x + hold_w + 6 + glyph_w + 6, 32, kColorMuted, kTextSizeSmall,
               connect_text);
   }
@@ -1155,8 +1210,8 @@ void Ui::draw_header(const UiState &state) {
 void Ui::draw_title_grid(const UiState &state) {
   const std::vector<SaveRecord> &saves = *state.saves;
   const std::vector<std::size_t> &visible = *state.visible_saves;
-  vita2d_draw_rectangle(0, 52, 504, 456, kColorPanel);
-  vita2d_draw_line(504, 52, 504, 508, RGBA8(255, 255, 255, 20));
+  vita2d_draw_rectangle(0, 52, 512, 456, kColorPanel);
+  vita2d_draw_line(512, 52, 512, 508, RGBA8(255, 255, 255, 20));
 
   // Category tabs: L/R cycles Vita / Homebrew / PSP. Tabs with zero saves stay dimmed and are
   // skipped by the input handler.
@@ -1182,10 +1237,14 @@ void Ui::draw_title_grid(const UiState &state) {
   constexpr int kColumns = kSaveGridColumns;
   constexpr int kRows = 4;
   constexpr int kTileSize = 88;
-  constexpr int kGapX = 8;
-  constexpr int kGapY = 12;
+  // Even 10px gaps both ways; the pane divider sits at 512 to make room for the wider columns,
+  // and the right pane gives back the width from its padding so its content stays 408 wide.
+  constexpr int kGapX = 10;
+  constexpr int kGapY = 10;
   constexpr int kStartX = 16;
-  constexpr int kStartY = 104;
+  // 108 splits the vertical slack left by the 10px row gaps: ~15px under the tab underline,
+  // ~18px above the footer, instead of pooling it all at the bottom.
+  constexpr int kStartY = 108;
   const std::size_t selected = visible.empty() ? 0 : state.selected_save % visible.size();
   title_top_row_ = grid_window_top_row(title_top_row_, selected, visible.size(), kColumns, kRows);
   const std::size_t first_index = title_top_row_ * kColumns;
@@ -1193,7 +1252,7 @@ void Ui::draw_title_grid(const UiState &state) {
   if (!visible.empty()) {
     const std::string count =
         std::to_string(selected + 1) + "/" + std::to_string(visible.size());
-    draw_text(fonts_, 504 - 16 - measure_text(kTextSizeSmall, count.c_str()), 84,
+    draw_text(fonts_, 512 - 16 - measure_text(kTextSizeSmall, count.c_str()), 84,
               kColorMuted, kTextSizeSmall, count.c_str());
   }
 
@@ -1203,7 +1262,9 @@ void Ui::draw_title_grid(const UiState &state) {
       const int x = kStartX + col * (kTileSize + kGapX);
       const int y = kStartY + row * (kTileSize + kGapY);
       if (index >= visible.size()) {
-        vita2d_draw_rectangle(x, y, kTileSize, kTileSize, RGBA8(255, 255, 255, 8));
+        // Empty slot: a faint on-ramp navy (hue 216, one notch above the pane) instead of a white
+        // wash, toned down so the raised frame on filled tiles is what reads as "a game is here".
+        vita2d_draw_rectangle(x, y, kTileSize, kTileSize, RGBA8(19, 28, 42, 255));
         continue;
       }
 
@@ -1244,7 +1305,7 @@ void Ui::draw_title_grid(const UiState &state) {
 }
 
 void Ui::draw_backup_panel(const UiState &state) {
-  vita2d_draw_rectangle(504, 52, 456, 456, kColorPanelRight);
+  vita2d_draw_rectangle(512, 52, 448, 456, kColorPanelRight);
 
   if (state.google_auth_pending && !state.google_user_code.empty()) {
     draw_google_auth_panel(state);
@@ -1254,7 +1315,7 @@ void Ui::draw_backup_panel(const UiState &state) {
 
   const SaveRecord *save = selected_visible_record(state);
   if (!save) {
-    draw_text(fonts_, 528, 96, kColorMuted, kTextSizeSmall,
+    draw_text(fonts_, 532, 96, kColorMuted, kTextSizeSmall,
               "Install or create saves, then reopen Save Keeper.");
     draw_status_line(state);
     return;
@@ -1269,8 +1330,8 @@ void Ui::draw_backup_panel(const UiState &state) {
   const std::string details = fit_text(
       kTextSizeSmall, title_id_label(*save) + "  |  " + platform_text + " save", 408);
   // Baseline 84 matches the tab row in the left pane so the top lines read as one row.
-  draw_text(fonts_, 528, 84, kColorText, kTextSizeNormal, title.c_str());
-  draw_text(fonts_, 528, 110, kColorMuted, kTextSizeSmall, details.c_str());
+  draw_text(fonts_, 532, 84, kColorText, kTextSizeNormal, title.c_str());
+  draw_text(fonts_, 532, 110, kColorMuted, kTextSizeSmall, details.c_str());
 
   if (!state.backup_rows) {
     draw_status_line(state);
@@ -1293,9 +1354,9 @@ void Ui::draw_backup_panel(const UiState &state) {
     const BackupRow &row = all_rows[i + backup_window];
     const bool selected = (i + backup_window) == selected_entry;
     const unsigned int bg = selected ? kColorAccentSoft : RGBA8(255, 255, 255, 18);
-    vita2d_draw_rectangle(528, y, 408, 36, bg);
+    vita2d_draw_rectangle(532, y, 408, 36, bg);
     if (selected) {
-      vita2d_draw_rectangle(528, y, 4, 36, kColorAccent);
+      vita2d_draw_rectangle(532, y, 4, 36, kColorAccent);
     }
 
     // Each snapshot marks its state in one fixed right-aligned slot: synced (card + Drive),
@@ -1309,29 +1370,29 @@ void Ui::draw_backup_panel(const UiState &state) {
       const unsigned int time_color = selected ? kColorAccent : kColorIdleDot;
       if (save->save_time_requires_mount) {
         static const char *const kPrefix = "Last save:";
-        draw_text(fonts_, 898 - measure_text(kTextSizeTiny, kPrefix), y + 23, time_color,
+        draw_text(fonts_, 902 - measure_text(kTextSizeTiny, kPrefix), y + 23, time_color,
                   kTextSizeTiny, kPrefix);
-        draw_circle_spinner(912.0f, static_cast<float>(y) + 17.0f, frame_counter_, time_color);
+        draw_circle_spinner(916.0f, static_cast<float>(y) + 17.0f, frame_counter_, time_color);
       } else if (save->save_time_known) {
         // The label stays plain text, but the date runs through the tabular renderer so its
         // date/time separator carries the same tightened gap as the detail screen. Both are
-        // right-aligned to end at 922: the date first, then the label butted against its left.
+        // right-aligned to end at 926: the date first, then the label butted against its left.
         const std::string date = format_save_datetime_spaced(save->saved_at);
         const int date_w = datetime_tabular_width(fonts_, kTextSizeTiny, date);
         static const char *const kPrefix = "Last save: ";
-        draw_text(fonts_, 922 - date_w - measure_text(kTextSizeTiny, kPrefix), y + 23, time_color,
+        draw_text(fonts_, 926 - date_w - measure_text(kTextSizeTiny, kPrefix), y + 23, time_color,
                   kTextSizeTiny, kPrefix);
-        draw_datetime_tabular(fonts_, 922, y + 23, time_color, kTextSizeTiny, date);
+        draw_datetime_tabular(fonts_, 926, y + 23, time_color, kTextSizeTiny, date);
       } else {
         static const char *const kUnknown = "Last save: unknown";
-        draw_text(fonts_, 922 - measure_text(kTextSizeTiny, kUnknown), y + 23, time_color,
+        draw_text(fonts_, 926 - measure_text(kTextSizeTiny, kUnknown), y + 23, time_color,
                   kTextSizeTiny, kUnknown);
       }
       max_text_width = 150;
     } else {
       max_text_width = 340;
       // The row wash is nearly transparent, so the pane behind it is what the cut-out must match.
-      draw_presence_glyph(902, y + 9, row.has_local(), row.has_remote(), kColorPanelRight);
+      draw_presence_glyph(906, y + 9, row.has_local(), row.has_remote(), kColorPanelRight);
     }
     const std::string display = row.display_name();
     const int full_width = measure_text(kTextSizeSmall, display.c_str());
@@ -1361,12 +1422,12 @@ void Ui::draw_backup_panel(const UiState &state) {
       }
       vita2d_enable_clipping();
       vita2d_set_clip_rectangle(542, y, 542 + max_text_width, y + 36);
-      draw_text(fonts_, 542 - static_cast<int>(offset), y + 24, kColorText, kTextSizeSmall,
+      draw_text(fonts_, 546 - static_cast<int>(offset), y + 24, kColorText, kTextSizeSmall,
                 display.c_str());
       vita2d_disable_clipping();
     } else {
       const std::string label = fit_text(kTextSizeSmall, display, max_text_width);
-      draw_text(fonts_, 542, y + 24, selected ? kColorText : kColorMuted,
+      draw_text(fonts_, 546, y + 24, selected ? kColorText : kColorMuted,
                 kTextSizeSmall, label.c_str());
     }
     y += 42;
@@ -1384,7 +1445,7 @@ void Ui::draw_backup_panel(const UiState &state) {
   }
 
   if (all_rows.size() > 1) {
-    draw_rstick_hint(930, 470);
+    draw_rstick_hint(934, 470);
   }
 
   draw_status_line(state);
@@ -1401,27 +1462,27 @@ void Ui::draw_rstick_hint(int cx, int cy) {
 }
 
 void Ui::draw_google_auth_panel(const UiState &state) {
-  draw_text(fonts_, 528, 90, kColorText, kTextSizeTitle, "Connect Google Drive");
+  draw_text(fonts_, 532, 90, kColorText, kTextSizeTitle, "Connect Google Drive");
 
-  // Short step lines: the QR block occupies the pane's right edge from x=804.
-  draw_text(fonts_, 528, 138, kColorText, kTextSizeNormal,
+  // Short step lines: the QR block occupies the pane's right edge from x=774.
+  draw_text(fonts_, 532, 138, kColorText, kTextSizeNormal,
             "1  Scan the QR code");
-  draw_text(fonts_, 528, 168, kColorText, kTextSizeNormal,
+  draw_text(fonts_, 532, 168, kColorText, kTextSizeNormal,
             "2  Approve Save Keeper");
-  draw_text(fonts_, 528, 198, kColorText, kTextSizeNormal,
+  draw_text(fonts_, 532, 198, kColorText, kTextSizeNormal,
             "3  Finishes by itself");
 
   const std::string url = "Or enter the code at " + display_url(state.google_verification_url);
-  draw_text(fonts_, 528, 308, kColorMuted, kTextSizeTiny,
+  draw_text(fonts_, 532, 308, kColorMuted, kTextSizeTiny,
             truncate_label(url, 40).c_str());
-  draw_text(fonts_, 528, 356, kColorAccent, kTextSizeCode,
+  draw_text(fonts_, 532, 356, kColorAccent, kTextSizeCode,
             state.google_user_code.c_str());
 
   // The QR code carries the verification URL with the user code pre-filled, so scanning skips the
   // typing step entirely.
   const std::string qr_url = build_device_verification_qr_url(state.google_verification_url,
                                                               state.google_user_code);
-  draw_qr_code(qr_url, 770, 104, 5);
+  draw_qr_code(qr_url, 774, 104, 5);
 
   // A lightweight pulse so the wait feels alive: one dot per half second, cycling.
   const int dot_count = 1 + static_cast<int>((frame_counter_ / 30U) % 3U);
@@ -1429,11 +1490,11 @@ void Ui::draw_google_auth_panel(const UiState &state) {
   for (int i = 0; i < dot_count; ++i) {
     waiting.push_back('.');
   }
-  draw_text(fonts_, 528, 416, kColorMuted, kTextSizeNormal, waiting.c_str());
+  draw_text(fonts_, 532, 416, kColorMuted, kTextSizeNormal, waiting.c_str());
 
   const std::string validity =
       "Code valid for " + format_minutes_seconds(state.auth_seconds_left);
-  draw_text(fonts_, 528, 444, kColorMuted, kTextSizeTiny, validity.c_str());
+  draw_text(fonts_, 532, 444, kColorMuted, kTextSizeTiny, validity.c_str());
 }
 
 void Ui::draw_status_line(const UiState &state) {
@@ -1460,19 +1521,21 @@ void Ui::draw_status_line(const UiState &state) {
     }
   }
   // Baseline chosen so the text centers on the R-stick pictogram (cy = 470) next to it.
-  draw_text(fonts_, 528, 476, color, kTextSizeSmall, status.c_str());
+  draw_text(fonts_, 532, 476, color, kTextSizeSmall, status.c_str());
 
   // Hold gauge (Select = batch, Square = label, Triangle = Google action): fills toward the
   // trigger right under the hint text, so the gesture announces itself before anything runs.
   if (state.hold_gauge_fraction > 0.0f) {
     const float fraction = std::min(1.0f, state.hold_gauge_fraction);
-    vita2d_draw_rectangle(528, 482, 380, 3, RGBA8(255, 255, 255, 24));
-    vita2d_draw_rectangle(528, 482, static_cast<int>(380.0f * fraction), 3, kColorAccent);
+    vita2d_draw_rectangle(532, 482, 380, 3, RGBA8(255, 255, 255, 24));
+    vita2d_draw_rectangle(532, 482, static_cast<int>(380.0f * fraction), 3, kColorAccent);
   }
 }
 
 void Ui::draw_footer(const UiState &state) {
-  vita2d_draw_rectangle(0, 508, 960, 36, RGBA8(5, 10, 18, 230));
+  // Pure black, fully opaque: the footer is the off-stage strip, and on the OLED it melts
+  // into the bezel.
+  vita2d_draw_rectangle(0, 508, 960, 36, RGBA8(0, 0, 0, 255));
 
   const ButtonSymbol confirm = state.enter_is_cross ? ButtonSymbol::Cross : ButtonSymbol::Circle;
   const ButtonSymbol cancel = state.enter_is_cross ? ButtonSymbol::Circle : ButtonSymbol::Cross;
