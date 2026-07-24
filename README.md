@@ -42,6 +42,11 @@ more than one Vita (or a PS TV), your saves follow you.
 
 ## What you need
 
+<table align="right"><tr><td align="center">
+<img width="250" src="docs/screenshots/livearea.png" alt="ai-slopified livearea banner"><br>
+<sub><i>ai-slopified livearea banner</i></sub>
+</td></tr></table>
+
 - a PS Vita or PS TV with HENkaku / h-encore homebrew enabled
 - "Enable unsafe homebrew" turned on in HENkaku settings (the app reads save folders and the
   system app database)
@@ -55,8 +60,6 @@ more than one Vita (or a PS TV), your saves follow you.
    permissions prompt
 3. do the [one-time Google setup](docs/google-drive-setup.md), then launch Save Keeper from the
    LiveArea
-
-![LiveArea](docs/screenshots/livearea.png)
 
 ## Google Drive setup (one time)
 
