@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(save_keeper VERSION 1.1.0 LANGUAGES C CXX)
+project(save_keeper VERSION 1.1.1 LANGUAGES C CXX)
 
 if(NOT CMAKE_BUILD_TYPE)
   # An unset build type compiles without optimization: slower TLS/zip/QR work on the Vita CPU and

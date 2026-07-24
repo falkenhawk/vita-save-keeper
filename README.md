@@ -42,6 +42,11 @@ more than one Vita (or a PS TV), your saves follow you.
 
 ## What you need
 
+<table align="right"><tr><td align="center">
+<img width="250" src="docs/screenshots/livearea.png" alt="ai-slopified livearea banner"><br>
+<sub><i>ai-slopified livearea banner<br>do not install if you are sensitive to it!</i></sub>
+</td></tr></table>
+
 - a PS Vita or PS TV with HENkaku / h-encore homebrew enabled
 - "Enable unsafe homebrew" turned on in HENkaku settings (the app reads save folders and the
   system app database)
@@ -55,8 +60,6 @@ more than one Vita (or a PS TV), your saves follow you.
    permissions prompt
 3. do the [one-time Google setup](docs/google-drive-setup.md), then launch Save Keeper from the
    LiveArea
-
-![LiveArea](docs/screenshots/livearea.png)
 
 ## Google Drive setup (one time)
 
@@ -163,3 +166,11 @@ or VitaShell fails promotion with error `0x8010113D`.
 
 GPLv3, see [LICENSE](LICENSE). The vendored SQLite override is GPLv3, which makes copyleft the
 natural license for the whole project.
+
+## AI disclaimer
+
+Built with heavy AI assistance: the code, docs, and art were developed with Claude (Fable 5 and
+Opus 4.8) and GPT-5.6 Sol, through many feedback loops under human control, review, and testing on
+real hardware.
+
+Do not install if you don't accept software built this way.
