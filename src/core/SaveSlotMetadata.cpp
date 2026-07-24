@@ -232,6 +232,22 @@ bool is_valid_utf8(const std::string &value) {
   return sanitize_utf8(reinterpret_cast<const unsigned char *>(value.data()), value.size()) == value;
 }
 
+// No legitimate Vita path contains a control character (byte < 0x20). picojson decodes a JSON
+// \u0000 escape into a real embedded NUL, and the filesystem layer downstream reads paths via
+// .c_str(), which truncates at that NUL - so a path this function would call valid can resolve to
+// a shorter, different path once it reaches a syscall. tracked_targets_are_safe (TrackedFolders.cpp)
+// is the authoritative gate that rejects such a target before it is ever used to restore a save,
+// but skipping it here too, at parse time, keeps a tampered entry out of in-memory metadata
+// entirely rather than merely out of the restore path.
+bool contains_control_character(const std::string &value) {
+  for (const char ch : value) {
+    if (static_cast<unsigned char>(ch) < 0x20) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool json_depth_within_limit(const std::string &json) {
   int depth = 0;
   bool in_string = false;
@@ -560,8 +576,9 @@ SaveMetadataJsonResult parse_save_metadata_json(const std::string &json) {
   }
 
   // Optional: present only in tracked-folder sidecars. Missing leaves the vector empty, so every
-  // pre-field sidecar still parses. Entries missing/empty "path" or with non-string fields are
-  // skipped, matching the lenient parsing of tracked-folders.json (parse_path in TrackedFolders.cpp).
+  // pre-field sidecar still parses. Entries missing/empty "path", with non-string fields, or with a
+  // control character (see contains_control_character) anywhere in "path" are skipped, matching the
+  // lenient parsing of tracked-folders.json (parse_path in TrackedFolders.cpp).
   const picojson::value *targets = json_member(root, "tracked_targets");
   if (targets && targets->is<picojson::array>()) {
     for (const picojson::value &target_value : targets->get<picojson::array>()) {
@@ -570,7 +587,8 @@ SaveMetadataJsonResult parse_save_metadata_json(const std::string &json) {
       }
       const picojson::object &target = target_value.get<picojson::object>();
       const picojson::value *path = json_member(target, "path");
-      if (!path || !path->is<std::string>() || path->get<std::string>().empty()) {
+      if (!path || !path->is<std::string>() || path->get<std::string>().empty() ||
+          contains_control_character(path->get<std::string>())) {
         continue;
       }
       const picojson::value *prefix = json_member(target, "prefix");

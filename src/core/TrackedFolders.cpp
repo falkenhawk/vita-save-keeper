@@ -78,7 +78,22 @@ bool parse_entry(const picojson::value &value, TrackedFolderEntry *entry) {
 // with every "/"-separated segment non-empty and not "..". Rejecting empty segments closes the
 // "ux0:data/" and "ux0:data//x" spellings that would resolve back to the data root and let a restore
 // clear it wholesale; rejecting ".." blocks climbing out of the sandbox.
+//
+// Checked first, ahead of that prefix/segment walk: any control character (byte < 0x20), which
+// includes an embedded NUL. picojson happily decodes a JSON \u0000 escape into a real NUL byte
+// inside a std::string, so a sidecar can carry a path like "ux0:data/\0.. junk" that this function's
+// std::string-based checks see as a harmless "ux0:data/.. junk"-adjacent string, while the
+// filesystem layer (clear_directory_contents, which goes through .c_str()) sees only
+// "ux0:data/" or "ux0:data/.." up to the NUL. That mismatch is exactly the gap a crafted sidecar
+// exploits to make an accepted path collapse to the data root (or climb out of it) at the syscall
+// boundary, so a restore driven by that sidecar can wipe the whole ux0:data tree. No legitimate
+// Vita path contains a control character, so rejecting all of them (not just NUL) is the safer floor.
 bool destination_is_confined(const std::string &path) {
+  for (const char ch : path) {
+    if (static_cast<unsigned char>(ch) < 0x20) {
+      return false;
+    }
+  }
   if (path.compare(0, 9, "ux0:data/") != 0) {
     return false;
   }

@@ -555,11 +555,16 @@ void test_save_metadata_json_records_tracked_targets_when_present() {
   EXPECT_EQ(parsed.metadata.tracked_targets[1].path, "ux0:data/retroarch/savestates");
 
   // lenient parse: an entry missing/empty "path" is skipped and the rest survive, matching how
-  // tracked-folders.json entries are read; a missing "prefix" defaults to empty.
+  // tracked-folders.json entries are read; a missing "prefix" defaults to empty. A "path" carrying
+  // a control character is skipped too - the JSON "\u0000" escape below is decoded by picojson into
+  // a real embedded NUL in the resulting std::string, which is exactly how a hand-tampered sidecar
+  // would smuggle one in. This parse-time skip is defense-in-depth only; tracked_targets_are_safe
+  // (tested above) remains the authoritative gate before any such target is used to restore a save.
   const std::string lenient =
       R"({"version":2,"archiveIdentity":"id","savedAt":"2026-07-23T09:15:00",)"
       R"("source":"filesystem","approximate":true,"slots":[],"tracked_targets":[)"
-      R"({"prefix":"a"},{"prefix":"","path":""},{"path":"ux0:data/keep"}]})";
+      R"({"prefix":"a"},{"prefix":"","path":""},{"path":"ux0:data/keep"},)"
+      R"({"path":"ux0:data/\u0000evil"}]})";
   const vsm::SaveMetadataJsonResult lenient_parsed = vsm::parse_save_metadata_json(lenient);
   EXPECT_TRUE(lenient_parsed.ok);
   EXPECT_EQ(lenient_parsed.metadata.tracked_targets.size(), static_cast<std::size_t>(1));
@@ -615,6 +620,47 @@ void test_tracked_targets_safety_confines_restore_destinations() {
       {{"same", "ux0:data/a"}, {"same", "ux0:data/b"}}));
   EXPECT_TRUE(!vsm::tracked_targets_are_safe(
       {{"", "ux0:data/a"}, {"other", "ux0:data/b"}}));
+
+  // dots that are part of a real name, not a "." or ".." segment, still pass - the confinement
+  // check splits on "/" and only rejects a segment that is exactly "..", not one that merely
+  // contains dots
+  EXPECT_TRUE(vsm::tracked_targets_are_safe({{"", "ux0:data/a..b"}}));
+
+  // An embedded NUL is what a hand-crafted sidecar smuggles across devices: picojson can decode a
+  // JSON \u0000 escape into a real NUL byte inside the std::string, and downstream the
+  // filesystem layer reads the path through .c_str(), which stops at that NUL. A path that looks
+  // fully confined to this function (as a std::string, "ux0:data/" + trailing NUL has no ".."
+  // segment and starts with the right prefix) would truncate to the bare "ux0:data/" once it
+  // reaches a syscall, and a restore against that destination would wipe the whole tree. Built
+  // with push_back so the NUL survives into the std::string - a bare "ux0:data/\0" literal would
+  // itself truncate at compile time and the test would silently stop covering the bug.
+  std::string embedded_nul_root = "ux0:data/";
+  embedded_nul_root.push_back('\0');
+  EXPECT_TRUE(!vsm::tracked_targets_are_safe({{"", embedded_nul_root}}));
+
+  // Same idea, but the NUL sits after a ".." segment: as a full std::string this reads as
+  // "ux0:data/..\0x", which the segment walk alone would already reject (a ".." segment), but the
+  // NUL must independently trigger rejection too, since it is checked first and unconditionally.
+  std::string embedded_nul_traversal = "ux0:data/..";
+  embedded_nul_traversal.push_back('\0');
+  embedded_nul_traversal += "x";
+  EXPECT_TRUE(!vsm::tracked_targets_are_safe({{"", embedded_nul_traversal}}));
+
+  // Any other control character (not just NUL) is rejected too - the fix's floor is "byte < 0x20",
+  // not "byte == 0", since no legitimate Vita path contains one.
+  std::string embedded_newline = "ux0:data/foo";
+  embedded_newline.push_back('\n');
+  embedded_newline += "bar";
+  EXPECT_TRUE(!vsm::tracked_targets_are_safe({{"", embedded_newline}}));
+
+  std::string embedded_unit_separator = "ux0:data/foo";
+  embedded_unit_separator.push_back('\x1f');
+  embedded_unit_separator += "bar";
+  EXPECT_TRUE(!vsm::tracked_targets_are_safe({{"", embedded_unit_separator}}));
+
+  // the good RetroArch set from the top of this test still passes after the control-character
+  // check was added ahead of the prefix/segment logic
+  EXPECT_TRUE(vsm::tracked_targets_are_safe(good));
 }
 
 void test_legacy_vita_slot_json_is_upgraded_from_utc_to_local_time() {
