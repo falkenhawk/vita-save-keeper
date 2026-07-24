@@ -27,6 +27,9 @@ bool is_retail_vita_title_id(const std::string &id) {
 } // namespace
 
 SaveCategory classify_save(const SaveRecord &save) {
+  if (!save.tracked_paths.empty()) {
+    return SaveCategory::Homebrew;
+  }
   if (save.platform == SavePlatform::Psp) {
     return SaveCategory::Psp;
   }

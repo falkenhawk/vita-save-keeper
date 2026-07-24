@@ -2361,6 +2361,46 @@ void test_tracked_metadata_takes_newest_observed_time_across_paths() {
   std::filesystem::remove_all(base);
 }
 
+void test_tracked_records_classify_homebrew_and_build_from_config() {
+  vsm::TrackedFoldersConfig config;
+  config.entries.push_back({"data-crazy-taxi", "Crazy Taxi", {{"", "ux0:data/ct"}}});
+  const auto exists = [](const std::string &path) { return path == "ux0:data/retroarch"; };
+  const std::vector<vsm::SaveRecord> records = vsm::build_tracked_save_records(config, exists);
+  EXPECT_EQ(records.size(), static_cast<std::size_t>(2));
+  EXPECT_EQ(records[0].id, "data-retroarch");
+  EXPECT_EQ(records[0].display_name, "RetroArch");
+  EXPECT_EQ(records[0].tracked_paths.size(), static_cast<std::size_t>(2));
+  EXPECT_EQ(records[0].tracked_paths[0].path, "ux0:data/retroarch/savefiles");
+  EXPECT_EQ(records[1].path, "ux0:data/ct");
+  for (const vsm::SaveRecord &record : records) {
+    EXPECT_TRUE(vsm::classify_save(record) == vsm::SaveCategory::Homebrew);
+    EXPECT_TRUE(!record.save_time_requires_mount);
+  }
+  const auto nothing = [](const std::string &) { return false; };
+  EXPECT_EQ(vsm::build_tracked_save_records(config, nothing).size(), static_cast<std::size_t>(1));
+}
+
+void test_tracked_records_skip_config_entry_duplicating_builtin_retroarch() {
+  // a stale hand-edited config carrying the builtin's id must never produce a second
+  // data-retroarch record, whether the builtin's real directory is present or not.
+  vsm::TrackedFoldersConfig config;
+  config.entries.push_back({"data-retroarch", "Old RetroArch", {{"", "ux0:data/retroarch-old"}}});
+
+  const auto exists = [](const std::string &path) { return path == "ux0:data/retroarch"; };
+  const std::vector<vsm::SaveRecord> with_builtin =
+      vsm::build_tracked_save_records(config, exists);
+  EXPECT_EQ(with_builtin.size(), static_cast<std::size_t>(1));
+  EXPECT_EQ(with_builtin[0].id, "data-retroarch");
+  EXPECT_EQ(with_builtin[0].display_name, "RetroArch");
+  EXPECT_EQ(with_builtin[0].tracked_paths.size(), static_cast<std::size_t>(2));
+  EXPECT_EQ(with_builtin[0].tracked_paths[0].path, "ux0:data/retroarch/savefiles");
+
+  const auto nothing = [](const std::string &) { return false; };
+  const std::vector<vsm::SaveRecord> without_builtin =
+      vsm::build_tracked_save_records(config, nothing);
+  EXPECT_TRUE(without_builtin.empty());
+}
+
 void test_backup_archive_zips_multiple_sources_under_prefixes() {
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() / "save-keeper-multisource-test";
@@ -2857,6 +2897,8 @@ int main() {
   test_tracked_folders_json_skips_invalid_and_duplicate_entries();
   test_tracked_entry_id_generation_falls_back_for_empty_normalized_name();
   test_tracked_metadata_takes_newest_observed_time_across_paths();
+  test_tracked_records_classify_homebrew_and_build_from_config();
+  test_tracked_records_skip_config_entry_duplicating_builtin_retroarch();
   test_backup_archive_zips_multiple_sources_under_prefixes();
   test_backup_archive_restores_prefixes_to_mapped_directories_only();
   test_backup_archive_restore_clears_destination_for_absent_prefix();

@@ -2,8 +2,10 @@
 
 #include "core/SaveSlotMetadata.hpp"
 #include "core/SaveTimeCache.hpp"
+#include "core/TrackedFolders.hpp"
 
 #include <string>
+#include <vector>
 
 namespace vsm {
 
@@ -40,6 +42,10 @@ struct SaveRecord {
   // restored from a cache entry). Decides a rebuilt cache entry's freshness rule: db-derived
   // entries follow the database stamp, sfo-derived ones follow the folder fingerprint.
   bool title_from_app_db{};
+  // Non-empty marks a tracked data-folder entry (homebrew data backups). Each path's full tree
+  // is archived under its prefix; save.path holds the single path for one-path entries and the
+  // common parent for display on multi-path ones. Tracked saves never touch the PFS mount.
+  std::vector<TrackedPath> tracked_paths;
 };
 
 } // namespace vsm

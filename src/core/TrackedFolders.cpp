@@ -1,9 +1,11 @@
 #include "core/TrackedFolders.hpp"
 
 #include "core/PathUtil.hpp"
+#include "core/SaveRecord.hpp"
 
 #include <picojson.h>
 
+#include <functional>
 #include <set>
 #include <string>
 #include <utility>
@@ -165,6 +167,44 @@ SaveMetadata resolve_tracked_metadata(const std::vector<std::string> &paths,
     }
   }
   return newest;
+}
+
+std::vector<SaveRecord>
+build_tracked_save_records(const TrackedFoldersConfig &config,
+                           const std::function<bool(const std::string &)> &directory_exists) {
+  std::vector<SaveRecord> records;
+  constexpr const char *kRetroArchId = "data-retroarch";
+  constexpr const char *kRetroArchRoot = "ux0:data/retroarch";
+
+  if (directory_exists(kRetroArchRoot)) {
+    SaveRecord record;
+    record.id = kRetroArchId;
+    record.display_name = "RetroArch";
+    record.path = kRetroArchRoot;
+    record.tracked_paths = {
+        {"savefiles", std::string(kRetroArchRoot) + "/savefiles"},
+        {"savestates", std::string(kRetroArchRoot) + "/savestates"},
+    };
+    records.push_back(std::move(record));
+  }
+
+  for (const TrackedFolderEntry &entry : config.entries) {
+    // The builtin above already covers this id; a stale hand-edited config entry must never
+    // duplicate it, whether or not the builtin's own directory happened to exist.
+    if (entry.id == kRetroArchId) {
+      continue;
+    }
+    SaveRecord record;
+    record.id = entry.id;
+    record.display_name = entry.title;
+    record.tracked_paths = entry.paths;
+    if (!entry.paths.empty()) {
+      record.path = entry.paths.front().path;
+    }
+    records.push_back(std::move(record));
+  }
+
+  return records;
 }
 
 } // namespace vsm

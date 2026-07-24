@@ -2,11 +2,16 @@
 
 #include "core/SaveSlotMetadata.hpp"
 
+#include <functional>
 #include <set>
 #include <string>
 #include <vector>
 
 namespace vsm {
+
+// Defined in core/SaveRecord.hpp, which includes this header for TrackedPath; kept forward-
+// declared here so this header never depends back on SaveRecord.hpp.
+struct SaveRecord;
 
 struct TrackedPath {
   // zip entry prefix for this directory; empty means entries sit at the archive root, which is
@@ -47,5 +52,14 @@ std::string make_tracked_entry_id(const std::string &folder_name,
 // path's backup-clock result, same as a fresh empty savedata folder would.
 SaveMetadata resolve_tracked_metadata(const std::vector<std::string> &paths,
                                       const SaveDateTime &backup_clock);
+
+// Turns tracked-folder config into first-class save records for the Homebrew tab. The builtin
+// RetroArch entry (savefiles + savestates under ux0:data/retroarch) is synthesized first when its
+// directory exists; a config entry reusing its "data-retroarch" id is dropped so a stale
+// hand-edited file can never duplicate it, whether or not the builtin's directory is present.
+// Save times are left unresolved (save_time_known false); that happens later at the app layer.
+std::vector<SaveRecord>
+build_tracked_save_records(const TrackedFoldersConfig &config,
+                           const std::function<bool(const std::string &)> &directory_exists);
 
 } // namespace vsm
