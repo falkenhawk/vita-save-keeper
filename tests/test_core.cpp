@@ -17,6 +17,7 @@
 #include "core/SfoParser.hpp"
 #include "core/SyncPlan.hpp"
 #include "core/TextUtil.hpp"
+#include "core/TrackedFolders.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -27,6 +28,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <set>
 #include <string>
 #include <sys/stat.h>
 #include <utime.h>
@@ -2257,6 +2259,42 @@ void test_app_settings_roundtrip_and_unknown_keys() {
                    .cleaned_empty_backup_folders);
 }
 
+void test_tracked_folders_json_roundtrip_and_rejects_bad_input() {
+  vsm::TrackedFoldersConfig config;
+  config.entries.push_back({"data-crazy-taxi", "Crazy Taxi", {{"", "ux0:data/ct"}}});
+  config.entries.push_back({"data-retroarch", "RetroArch",
+                            {{"savefiles", "ux0:data/retroarch/savefiles"},
+                             {"savestates", "ux0:data/retroarch/savestates"}}});
+  config.hidden_ids.insert("VITADBDLD");
+
+  const std::string json = vsm::serialize_tracked_folders_json(config);
+  const vsm::TrackedFoldersParseResult parsed = vsm::parse_tracked_folders_json(json);
+  EXPECT_TRUE(parsed.ok);
+  EXPECT_EQ(parsed.config.entries.size(), static_cast<std::size_t>(2));
+  EXPECT_EQ(parsed.config.entries[0].id, "data-crazy-taxi");
+  EXPECT_EQ(parsed.config.entries[1].paths.size(), static_cast<std::size_t>(2));
+  EXPECT_EQ(parsed.config.entries[1].paths[0].prefix, "savefiles");
+  EXPECT_TRUE(parsed.config.hidden_ids.count("VITADBDLD") == 1);
+
+  EXPECT_TRUE(!vsm::parse_tracked_folders_json("not json").ok);
+  EXPECT_TRUE(!vsm::parse_tracked_folders_json("[]").ok);
+  // entries missing a path are dropped, not fatal; unknown fields are ignored
+  const vsm::TrackedFoldersParseResult partial = vsm::parse_tracked_folders_json(
+      R"({"version":1,"future":true,"entries":[{"id":"data-x","title":"X","paths":[]},)"
+      R"({"id":"data-y","title":"Y","paths":[{"prefix":"","path":"ux0:data/y"}]}],"hidden":[]})");
+  EXPECT_TRUE(partial.ok);
+  EXPECT_EQ(partial.config.entries.size(), static_cast<std::size_t>(1));
+  EXPECT_EQ(partial.config.entries[0].id, "data-y");
+}
+
+void test_tracked_entry_id_generation_normalizes_and_dedupes() {
+  std::set<std::string> taken{"data-crazy-taxi"};
+  EXPECT_EQ(vsm::make_tracked_entry_id("Crazy/Taxi", taken), "data-Crazy_Taxi");
+  EXPECT_EQ(vsm::make_tracked_entry_id("crazy-taxi", taken), "data-crazy-taxi-2");
+  taken.insert("data-crazy-taxi-2");
+  EXPECT_EQ(vsm::make_tracked_entry_id("crazy-taxi", taken), "data-crazy-taxi-3");
+}
+
 void test_auto_backup_suffix_display_and_content_matching() {
   vsm::BackupRow plain;
   plain.local_name = "2026-07-05 10-00-00.zip";
@@ -2587,6 +2625,8 @@ int main() {
   test_utf8_truncation_and_system_font_detection();
   test_auto_backup_suffix_display_and_content_matching();
   test_app_settings_roundtrip_and_unknown_keys();
+  test_tracked_folders_json_roundtrip_and_rejects_bad_input();
+  test_tracked_entry_id_generation_normalizes_and_dedupes();
   test_sync_plan_decides_backup_and_upload_per_game();
   test_sync_all_confirm_message_states_scope();
   test_sync_run_summary_reports_results_and_cancellation();

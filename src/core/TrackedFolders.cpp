@@ -1,0 +1,137 @@
+#include "core/TrackedFolders.hpp"
+
+#include "core/PathUtil.hpp"
+
+#include <picojson.h>
+
+#include <string>
+#include <utility>
+
+namespace vsm {
+namespace {
+
+constexpr int kTrackedFoldersVersion = 1;
+
+bool parse_path(const picojson::value &value, TrackedPath *path) {
+  if (!value.is<picojson::object>()) {
+    return false;
+  }
+  const picojson::object &object = value.get<picojson::object>();
+  const auto path_field = object.find("path");
+  if (path_field == object.end() || !path_field->second.is<std::string>() ||
+      path_field->second.get<std::string>().empty()) {
+    return false;
+  }
+  path->path = path_field->second.get<std::string>();
+  const auto prefix_field = object.find("prefix");
+  path->prefix = (prefix_field != object.end() && prefix_field->second.is<std::string>())
+                     ? prefix_field->second.get<std::string>()
+                     : "";
+  return true;
+}
+
+// false means the entry is not worth keeping - either it has no id or every path in it failed
+// to parse - callers skip it rather than fail the whole document.
+bool parse_entry(const picojson::value &value, TrackedFolderEntry *entry) {
+  if (!value.is<picojson::object>()) {
+    return false;
+  }
+  const picojson::object &object = value.get<picojson::object>();
+  const auto id_field = object.find("id");
+  if (id_field == object.end() || !id_field->second.is<std::string>() ||
+      id_field->second.get<std::string>().empty()) {
+    return false;
+  }
+  entry->id = id_field->second.get<std::string>();
+  const auto title_field = object.find("title");
+  entry->title = (title_field != object.end() && title_field->second.is<std::string>())
+                     ? title_field->second.get<std::string>()
+                     : "";
+  const auto paths_field = object.find("paths");
+  if (paths_field == object.end() || !paths_field->second.is<picojson::array>()) {
+    return false;
+  }
+  for (const picojson::value &path_value : paths_field->second.get<picojson::array>()) {
+    TrackedPath path;
+    if (parse_path(path_value, &path)) {
+      entry->paths.push_back(std::move(path));
+    }
+  }
+  return !entry->paths.empty();
+}
+
+} // namespace
+
+TrackedFoldersParseResult parse_tracked_folders_json(const std::string &text) {
+  TrackedFoldersParseResult result;
+  picojson::value root;
+  const std::string parse_error = picojson::parse(root, text);
+  if (!parse_error.empty() || !root.is<picojson::object>()) {
+    return result;
+  }
+  const picojson::object &root_object = root.get<picojson::object>();
+  const auto entries_field = root_object.find("entries");
+  if (entries_field == root_object.end() || !entries_field->second.is<picojson::array>()) {
+    return result;
+  }
+  for (const picojson::value &entry_value : entries_field->second.get<picojson::array>()) {
+    TrackedFolderEntry entry;
+    if (parse_entry(entry_value, &entry)) {
+      result.config.entries.push_back(std::move(entry));
+    }
+  }
+  const auto hidden_field = root_object.find("hidden");
+  if (hidden_field != root_object.end() && hidden_field->second.is<picojson::array>()) {
+    for (const picojson::value &id_value : hidden_field->second.get<picojson::array>()) {
+      if (id_value.is<std::string>()) {
+        result.config.hidden_ids.insert(id_value.get<std::string>());
+      }
+    }
+  }
+  result.ok = true;
+  return result;
+}
+
+std::string serialize_tracked_folders_json(const TrackedFoldersConfig &config) {
+  picojson::object root;
+  root["version"] = picojson::value(static_cast<double>(kTrackedFoldersVersion));
+  picojson::array entries;
+  for (const TrackedFolderEntry &entry : config.entries) {
+    picojson::object object;
+    object["id"] = picojson::value(entry.id);
+    object["title"] = picojson::value(entry.title);
+    picojson::array paths;
+    for (const TrackedPath &path : entry.paths) {
+      picojson::object path_object;
+      path_object["prefix"] = picojson::value(path.prefix);
+      path_object["path"] = picojson::value(path.path);
+      paths.push_back(picojson::value(std::move(path_object)));
+    }
+    object["paths"] = picojson::value(std::move(paths));
+    entries.push_back(picojson::value(std::move(object)));
+  }
+  root["entries"] = picojson::value(std::move(entries));
+  // a std::set already iterates in sorted order, so this array stays stable across rewrites
+  picojson::array hidden;
+  for (const std::string &id : config.hidden_ids) {
+    hidden.push_back(picojson::value(id));
+  }
+  root["hidden"] = picojson::value(std::move(hidden));
+  return picojson::value(std::move(root)).serialize(true);
+}
+
+std::string make_tracked_entry_id(const std::string &folder_name,
+                                  const std::set<std::string> &taken_ids) {
+  const std::string base = "data-" + normalize_path_component(folder_name);
+  if (taken_ids.count(base) == 0) {
+    return base;
+  }
+  for (int suffix = 2;; ++suffix) {
+    const std::string candidate = base + "-" + std::to_string(suffix);
+    if (taken_ids.count(candidate) == 0) {
+      return candidate;
+    }
+  }
+}
+
+} // namespace vsm

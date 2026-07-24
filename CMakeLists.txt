@@ -40,6 +40,7 @@ add_library(vsm_core
   src/core/SfoParser.cpp
   src/core/SyncPlan.cpp
   src/core/TextUtil.cpp
+  src/core/TrackedFolders.cpp
 )
 target_include_directories(vsm_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
