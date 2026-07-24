@@ -4,6 +4,7 @@
 
 #include <picojson.h>
 
+#include <set>
 #include <string>
 #include <utility>
 
@@ -30,8 +31,9 @@ bool parse_path(const picojson::value &value, TrackedPath *path) {
   return true;
 }
 
-// false means the entry is not worth keeping - either it has no id or every path in it failed
-// to parse - callers skip it rather than fail the whole document.
+// false for a non-object value, a missing/empty/unsafe id, a missing/non-array paths field, or
+// when every path in the entry failed to parse - callers skip the entry rather than fail the
+// whole document.
 bool parse_entry(const picojson::value &value, TrackedFolderEntry *entry) {
   if (!value.is<picojson::object>()) {
     return false;
@@ -42,7 +44,13 @@ bool parse_entry(const picojson::value &value, TrackedFolderEntry *entry) {
       id_field->second.get<std::string>().empty()) {
     return false;
   }
-  entry->id = id_field->second.get<std::string>();
+  const std::string &id = id_field->second.get<std::string>();
+  // ids double as a backup directory name and a Drive folder key, so a hand-edited file can't be
+  // allowed to smuggle a separator or a "." / ".." traversal into that single path segment.
+  if (id == "." || id == ".." || id.find_first_of("/\\:") != std::string::npos) {
+    return false;
+  }
+  entry->id = id;
   const auto title_field = object.find("title");
   entry->title = (title_field != object.end() && title_field->second.is<std::string>())
                      ? title_field->second.get<std::string>()
@@ -74,16 +82,18 @@ TrackedFoldersParseResult parse_tracked_folders_json(const std::string &text) {
   if (entries_field == root_object.end() || !entries_field->second.is<picojson::array>()) {
     return result;
   }
+  // first entry with a given id wins; a later duplicate would collide as a backup/Drive key.
+  std::set<std::string> seen_ids;
   for (const picojson::value &entry_value : entries_field->second.get<picojson::array>()) {
     TrackedFolderEntry entry;
-    if (parse_entry(entry_value, &entry)) {
+    if (parse_entry(entry_value, &entry) && seen_ids.insert(entry.id).second) {
       result.config.entries.push_back(std::move(entry));
     }
   }
   const auto hidden_field = root_object.find("hidden");
   if (hidden_field != root_object.end() && hidden_field->second.is<picojson::array>()) {
     for (const picojson::value &id_value : hidden_field->second.get<picojson::array>()) {
-      if (id_value.is<std::string>()) {
+      if (id_value.is<std::string>() && !id_value.get<std::string>().empty()) {
         result.config.hidden_ids.insert(id_value.get<std::string>());
       }
     }
@@ -122,7 +132,8 @@ std::string serialize_tracked_folders_json(const TrackedFoldersConfig &config) {
 
 std::string make_tracked_entry_id(const std::string &folder_name,
                                   const std::set<std::string> &taken_ids) {
-  const std::string base = "data-" + normalize_path_component(folder_name);
+  const std::string normalized = normalize_path_component(folder_name);
+  const std::string base = normalized.empty() ? "data-folder" : "data-" + normalized;
   if (taken_ids.count(base) == 0) {
     return base;
   }

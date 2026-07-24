@@ -2295,6 +2295,35 @@ void test_tracked_entry_id_generation_normalizes_and_dedupes() {
   EXPECT_EQ(vsm::make_tracked_entry_id("crazy-taxi", taken), "data-crazy-taxi-3");
 }
 
+void test_tracked_folders_json_skips_invalid_and_duplicate_entries() {
+  // a non-object element, an entry missing "id", and ids that violate the filesystem-safe
+  // invariant (a separator, or "..") are all dropped; a duplicate id keeps only the first entry.
+  const vsm::TrackedFoldersParseResult parsed = vsm::parse_tracked_folders_json(
+      R"({"entries":[)"
+      R"("not an object",)"
+      R"({"title":"missing id","paths":[{"path":"ux0:data/x"}]},)"
+      R"({"id":"has/slash","paths":[{"path":"ux0:data/x"}]},)"
+      R"({"id":"..","paths":[{"path":"ux0:data/x"}]},)"
+      R"({"id":"data-dup","title":"first","paths":[{"path":"ux0:data/first"}]},)"
+      R"({"id":"data-dup","title":"second","paths":[{"path":"ux0:data/second"}]},)"
+      R"({"id":"data-ok","title":"ok","paths":[{"path":"ux0:data/ok"}]}]})");
+  EXPECT_TRUE(parsed.ok);
+  EXPECT_EQ(parsed.config.entries.size(), static_cast<std::size_t>(2));
+  EXPECT_EQ(parsed.config.entries[0].id, "data-dup");
+  EXPECT_EQ(parsed.config.entries[0].title, "first");
+  EXPECT_EQ(parsed.config.entries[1].id, "data-ok");
+
+  // no "entries" field at all is as invalid as a non-array one
+  EXPECT_TRUE(!vsm::parse_tracked_folders_json(R"({"version":1})").ok);
+}
+
+void test_tracked_entry_id_generation_falls_back_for_empty_normalized_name() {
+  std::set<std::string> taken;
+  EXPECT_EQ(vsm::make_tracked_entry_id("", taken), "data-folder");
+  taken.insert("data-folder");
+  EXPECT_EQ(vsm::make_tracked_entry_id("", taken), "data-folder-2");
+}
+
 void test_auto_backup_suffix_display_and_content_matching() {
   vsm::BackupRow plain;
   plain.local_name = "2026-07-05 10-00-00.zip";
@@ -2627,6 +2656,8 @@ int main() {
   test_app_settings_roundtrip_and_unknown_keys();
   test_tracked_folders_json_roundtrip_and_rejects_bad_input();
   test_tracked_entry_id_generation_normalizes_and_dedupes();
+  test_tracked_folders_json_skips_invalid_and_duplicate_entries();
+  test_tracked_entry_id_generation_falls_back_for_empty_normalized_name();
   test_sync_plan_decides_backup_and_upload_per_game();
   test_sync_all_confirm_message_states_scope();
   test_sync_run_summary_reports_results_and_cancellation();
