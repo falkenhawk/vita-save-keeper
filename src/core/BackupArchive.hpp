@@ -60,6 +60,13 @@ struct RestoreRequest {
   // When non-empty, targets wins over destination_path: each entry maps one zip path prefix back
   // to its own directory, which is cleared and repopulated independently (mirrors
   // BackupRequest::sources so a multi-source archive restores to the right places).
+  // Restore is per-directory, not transactional: targets are cleared and repopulated in the
+  // given order, so a failure on a later target leaves earlier targets already restored and the
+  // failing target cleared. The archive itself is untouched, so retrying the restore is the
+  // recovery.
+  // Every destination must live on the same filesystem as the archive, since moving staged files
+  // into place is a rename. On device both are under ux0, and tracked folders are only ever
+  // created inside ux0:data.
   std::vector<RestoreTarget> targets;
 };
 

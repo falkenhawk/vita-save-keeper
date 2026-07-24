@@ -2386,6 +2386,36 @@ void test_backup_archive_restores_prefixes_to_mapped_directories_only() {
   std::filesystem::remove_all(base);
 }
 
+void test_backup_archive_restore_clears_destination_for_absent_prefix() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-absent-prefix-restore-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "saves");
+  std::filesystem::create_directories(base / "states");
+  std::filesystem::create_directories(base / "backups");
+  { std::ofstream(base / "saves" / "game.srm", std::ios::binary) << "srm"; }
+  // savestates has no source directory, so the archive carries only the savefiles prefix.
+  { std::ofstream(base / "states" / "old.state", std::ios::binary) << "stale state"; }
+
+  vsm::BackupRequest request;
+  request.backup_root = (base / "backups").string();
+  request.save_id = "data-retroarch";
+  request.timestamp = {2026, 7, 23, 10, 0, 0};
+  request.sources = {{"savefiles", (base / "saves").string()}};
+  const vsm::BackupResult created = vsm::create_backup_archive(request);
+  EXPECT_TRUE(created.ok);
+
+  vsm::RestoreRequest restore;
+  restore.archive_path = created.archive_path;
+  restore.targets = {{"savefiles", (base / "saves").string()},
+                     {"savestates", (base / "states").string()}};
+  EXPECT_TRUE(vsm::restore_backup_archive(restore).ok);
+  EXPECT_TRUE(std::filesystem::exists(base / "saves" / "game.srm"));
+  EXPECT_TRUE(std::filesystem::is_directory(base / "states"));
+  EXPECT_TRUE(std::filesystem::is_empty(base / "states"));
+  std::filesystem::remove_all(base);
+}
+
 void test_sources_entries_carry_prefixes_for_dedup() {
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() / "save-keeper-sources-entries-test";
@@ -2791,6 +2821,7 @@ int main() {
   test_tracked_entry_id_generation_falls_back_for_empty_normalized_name();
   test_backup_archive_zips_multiple_sources_under_prefixes();
   test_backup_archive_restores_prefixes_to_mapped_directories_only();
+  test_backup_archive_restore_clears_destination_for_absent_prefix();
   test_sources_entries_carry_prefixes_for_dedup();
   test_backup_archive_rejects_misconfigured_tracked_paths();
   test_sync_plan_decides_backup_and_upload_per_game();

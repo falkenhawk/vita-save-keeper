@@ -1157,10 +1157,7 @@ RestoreResult restore_backup_archive(const RestoreRequest &request) {
 
   if (multi_target) {
     for (const RestoreTarget &target : request.targets) {
-      // clear_directory_contents already creates a missing destination as empty; the explicit
-      // ensure_directory call keeps that guarantee even if a target's staging prefix is absent.
-      if (!clear_directory_contents(target.destination_path) ||
-          !ensure_directory(target.destination_path)) {
+      if (!clear_directory_contents(target.destination_path)) {
         remove_tree(staging_path);
         return restore_error("could not clear destination save");
       }
