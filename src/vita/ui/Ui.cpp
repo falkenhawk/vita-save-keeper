@@ -59,25 +59,6 @@ constexpr unsigned int kTextSizeCode = 38;
 constexpr int kDetailsPaneWidth = 580;
 constexpr int kVisibleDetailLines = 10;
 
-// The summary card's height depends only on which on-demand size stats apply (SAVE SIZE for a live
-// save, BACKUP FILE SIZE for a snapshot; never both at once). Mirrors the "stats" vector built in
-// draw_slot_details without needing to build it, so the left list below the card can be measured
-// from state alone.
-int summary_card_height(const SlotDetailsState &state) {
-  const int stat_rows = (state.save_bytes_known ? 1 : 0) + (state.archive_bytes_known ? 1 : 0);
-  return stat_rows == 0 ? 68 : 76 + stat_rows * 24;
-}
-
-// Row capacity of the left "SLOTS"/"TRACKED FOLDERS" list between the summary card and the footer.
-// Shared by draw_slot_details (rendering) and details_max_scroll (scroll clamping) so a tracked
-// entry with more paths than fit scrolls exactly as far as the list needs and no further.
-int visible_slot_rows(const SlotDetailsState &state) {
-  const int slots_list_y = 72 + summary_card_height(state) + 24 + 12;
-  // Rows are 36 tall on a 42 pitch and the footer starts at 508, so the last top must satisfy
-  // y + 36 <= 508, giving (514 - slots_list_y) / 42 rows; 7 is the no-stats parity cap.
-  return std::max(1, std::min(7, (514 - slots_list_y) / 42));
-}
-
 // ISO timestamps are stored as "YYYY-MM-DDTHH:MM:SS"; the details and list rows show the date and
 // time separated by a space instead of the 'T'.
 std::string format_save_datetime_spaced(const SaveDateTime &value) {
@@ -999,8 +980,9 @@ void Ui::draw_modal_backdrop() {
 
 int Ui::details_max_scroll(const SlotDetailsState &state) const {
   if (!state.tracked_paths.empty()) {
-    // The tracked-folders list replaces the slot list, windowed and R-stick scrolled the same way.
-    return std::max(0, static_cast<int>(state.tracked_paths.size()) - visible_slot_rows(state));
+    // The tracked-folders list is static (a handful of paths always fits in the metadata pane);
+    // nothing on this screen scrolls for a tracked entry.
+    return 0;
   }
   if (state.metadata.slots.empty()) {
     return 0;
@@ -1069,7 +1051,7 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
   }
 
   const int card_right = 18 + kLeftCardWidth - 16;
-  const int card_h = summary_card_height(state);
+  const int card_h = stats.empty() ? 68 : 76 + static_cast<int>(stats.size()) * 24;
   vita2d_draw_rectangle(18, 72, kLeftCardWidth, card_h, kColorPanelAlt);
   draw_text(fonts_, 34, 98, kColorMuted, kTextSizeTiny, "LAST SAVE TIME");
   // Tabular, drawn from its own left edge, so this date carries the same tightened separator gap
@@ -1091,27 +1073,20 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
   draw_text(fonts_, 18, slots_heading_y, kColorMuted, kTextSizeTiny,
             state.tracked_paths.empty() ? "SLOTS" : "TRACKED FOLDERS");
   if (!state.tracked_paths.empty()) {
-    // A tracked entry (a homebrew data folder) has no sdslot metadata; list the folders a backup
-    // pulls from in the slot list's own rows, windowed and R-stick scrolled the same way
-    // (details_max_scroll mirrors this via visible_slot_rows so the two never disagree). Long
-    // paths differ at the tail, so a left ellipsis keeps the leaf folder name visible.
-    const std::size_t visible = static_cast<std::size_t>(visible_slot_rows(state));
-    const int max_scroll =
-        std::max(0, static_cast<int>(state.tracked_paths.size()) - static_cast<int>(visible));
-    const std::size_t scroll =
-        static_cast<std::size_t>(std::min(std::max(0, state.details_scroll), max_scroll));
-    const std::size_t count = std::min(visible, state.tracked_paths.size() - scroll);
-    for (std::size_t i = 0; i < count; ++i) {
-      const int y = slots_list_y + static_cast<int>(i) * 42;
-      draw_text(fonts_, 32, y + 24, kColorText, kTextSizeSmall,
-                fit_text_left(kTextSizeSmall, state.tracked_paths[scroll + i], card_right - 32)
-                    .c_str());
-    }
+    // The paths themselves render in the metadata pane on the right; this column just echoes how
+    // many are tracked, keeping the same empty look a slotless save already has here.
+    const std::string count = state.tracked_paths.size() == 1
+                                   ? "1 folder"
+                                   : std::to_string(state.tracked_paths.size()) + " folders";
+    draw_text(fonts_, 34, slots_list_y + 22, kColorMuted, kTextSizeSmall, count.c_str());
   } else if (state.metadata.slots.empty()) {
     draw_text(fonts_, 34, slots_list_y + 22, kColorMuted, kTextSizeSmall, "No slot details");
   } else {
-    // Fit as many slot rows as the space between the summary card and the footer allows.
-    const std::size_t visible_slots = static_cast<std::size_t>(visible_slot_rows(state));
+    // Fit as many slot rows as the space between the summary card and the footer allows. Rows are
+    // 36 tall on a 42 pitch and the footer starts at 508, so the last top must satisfy
+    // y + 36 <= 508, giving (514 - slots_list_y) / 42 rows; 7 is the no-stats parity cap.
+    const std::size_t visible_slots =
+        static_cast<std::size_t>(std::max(1, std::min(7, (514 - slots_list_y) / 42)));
     const std::size_t selected =
         std::min(state.selected_slot, state.metadata.slots.size() - 1);
     const std::size_t top = selected >= visible_slots ? selected - visible_slots + 1 : 0;
@@ -1137,8 +1112,16 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
   }
 
   if (!state.tracked_paths.empty()) {
-    // The tracked-folders list on the left already explains why there is no slot metadata; the
-    // "no readable slot metadata" fallback below must not also render here.
+    // Same origin as the "no slot metadata" fallback this replaces, styled as a small label like
+    // the pane's other labeled blocks (TITLE/SUBTITLE/DETAILS) rather than that fallback's big
+    // heading: a homebrew data folder has no sdslot metadata, so this explains what is backed up
+    // instead of reporting the absence as a problem. A handful of paths always fits on screen, so
+    // this never scrolls (details_max_scroll returns 0 for a tracked entry).
+    draw_text(fonts_, kRightX, 116, kColorMuted, kTextSizeTiny, "TRACKED FOLDERS");
+    for (std::size_t i = 0; i < state.tracked_paths.size() && i < 14; ++i) {
+      draw_text(fonts_, kRightX, 142 + static_cast<int>(i) * 24, kColorText, kTextSizeSmall,
+                fit_text_left(kTextSizeSmall, state.tracked_paths[i], kRightTextWidth).c_str());
+    }
   } else if (state.metadata.slots.empty()) {
     const std::string heading = state.unavailable_message.empty()
                                     ? "No slot details available"
