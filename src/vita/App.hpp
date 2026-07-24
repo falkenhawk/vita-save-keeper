@@ -93,8 +93,10 @@ private:
   // overwritten later.
   void load_tracked_folders();
   // Folds the tracked homebrew data folders (RetroArch builtin + config entries) into saves_ and
-  // resolves each one's time from its live directories. Factored so a later single-entry add can
-  // reuse it; must run after a scan populates saves_ and before the sort/rebuild.
+  // resolves each one's time from its live directories. Idempotent: safe to call again after
+  // tracked_config_ gains entries, since only ids not already in saves_ are appended and
+  // time-resolved - callers still need to re-sort afterwards. Must run after a scan populates
+  // saves_ and before the sort/rebuild. This is the seam a later single-entry add reuses.
   void append_tracked_save_records();
   // Returns false if the user canceled (Square) mid-read, so the caller can keep the name order.
   bool resolve_all_save_times();
@@ -287,7 +289,8 @@ private:
   // injected into saves_ after each scan.
   TrackedFoldersConfig tracked_config_;
   // Set when tracked-folders.json was present but could not be read or parsed. While set, the
-  // config must never be written back, so a truncated or corrupt file is never overwritten.
+  // config must never be written back, so a truncated or corrupt file is never overwritten; the
+  // config write paths added in a later task must check this flag before saving.
   bool tracked_config_load_failed_{};
   // Triangle pressed on the live-save row while its time was still resolving: open Save Details as
   // soon as the resolve lands instead of swallowing the press. Any other input cancels it.

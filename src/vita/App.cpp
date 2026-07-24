@@ -33,6 +33,7 @@
 #include <new>
 #include <string>
 #include <sys/stat.h>
+#include <unordered_set>
 #include <vector>
 
 namespace vsm::vita {
@@ -880,8 +881,19 @@ void App::append_tracked_save_records() {
     struct stat info {};
     return stat(path.c_str(), &info) == 0 && S_ISDIR(info.st_mode);
   };
+  // Built once up front so a repeat call (config gained entries since the last run) only pays for
+  // ids actually already present, instead of an O(n) scan of saves_ per candidate record.
+  std::unordered_set<std::string> existing_ids;
+  existing_ids.reserve(saves_.size());
+  for (const SaveRecord &save : saves_) {
+    existing_ids.insert(save.id);
+  }
   std::vector<SaveRecord> tracked = build_tracked_save_records(tracked_config_, directory_exists);
   for (SaveRecord &record : tracked) {
+    if (existing_ids.count(record.id) != 0) {
+      // Already folded in by an earlier call; only ids new to tracked_config_ get appended.
+      continue;
+    }
     // Times come from the live directories (newest observed file), the tracked equivalent of a
     // mount-resolved time. This happens here, at injection, not in the scanner.
     resolve_tracked_record_time(&record);
@@ -3291,6 +3303,16 @@ int App::run() {
         apply_sort_and_rebuild();
       }
     }
+  }
+
+  // Set last, not inside load_tracked_folders() itself: that call runs at the very start of
+  // startup, and the app-database metadata warning, a network-startup failure, or a Drive sync
+  // failure further down would each overwrite status_message_ before the first frame ever reads
+  // it. Landing here, after every other startup step that can also call set_status, is what makes
+  // the message actually visible.
+  if (tracked_config_load_failed_) {
+    set_status(StatusKind::Info,
+               "Tracked folders config unreadable - fix or delete tracked-folders.json");
   }
 
   bool running = true;
