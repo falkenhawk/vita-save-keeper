@@ -1399,11 +1399,22 @@ void App::handle_delete_button() {
     const TrackedFolderEntry saved = tracked_config_.entries[removed_at];
     tracked_config_.entries.erase(tracked_config_.entries.begin() +
                                   static_cast<long>(removed_at));
+    // Forget the hidden flag too, so a re-added folder (which regenerates this same id via
+    // make_tracked_entry_id) starts unhidden instead of coming back pre-hidden, and so hidden_ids
+    // does not accumulate stale ids for entries that no longer exist.
+    const bool was_hidden = tracked_config_.hidden_ids.count(id) != 0;
+    if (was_hidden) {
+      tracked_config_.hidden_ids.erase(id);
+    }
     std::string write_error;
     if (!write_tracked_folders_json_atomic(kTrackedFoldersPath, tracked_config_, &write_error)) {
-      // The write is atomic, so the file on disk is untouched; put the entry back so memory matches.
+      // The write is atomic, so the file on disk is untouched; put the entry (and its hidden flag,
+      // if it had one) back so memory matches.
       tracked_config_.entries.insert(
           tracked_config_.entries.begin() + static_cast<long>(removed_at), saved);
+      if (was_hidden) {
+        tracked_config_.hidden_ids.insert(id);
+      }
       set_status(StatusKind::Error, "Could not save tracked-folders.json.");
       return;
     }
