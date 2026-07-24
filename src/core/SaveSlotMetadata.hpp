@@ -29,10 +29,23 @@ struct SaveSlotMetadata {
   std::string details;
 };
 
+// One backed-up directory and the zip entry prefix it lives under. An empty prefix means entries sit
+// at the archive root, which is only valid for a single-path entry (matches the layout of ordinary
+// savedata backups). Lives here, the lowest metadata header, so SaveMetadata can record the restore
+// mapping of a tracked backup; TrackedFolders.hpp reuses the same type for its config entries.
+struct TrackedPath {
+  std::string prefix;
+  std::string path;
+};
+
 struct SaveMetadata {
   SaveDateTime saved_at;
   SaveTimeSource source{SaveTimeSource::BackupClock};
   std::vector<SaveSlotMetadata> slots;
+  // Non-empty only for tracked data-folder backups: the prefix->directory mapping the backup was
+  // made from, so a later config edit cannot silently redirect the restore. Regular saves leave it
+  // empty and their sidecar omits the field entirely.
+  std::vector<TrackedPath> tracked_targets;
 };
 
 constexpr std::size_t kSdslotHeaderSize = 0x400;

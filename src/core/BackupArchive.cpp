@@ -758,29 +758,6 @@ bool add_directory_size(const std::string &path, std::uint64_t *total) {
   return ok;
 }
 
-// Shared by BackupRequest::sources and RestoreRequest::targets: the empty prefix means "no
-// prefix", which only makes sense when there is exactly one entry. Once a request bundles more
-// than one path, every prefix must be present and distinct, or the archive could not map each
-// entry back to the right directory.
-template <typename TrackedPath>
-bool tracked_paths_are_well_formed(const std::vector<TrackedPath> &paths) {
-  if (paths.size() > 1) {
-    for (const TrackedPath &path : paths) {
-      if (path.prefix.empty()) {
-        return false;
-      }
-    }
-  }
-  for (std::size_t i = 0; i < paths.size(); ++i) {
-    for (std::size_t j = i + 1; j < paths.size(); ++j) {
-      if (paths[i].prefix == paths[j].prefix) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
 } // namespace
 
 BackupResult create_backup_archive(const BackupRequest &request) {

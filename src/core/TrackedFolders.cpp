@@ -1,10 +1,12 @@
 #include "core/TrackedFolders.hpp"
 
+#include "core/BackupArchive.hpp"
 #include "core/PathUtil.hpp"
 #include "core/SaveRecord.hpp"
 
 #include <picojson.h>
 
+#include <cstddef>
 #include <cstdio>
 #include <functional>
 #include <set>
@@ -70,6 +72,30 @@ bool parse_entry(const picojson::value &value, TrackedFolderEntry *entry) {
     }
   }
   return !entry->paths.empty();
+}
+
+// A restore destination is safe only when it is confined to ux0:data (where tracked folders live)
+// with every "/"-separated segment non-empty and not "..". Rejecting empty segments closes the
+// "ux0:data/" and "ux0:data//x" spellings that would resolve back to the data root and let a restore
+// clear it wholesale; rejecting ".." blocks climbing out of the sandbox.
+bool destination_is_confined(const std::string &path) {
+  if (path.compare(0, 9, "ux0:data/") != 0) {
+    return false;
+  }
+  std::size_t start = 0;
+  while (start <= path.size()) {
+    const std::size_t slash = path.find('/', start);
+    const std::size_t end = slash == std::string::npos ? path.size() : slash;
+    const std::string segment = path.substr(start, end - start);
+    if (segment.empty() || segment == "..") {
+      return false;
+    }
+    if (slash == std::string::npos) {
+      return true;
+    }
+    start = slash + 1;
+  }
+  return true;
 }
 
 } // namespace
@@ -184,6 +210,17 @@ std::string make_tracked_entry_id(const std::string &folder_name,
       return candidate;
     }
   }
+}
+
+bool tracked_targets_are_safe(const std::vector<TrackedPath> &targets) {
+  for (const TrackedPath &target : targets) {
+    if (!destination_is_confined(target.path)) {
+      return false;
+    }
+  }
+  // Reuse the same prefix rule the archive writer and reader enforce (BackupArchive.hpp), so a
+  // sidecar can only map prefixes back the way create_backup_archive could have written them.
+  return tracked_paths_are_well_formed(targets);
 }
 
 SaveMetadata resolve_tracked_metadata(const std::vector<std::string> &paths,

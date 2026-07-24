@@ -514,11 +514,17 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
   // Resolve once so the ZIP name and JSON describe the same moment, even if creating the archive
   // takes long enough for the wall clock to tick over. Tracked entries resolve across their live
   // directories instead of a PFS mount.
-  const SaveMetadata metadata =
+  SaveMetadata metadata =
       save.tracked_paths.empty()
           ? resolve_live_save_metadata(save.path, current_local_datetime(),
                                        save.platform != SavePlatform::Psp, mount_bridge_ready_)
           : resolve_tracked_metadata(tracked_path_list(save), current_local_datetime());
+  // A tracked backup records the prefix->directory mapping it was made from, so restore reads its
+  // targets from the archive's own sidecar instead of a later, possibly edited, config. Regular
+  // saves leave this empty and their sidecar is byte-identical to before.
+  if (!save.tracked_paths.empty()) {
+    metadata.tracked_targets = save.tracked_paths;
+  }
 
   bool entries_ok = false;
   const std::vector<ArchiveEntryInfo> entries =
@@ -1708,10 +1714,31 @@ void App::handle_restore() {
   restore_request.archive_path = archive_path;
   // A tracked entry restores each zip prefix back to its own live directory; an ordinary save
   // restores to its single folder.
+  bool sidecar_targets_unsafe = false;
   if (save.tracked_paths.empty()) {
     restore_request.destination_path = save.path;
   } else {
-    restore_request.targets = tracked_restore_targets(save);
+    // The backup's own sidecar is the authority on where each prefix restores, so a config edit made
+    // after the backup cannot redirect it and an archive carrying prefixes today's entry no longer
+    // lists still lands correctly. The archive is already on the card here (a card copy, or the
+    // cloud-only copy downloaded just above), and its sidecar is read off the card with no Drive
+    // round-trip. A cloud-only backup's sidecar is never downloaded, so its targets come up empty
+    // and restore falls back to the current entry, exactly like a pre-field tracked backup.
+    const std::string metadata_path =
+        local_backup_metadata_path(kBackupRoot, save.id, backup_name);
+    const SaveMetadataJsonResult sidecar = read_save_metadata_json(metadata_path);
+    const std::vector<TrackedPath> &recorded = sidecar.metadata.tracked_targets;
+    if (sidecar.ok && !recorded.empty() && tracked_targets_are_safe(recorded)) {
+      restore_request.targets.reserve(recorded.size());
+      for (const TrackedPath &target : recorded) {
+        restore_request.targets.push_back({target.prefix, target.path});
+      }
+    } else {
+      // A sidecar that lists targets yet fails validation is corrupt or hand-tampered: do not honor
+      // it, but still restore to the current entry's folders rather than block the user.
+      sidecar_targets_unsafe = sidecar.ok && !recorded.empty();
+      restore_request.targets = tracked_restore_targets(save);
+    }
   }
   restore_request.progress = [this](std::uint64_t done, std::uint64_t total) {
     ui_.draw_busy("Restoring save", static_cast<long long>(done),
@@ -1724,10 +1751,16 @@ void App::handle_restore() {
     // does not keep showing the pre-restore save time.
     invalidate_save_time(save);
     queue_selected_save_time_read();
-    set_status(StatusKind::Success,
-               status_with_name(
-                   remote_restore ? "Downloaded and restored " : "Restored ",
-                   display_backup_name(backup_name), "."));
+    if (sidecar_targets_unsafe) {
+      set_status(StatusKind::Info,
+                 status_with_name("Restored ", display_backup_name(backup_name),
+                                  ", but its saved folder locations were invalid and ignored."));
+    } else {
+      set_status(StatusKind::Success,
+                 status_with_name(
+                     remote_restore ? "Downloaded and restored " : "Restored ",
+                     display_backup_name(backup_name), "."));
+    }
   } else {
     set_status(StatusKind::Error, "Restore failed: " + result.error);
   }

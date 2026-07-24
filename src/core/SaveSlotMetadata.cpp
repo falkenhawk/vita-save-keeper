@@ -467,6 +467,21 @@ std::string serialize_save_metadata_json(const std::string &identity,
     slots.emplace_back(std::move(item));
   }
   root["slots"] = picojson::value(std::move(slots));
+
+  // Optional, tracked-folder backups only. Stays at schema version 2: the field is added only when
+  // non-empty, so a regular save's sidecar is byte-identical to what earlier builds wrote, and older
+  // builds ignore the unknown key, so both read directions stay compatible.
+  if (!metadata.tracked_targets.empty()) {
+    picojson::array targets;
+    targets.reserve(metadata.tracked_targets.size());
+    for (const TrackedPath &target : metadata.tracked_targets) {
+      picojson::object item;
+      item["prefix"] = picojson::value(target.prefix);
+      item["path"] = picojson::value(target.path);
+      targets.emplace_back(std::move(item));
+    }
+    root["tracked_targets"] = picojson::value(std::move(targets));
+  }
   return picojson::value(std::move(root)).serialize();
 }
 
@@ -541,6 +556,28 @@ SaveMetadataJsonResult parse_save_metadata_json(const std::string &json) {
     result.metadata.saved_at = local_datetime_from_utc(result.metadata.saved_at);
     for (SaveSlotMetadata &slot : result.metadata.slots) {
       slot.modified_at = local_datetime_from_utc(slot.modified_at);
+    }
+  }
+
+  // Optional: present only in tracked-folder sidecars. Missing leaves the vector empty, so every
+  // pre-field sidecar still parses. Entries missing/empty "path" or with non-string fields are
+  // skipped, matching the lenient parsing of tracked-folders.json (parse_path in TrackedFolders.cpp).
+  const picojson::value *targets = json_member(root, "tracked_targets");
+  if (targets && targets->is<picojson::array>()) {
+    for (const picojson::value &target_value : targets->get<picojson::array>()) {
+      if (!target_value.is<picojson::object>()) {
+        continue;
+      }
+      const picojson::object &target = target_value.get<picojson::object>();
+      const picojson::value *path = json_member(target, "path");
+      if (!path || !path->is<std::string>() || path->get<std::string>().empty()) {
+        continue;
+      }
+      const picojson::value *prefix = json_member(target, "prefix");
+      TrackedPath entry;
+      entry.path = path->get<std::string>();
+      entry.prefix = (prefix && prefix->is<std::string>()) ? prefix->get<std::string>() : "";
+      result.metadata.tracked_targets.push_back(std::move(entry));
     }
   }
 

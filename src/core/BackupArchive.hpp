@@ -2,6 +2,7 @@
 
 #include "core/BackupName.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -77,6 +78,30 @@ struct RestoreResult {
   // with one synthetic backup time. Such a timestamp must not be presented as a file save time.
   bool file_timestamps_uniform{};
 };
+
+// Shared invariant of BackupRequest::sources and RestoreRequest::targets (and the sidecar targets a
+// tracked restore reads back through tracked_targets_are_safe): the empty prefix means "no prefix",
+// which only makes sense when there is exactly one entry. Once a request bundles more than one path,
+// every prefix must be present and distinct, or the archive could not map each entry back to the
+// right directory. Templated because BackupSource, RestoreTarget, and TrackedPath all carry .prefix.
+template <typename PrefixedPath>
+bool tracked_paths_are_well_formed(const std::vector<PrefixedPath> &paths) {
+  if (paths.size() > 1) {
+    for (const PrefixedPath &path : paths) {
+      if (path.prefix.empty()) {
+        return false;
+      }
+    }
+  }
+  for (std::size_t i = 0; i < paths.size(); ++i) {
+    for (std::size_t j = i + 1; j < paths.size(); ++j) {
+      if (paths[i].prefix == paths[j].prefix) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
 
 struct ArchiveEntryInfo {
   std::string path;

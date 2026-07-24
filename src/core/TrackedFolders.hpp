@@ -9,16 +9,10 @@
 
 namespace vsm {
 
-// Defined in core/SaveRecord.hpp, which includes this header for TrackedPath; kept forward-
-// declared here so this header never depends back on SaveRecord.hpp.
+// Defined in core/SaveRecord.hpp, which includes this header; kept forward-declared here so this
+// header never depends back on SaveRecord.hpp. (TrackedPath now lives in SaveSlotMetadata.hpp, the
+// header included above, so SaveMetadata can record a tracked backup's restore mapping.)
 struct SaveRecord;
-
-struct TrackedPath {
-  // zip entry prefix for this directory; empty means entries sit at the archive root, which is
-  // only valid for a single-path entry (matches the layout of ordinary savedata backups)
-  std::string prefix;
-  std::string path;
-};
 
 struct TrackedFolderEntry {
   std::string id;    // filesystem-safe, "data-" prefixed; doubles as backup + Drive folder key
@@ -50,6 +44,14 @@ bool write_tracked_folders_json_atomic(const std::string &path, const TrackedFol
 // "data-" + normalize_path_component(folder_name), suffixed "-2", "-3", ... until unused.
 std::string make_tracked_entry_id(const std::string &folder_name,
                                   const std::set<std::string> &taken_ids);
+
+// Validates restore targets read from a per-backup sidecar before they are trusted to drive a
+// restore, which CLEARS each destination directory. A sidecar is user-editable JSON, so every
+// destination must be confined to ux0:data (where tracked folders live) with no ".." segment that
+// could climb out, and the prefixes must be well-formed the same way the archive writer/reader
+// require (distinct, empty prefix only when it is the sole target). An empty list is vacuously safe;
+// callers decide separately whether an empty mapping is usable.
+bool tracked_targets_are_safe(const std::vector<TrackedPath> &targets);
 
 // Resolves each path independently via resolve_save_metadata, then keeps the result with the
 // newest observed time; a path with no observed time never wins over one that has one. When

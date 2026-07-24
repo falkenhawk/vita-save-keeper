@@ -531,6 +531,92 @@ void test_save_metadata_json_round_trips_and_ignores_unknown_fields() {
   EXPECT_EQ(parsed.metadata.slots[0].details, "Campaign\nmedals: 91");
 }
 
+void test_save_metadata_json_records_tracked_targets_when_present() {
+  vsm::SaveMetadata metadata;
+  metadata.saved_at = {2026, 7, 23, 9, 15, 0};
+  metadata.source = vsm::SaveTimeSource::Filesystem;
+  metadata.approximate = true;
+  metadata.tracked_targets = {
+      {"savefiles", "ux0:data/retroarch/savefiles"},
+      {"savestates", "ux0:data/retroarch/savestates"},
+  };
+
+  const std::string json =
+      vsm::serialize_save_metadata_json("2026-07-23 09-15-00", metadata);
+  EXPECT_TRUE(json.find("\"version\":2") != std::string::npos);
+  EXPECT_TRUE(json.find("\"tracked_targets\"") != std::string::npos);
+
+  const vsm::SaveMetadataJsonResult parsed = vsm::parse_save_metadata_json(json);
+  EXPECT_TRUE(parsed.ok);
+  EXPECT_EQ(parsed.metadata.tracked_targets.size(), static_cast<std::size_t>(2));
+  EXPECT_EQ(parsed.metadata.tracked_targets[0].prefix, "savefiles");
+  EXPECT_EQ(parsed.metadata.tracked_targets[0].path, "ux0:data/retroarch/savefiles");
+  EXPECT_EQ(parsed.metadata.tracked_targets[1].prefix, "savestates");
+  EXPECT_EQ(parsed.metadata.tracked_targets[1].path, "ux0:data/retroarch/savestates");
+
+  // lenient parse: an entry missing/empty "path" is skipped and the rest survive, matching how
+  // tracked-folders.json entries are read; a missing "prefix" defaults to empty.
+  const std::string lenient =
+      R"({"version":2,"archiveIdentity":"id","savedAt":"2026-07-23T09:15:00",)"
+      R"("source":"filesystem","approximate":true,"slots":[],"tracked_targets":[)"
+      R"({"prefix":"a"},{"prefix":"","path":""},{"path":"ux0:data/keep"}]})";
+  const vsm::SaveMetadataJsonResult lenient_parsed = vsm::parse_save_metadata_json(lenient);
+  EXPECT_TRUE(lenient_parsed.ok);
+  EXPECT_EQ(lenient_parsed.metadata.tracked_targets.size(), static_cast<std::size_t>(1));
+  EXPECT_EQ(lenient_parsed.metadata.tracked_targets[0].path, "ux0:data/keep");
+  EXPECT_EQ(lenient_parsed.metadata.tracked_targets[0].prefix, "");
+}
+
+void test_save_metadata_json_omits_tracked_targets_for_regular_saves() {
+  // A regular save carries no tracked targets, so the key must be absent entirely: its sidecar stays
+  // byte-identical to what builds without this field wrote.
+  vsm::SaveMetadata metadata;
+  metadata.saved_at = {2026, 7, 12, 1, 44, 7};
+  metadata.source = vsm::SaveTimeSource::VitaSlot;
+  metadata.approximate = false;
+  metadata.slots.push_back({0, {2026, 7, 12, 1, 44, 7}, "T", "S", "D"});
+
+  const std::string json =
+      vsm::serialize_save_metadata_json("2026-07-12 01-44-07", metadata);
+  EXPECT_TRUE(json.find("tracked_targets") == std::string::npos);
+
+  // a v2 sidecar written without the field still parses, leaving the vector empty (backwards compat)
+  const vsm::SaveMetadataJsonResult parsed = vsm::parse_save_metadata_json(json);
+  EXPECT_TRUE(parsed.ok);
+  EXPECT_TRUE(parsed.metadata.tracked_targets.empty());
+}
+
+void test_tracked_targets_safety_confines_restore_destinations() {
+  // the RetroArch-shaped set the app records is accepted
+  const std::vector<vsm::TrackedPath> good = {
+      {"savefiles", "ux0:data/retroarch/savefiles"},
+      {"savestates", "ux0:data/retroarch/savestates"},
+  };
+  EXPECT_TRUE(vsm::tracked_targets_are_safe(good));
+  // a single confined target with an empty prefix (a one-directory tracked entry) is fine
+  EXPECT_TRUE(vsm::tracked_targets_are_safe({{"", "ux0:data/crazytaxi"}}));
+
+  // a ".." segment that could climb out of ux0:data is rejected, anywhere in the path
+  EXPECT_TRUE(!vsm::tracked_targets_are_safe({{"", "ux0:data/../app0/secret"}}));
+  EXPECT_TRUE(!vsm::tracked_targets_are_safe({{"", "ux0:data/retroarch/../../evil"}}));
+
+  // destinations outside ux0:data are rejected
+  EXPECT_TRUE(!vsm::tracked_targets_are_safe({{"", "ux0:app/GAME00000"}}));
+  EXPECT_TRUE(!vsm::tracked_targets_are_safe({{"", "ur0:foo"}}));
+  // the bare data root would clear everything under it
+  EXPECT_TRUE(!vsm::tracked_targets_are_safe({{"", "ux0:data/"}}));
+
+  // one confined + one stray target still fails as a set
+  EXPECT_TRUE(!vsm::tracked_targets_are_safe(
+      {{"a", "ux0:data/ok"}, {"b", "ur0:evil"}}));
+
+  // duplicate prefixes across targets are rejected, as is an empty prefix among many
+  EXPECT_TRUE(!vsm::tracked_targets_are_safe(
+      {{"same", "ux0:data/a"}, {"same", "ux0:data/b"}}));
+  EXPECT_TRUE(!vsm::tracked_targets_are_safe(
+      {{"", "ux0:data/a"}, {"other", "ux0:data/b"}}));
+}
+
 void test_legacy_vita_slot_json_is_upgraded_from_utc_to_local_time() {
   ScopedTimezone timezone("Europe/Warsaw");
   const std::string legacy =
@@ -2870,6 +2956,9 @@ int main() {
   test_save_metadata_resolver_uses_recursive_files_then_backup_clock();
   test_pfs_mount_policy_requires_existing_metadata_directory();
   test_save_metadata_json_round_trips_and_ignores_unknown_fields();
+  test_save_metadata_json_records_tracked_targets_when_present();
+  test_save_metadata_json_omits_tracked_targets_for_regular_saves();
+  test_tracked_targets_safety_confines_restore_destinations();
   test_legacy_vita_slot_json_is_upgraded_from_utc_to_local_time();
   test_backup_metadata_is_usable_only_for_matching_trustworthy_identity();
   test_observed_save_metadata_accepts_slots_and_files_but_not_backup_clock();
