@@ -9,6 +9,13 @@
 
 namespace vsm {
 
+// One directory to fold into a multi-source archive, under its own zip path prefix. An empty
+// prefix is only valid when it is the sole source (single-directory archives keep flat paths).
+struct BackupSource {
+  std::string prefix;
+  std::string path;
+};
+
 struct BackupRequest {
   std::string source_path;
   std::string backup_root;
@@ -22,12 +29,25 @@ struct BackupRequest {
   // Optional: called with (bytes read, total bytes) across the archive's hash and write passes as
   // one continuous stream, throttled, so a caller can animate a progress bar for a large save.
   std::function<void(std::uint64_t done, std::uint64_t total)> progress;
+  // When non-empty, sources wins over source_path: a tracked entry backed by several directories
+  // (e.g. a RetroArch core's savefiles/ and savestates/) bundles them into one archive, each under
+  // its own zip path prefix. A source whose directory is missing contributes nothing, but at
+  // least one source directory must exist.
+  // Appended last (rather than next to source_path) so existing positional-brace-init callers,
+  // which only ever supply source_path..progress, keep compiling unchanged.
+  std::vector<BackupSource> sources;
 };
 
 struct BackupResult {
   bool ok{};
   std::string archive_path;
   std::string error;
+};
+
+// One zip path prefix mapped back to the live directory it should repopulate.
+struct RestoreTarget {
+  std::string prefix;
+  std::string destination_path;
 };
 
 struct RestoreRequest {
@@ -37,6 +57,10 @@ struct RestoreRequest {
   // extracted, throttled like the writer's callback, so a caller can animate a progress bar for
   // a large save instead of holding one frozen frame through the whole extraction.
   std::function<void(std::uint64_t done, std::uint64_t total)> progress;
+  // When non-empty, targets wins over destination_path: each entry maps one zip path prefix back
+  // to its own directory, which is cleared and repopulated independently (mirrors
+  // BackupRequest::sources so a multi-source archive restores to the right places).
+  std::vector<RestoreTarget> targets;
 };
 
 struct RestoreResult {
@@ -80,6 +104,12 @@ bool remove_backup_inspection_directory(const std::string &path);
 std::vector<ArchiveEntryInfo> compute_folder_entries(
     const std::string &folder_path, bool *ok,
     const std::function<void(std::uint64_t done, std::uint64_t total)> &progress = {});
+// Same content signature, but for several directories bundled under per-source prefixes (see
+// BackupRequest::sources). A missing source directory is skipped, not a failure; *ok is true when
+// every existing source walked cleanly (all sources missing yields an empty result and *ok true -
+// the "nothing to back up" decision belongs to the caller).
+std::vector<ArchiveEntryInfo> compute_sources_entries(const std::vector<BackupSource> &sources,
+                                                      bool *ok);
 // True when the archive's central directory lists exactly the given entries.
 bool entries_match_backup_archive(const std::vector<ArchiveEntryInfo> &folder_entries,
                                   const std::string &archive_path);

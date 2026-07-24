@@ -2324,6 +2324,137 @@ void test_tracked_entry_id_generation_falls_back_for_empty_normalized_name() {
   EXPECT_EQ(vsm::make_tracked_entry_id("", taken), "data-folder-2");
 }
 
+void test_backup_archive_zips_multiple_sources_under_prefixes() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-multisource-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "saves");
+  std::filesystem::create_directories(base / "backups");
+  { std::ofstream(base / "saves" / "game.srm", std::ios::binary) << "srm"; }
+
+  vsm::BackupRequest request;
+  request.backup_root = (base / "backups").string();
+  request.save_id = "data-retroarch";
+  request.timestamp = {2026, 7, 23, 10, 0, 0};
+  // one source missing on disk: tolerated, contributes nothing
+  request.sources = {{"savefiles", (base / "saves").string()},
+                     {"savestates", (base / "states").string()}};
+  const vsm::BackupResult result = vsm::create_backup_archive(request);
+  EXPECT_TRUE(result.ok);
+  const std::vector<std::string> names = read_zip_central_directory_names(result.archive_path);
+  EXPECT_EQ(names.size(), static_cast<std::size_t>(1));
+  EXPECT_EQ(names[0], "savefiles/game.srm");
+
+  // every source missing means there is nothing to back up
+  vsm::BackupRequest empty = request;
+  empty.sources = {{"savefiles", (base / "nope").string()}};
+  empty.archive_name = "2026-07-23 10-00-01.zip";
+  EXPECT_TRUE(!vsm::create_backup_archive(empty).ok);
+  std::filesystem::remove_all(base);
+}
+
+void test_backup_archive_restores_prefixes_to_mapped_directories_only() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-prefix-restore-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "saves");
+  std::filesystem::create_directories(base / "backups");
+  { std::ofstream(base / "saves" / "game.srm", std::ios::binary) << "old"; }
+  vsm::BackupRequest request;
+  request.backup_root = (base / "backups").string();
+  request.save_id = "data-retroarch";
+  request.timestamp = {2026, 7, 23, 10, 0, 0};
+  request.sources = {{"savefiles", (base / "saves").string()}};
+  const vsm::BackupResult created = vsm::create_backup_archive(request);
+  EXPECT_TRUE(created.ok);
+
+  // destination gains a stale file and a sibling dir that must survive untouched
+  { std::ofstream(base / "saves" / "stale.srm", std::ios::binary) << "stale"; }
+  std::filesystem::create_directories(base / "cores");
+  { std::ofstream(base / "cores" / "core.so", std::ios::binary) << "core"; }
+
+  vsm::RestoreRequest restore;
+  restore.archive_path = created.archive_path;
+  // savestates target dir does not exist yet: created empty
+  restore.targets = {{"savefiles", (base / "saves").string()},
+                     {"savestates", (base / "states").string()}};
+  EXPECT_TRUE(vsm::restore_backup_archive(restore).ok);
+  EXPECT_TRUE(std::filesystem::exists(base / "saves" / "game.srm"));
+  EXPECT_TRUE(!std::filesystem::exists(base / "saves" / "stale.srm"));
+  EXPECT_TRUE(std::filesystem::exists(base / "cores" / "core.so"));
+  EXPECT_TRUE(std::filesystem::is_directory(base / "states"));
+  std::filesystem::remove_all(base);
+}
+
+void test_sources_entries_carry_prefixes_for_dedup() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-sources-entries-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "saves");
+  { std::ofstream(base / "saves" / "game.srm", std::ios::binary) << "srm"; }
+  bool ok = false;
+  const std::vector<vsm::ArchiveEntryInfo> entries = vsm::compute_sources_entries(
+      {{"savefiles", (base / "saves").string()}, {"savestates", (base / "missing").string()}}, &ok);
+  EXPECT_TRUE(ok);
+  EXPECT_EQ(entries.size(), static_cast<std::size_t>(1));
+  EXPECT_EQ(entries[0].path, "savefiles/game.srm");
+  std::filesystem::remove_all(base);
+}
+
+void test_backup_archive_rejects_misconfigured_tracked_paths() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-misconfigured-sources-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "a");
+  std::filesystem::create_directories(base / "b");
+  std::filesystem::create_directories(base / "backups");
+  { std::ofstream(base / "a" / "file.bin", std::ios::binary) << "a"; }
+  { std::ofstream(base / "b" / "file.bin", std::ios::binary) << "b"; }
+
+  vsm::BackupRequest base_request;
+  base_request.backup_root = (base / "backups").string();
+  base_request.save_id = "data-misconfigured";
+  base_request.timestamp = {2026, 7, 23, 11, 0, 0};
+
+  // duplicate prefixes across sources are rejected
+  vsm::BackupRequest duplicate = base_request;
+  duplicate.sources = {{"same", (base / "a").string()}, {"same", (base / "b").string()}};
+  EXPECT_TRUE(!vsm::create_backup_archive(duplicate).ok);
+
+  // an empty prefix is only valid when it is the sole source
+  vsm::BackupRequest empty_prefix_among_many = base_request;
+  empty_prefix_among_many.sources = {{"", (base / "a").string()},
+                                     {"other", (base / "b").string()}};
+  EXPECT_TRUE(!vsm::create_backup_archive(empty_prefix_among_many).ok);
+
+  // neither rejected attempt above created a file, so a well-formed request reusing the same
+  // timestamp still succeeds; its content signature via compute_sources_entries matches the
+  // archive's central directory, which is what the dedup plan will compare against.
+  vsm::BackupRequest ok_request = base_request;
+  ok_request.sources = {{"first", (base / "a").string()}, {"second", (base / "b").string()}};
+  const vsm::BackupResult created = vsm::create_backup_archive(ok_request);
+  EXPECT_TRUE(created.ok);
+  bool entries_ok = false;
+  const std::vector<vsm::ArchiveEntryInfo> entries =
+      vsm::compute_sources_entries(ok_request.sources, &entries_ok);
+  EXPECT_TRUE(entries_ok);
+  EXPECT_TRUE(vsm::entries_match_backup_archive(entries, created.archive_path));
+
+  // the same two validation rules apply to restore targets
+  vsm::RestoreRequest duplicate_restore;
+  duplicate_restore.archive_path = created.archive_path;
+  duplicate_restore.targets = {{"same", (base / "a").string()}, {"same", (base / "b").string()}};
+  EXPECT_TRUE(!vsm::restore_backup_archive(duplicate_restore).ok);
+
+  vsm::RestoreRequest empty_prefix_restore;
+  empty_prefix_restore.archive_path = created.archive_path;
+  empty_prefix_restore.targets = {{"", (base / "a").string()},
+                                  {"other", (base / "b").string()}};
+  EXPECT_TRUE(!vsm::restore_backup_archive(empty_prefix_restore).ok);
+
+  std::filesystem::remove_all(base);
+}
+
 void test_auto_backup_suffix_display_and_content_matching() {
   vsm::BackupRow plain;
   plain.local_name = "2026-07-05 10-00-00.zip";
@@ -2658,6 +2789,10 @@ int main() {
   test_tracked_entry_id_generation_normalizes_and_dedupes();
   test_tracked_folders_json_skips_invalid_and_duplicate_entries();
   test_tracked_entry_id_generation_falls_back_for_empty_normalized_name();
+  test_backup_archive_zips_multiple_sources_under_prefixes();
+  test_backup_archive_restores_prefixes_to_mapped_directories_only();
+  test_sources_entries_carry_prefixes_for_dedup();
+  test_backup_archive_rejects_misconfigured_tracked_paths();
   test_sync_plan_decides_backup_and_upload_per_game();
   test_sync_all_confirm_message_states_scope();
   test_sync_run_summary_reports_results_and_cancellation();

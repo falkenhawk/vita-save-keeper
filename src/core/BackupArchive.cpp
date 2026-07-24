@@ -282,6 +282,25 @@ bool measure_file(ZipEntry *entry, const std::function<void(std::size_t)> &on_by
   return true;
 }
 
+// Walks one directory and appends its content signature (relative path within `prefix`, CRC32,
+// size) to *out. Shared by compute_folder_entries (a single directory) and compute_sources_entries
+// (several directories bundled under per-source prefixes).
+bool append_folder_entries(const std::string &folder_path, const std::string &prefix,
+                           std::vector<ArchiveEntryInfo> *out,
+                           const std::function<void(std::size_t)> &on_bytes = {}) {
+  std::vector<ZipEntry> entries;
+  if (!collect_files(folder_path, prefix, &entries)) {
+    return false;
+  }
+  for (ZipEntry &entry : entries) {
+    if (!measure_file(&entry, on_bytes)) {
+      return false;
+    }
+    out->push_back({entry.zip_path, entry.crc32, entry.size});
+  }
+  return true;
+}
+
 bool write_bytes(FILE *output, const void *data, std::size_t size) {
   return std::fwrite(data, 1, size, output) == size;
 }
@@ -739,6 +758,29 @@ bool add_directory_size(const std::string &path, std::uint64_t *total) {
   return ok;
 }
 
+// Shared by BackupRequest::sources and RestoreRequest::targets: the empty prefix means "no
+// prefix", which only makes sense when there is exactly one entry. Once a request bundles more
+// than one path, every prefix must be present and distinct, or the archive could not map each
+// entry back to the right directory.
+template <typename TrackedPath>
+bool tracked_paths_are_well_formed(const std::vector<TrackedPath> &paths) {
+  if (paths.size() > 1) {
+    for (const TrackedPath &path : paths) {
+      if (path.prefix.empty()) {
+        return false;
+      }
+    }
+  }
+  for (std::size_t i = 0; i < paths.size(); ++i) {
+    for (std::size_t j = i + 1; j < paths.size(); ++j) {
+      if (paths[i].prefix == paths[j].prefix) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 } // namespace
 
 BackupResult create_backup_archive(const BackupRequest &request) {
@@ -759,7 +801,22 @@ BackupResult create_backup_archive(const BackupRequest &request) {
   }
   const std::string archive_path = join_path(backup_directory, archive_name);
 
-  if (!is_directory(request.source_path)) {
+  const bool multi_source = !request.sources.empty();
+  if (multi_source) {
+    if (!tracked_paths_are_well_formed(request.sources)) {
+      return error_result(archive_path, "tracked paths are misconfigured");
+    }
+    bool any_source_exists = false;
+    for (const BackupSource &source : request.sources) {
+      if (is_directory(source.path)) {
+        any_source_exists = true;
+        break;
+      }
+    }
+    if (!any_source_exists) {
+      return error_result(archive_path, "source path is not a directory");
+    }
+  } else if (!is_directory(request.source_path)) {
     return error_result(archive_path, "source path is not a directory");
   }
   if (!ensure_directory(backup_directory)) {
@@ -767,7 +824,15 @@ BackupResult create_backup_archive(const BackupRequest &request) {
   }
 
   std::vector<ZipEntry> entries;
-  if (!collect_files(request.source_path, "", &entries)) {
+  if (multi_source) {
+    for (const BackupSource &source : request.sources) {
+      // A tracked path missing on disk (a core the user never ran, say) simply contributes
+      // nothing to the archive; only a wholly absent set of sources is an error, checked above.
+      if (is_directory(source.path) && !collect_files(source.path, source.prefix, &entries)) {
+        return error_result(archive_path, "could not read source directory");
+      }
+    }
+  } else if (!collect_files(request.source_path, "", &entries)) {
     return error_result(archive_path, "could not read source directory");
   }
   if (entries.size() > 0xffffU) {
@@ -901,24 +966,14 @@ std::vector<ArchiveEntryInfo> compute_folder_entries(
     return result;
   }
 
-  std::vector<ZipEntry> entries;
-  if (!collect_files(folder_path, "", &entries)) {
-    return result;
-  }
-
-  // A cheap stat pass fixes the denominator before any hashing starts; the sizes are advisory
+  // A cheap size pass fixes the denominator before any hashing starts; the sizes are advisory
   // (a file growing mid-scan just clamps at 100%), which is fine for a progress bar.
   std::uint64_t total_bytes = 0;
   std::uint64_t hashed = 0;
   std::uint64_t last_reported = 0;
   std::function<void(std::size_t)> on_bytes;
   if (progress) {
-    for (const ZipEntry &entry : entries) {
-      struct stat info {};
-      if (stat(entry.source_path.c_str(), &info) == 0 && S_ISREG(info.st_mode)) {
-        total_bytes += static_cast<std::uint64_t>(info.st_size);
-      }
-    }
+    add_directory_size(folder_path, &total_bytes);
     progress(0, total_bytes);
     on_bytes = [&](std::size_t chunk) {
       hashed += chunk;
@@ -929,17 +984,32 @@ std::vector<ArchiveEntryInfo> compute_folder_entries(
     };
   }
 
-  for (ZipEntry &entry : entries) {
-    if (!measure_file(&entry, on_bytes)) {
-      return result;
-    }
-    result.push_back({entry.zip_path, entry.crc32, entry.size});
-  }
+  const bool walked = append_folder_entries(folder_path, "", &result, on_bytes);
   if (progress) {
     progress(total_bytes, total_bytes);
   }
   if (ok) {
-    *ok = true;
+    *ok = walked;
+  }
+  return result;
+}
+
+std::vector<ArchiveEntryInfo> compute_sources_entries(const std::vector<BackupSource> &sources,
+                                                      bool *ok) {
+  std::vector<ArchiveEntryInfo> result;
+  bool walked_cleanly = true;
+  for (const BackupSource &source : sources) {
+    // A source missing on disk contributes nothing; it is not itself a failure to walk.
+    if (!is_directory(source.path)) {
+      continue;
+    }
+    if (!append_folder_entries(source.path, source.prefix, &result)) {
+      walked_cleanly = false;
+      break;
+    }
+  }
+  if (ok) {
+    *ok = walked_cleanly;
   }
   return result;
 }
@@ -1052,7 +1122,17 @@ ArchiveReadResult read_stored_backup_entry(const std::string &archive_path,
 }
 
 RestoreResult restore_backup_archive(const RestoreRequest &request) {
-  if (request.destination_path.empty() || request.destination_path == "/") {
+  const bool multi_target = !request.targets.empty();
+  if (multi_target) {
+    if (!tracked_paths_are_well_formed(request.targets)) {
+      return restore_error("tracked paths are misconfigured");
+    }
+    for (const RestoreTarget &target : request.targets) {
+      if (target.destination_path.empty() || target.destination_path == "/") {
+        return restore_error("destination path is unsafe");
+      }
+    }
+  } else if (request.destination_path.empty() || request.destination_path == "/") {
     return restore_error("destination path is unsafe");
   }
 
@@ -1061,7 +1141,10 @@ RestoreResult restore_backup_archive(const RestoreRequest &request) {
     return restore_error("could not open archive");
   }
 
-  const std::string staging_path = request.destination_path + ".restore-tmp";
+  // In targets mode destination_path is not necessarily set (the caller maps several prefixes to
+  // several directories instead), so the staging directory is keyed off the archive path.
+  const std::string staging_path =
+      (multi_target ? request.archive_path : request.destination_path) + ".restore-tmp";
   remove_tree(staging_path);
   const bool ok = ensure_directory(staging_path) &&
                   extract_archive_to_directory(zip, staging_path, UINT64_MAX, nullptr,
@@ -1071,13 +1154,35 @@ RestoreResult restore_backup_archive(const RestoreRequest &request) {
     remove_tree(staging_path);
     return restore_error("could not restore archive");
   }
-  if (!clear_directory_contents(request.destination_path)) {
-    remove_tree(staging_path);
-    return restore_error("could not clear destination save");
-  }
-  if (!move_directory_contents(staging_path, request.destination_path)) {
-    remove_tree(staging_path);
-    return restore_error("could not replace destination save");
+
+  if (multi_target) {
+    for (const RestoreTarget &target : request.targets) {
+      // clear_directory_contents already creates a missing destination as empty; the explicit
+      // ensure_directory call keeps that guarantee even if a target's staging prefix is absent.
+      if (!clear_directory_contents(target.destination_path) ||
+          !ensure_directory(target.destination_path)) {
+        remove_tree(staging_path);
+        return restore_error("could not clear destination save");
+      }
+      const std::string prefixed_staging =
+          target.prefix.empty() ? staging_path : join_path(staging_path, target.prefix);
+      // A prefix absent from the archive means that source had nothing to back up: the
+      // destination stays cleared and empty, mirroring the backup rather than failing restore.
+      if (is_directory(prefixed_staging) &&
+          !move_directory_contents(prefixed_staging, target.destination_path)) {
+        remove_tree(staging_path);
+        return restore_error("could not replace destination save");
+      }
+    }
+  } else {
+    if (!clear_directory_contents(request.destination_path)) {
+      remove_tree(staging_path);
+      return restore_error("could not clear destination save");
+    }
+    if (!move_directory_contents(staging_path, request.destination_path)) {
+      remove_tree(staging_path);
+      return restore_error("could not replace destination save");
+    }
   }
   remove_tree(staging_path);
 
