@@ -10,6 +10,7 @@
 #include "core/SaveSlotMetadata.hpp"
 #include "core/SaveTimeCache.hpp"
 #include "core/SyncPlan.hpp"
+#include "core/TrackedFolders.hpp"
 #include "vita/net/HttpClient.hpp"
 #include "vita/ui/Ui.hpp"
 
@@ -87,6 +88,14 @@ private:
   // immediately; complete_async_read applies the result on the main thread when it lands.
   void submit_async_save_time_read(const SaveRecord &save);
   void complete_async_read(bool wait);
+  // Reads tracked-folders.json once at startup (bounded, capped). A present-but-unreadable or
+  // unparseable file sets tracked_config_load_failed_ and leaves the config empty, so it is never
+  // overwritten later.
+  void load_tracked_folders();
+  // Folds the tracked homebrew data folders (RetroArch builtin + config entries) into saves_ and
+  // resolves each one's time from its live directories. Factored so a later single-entry add can
+  // reuse it; must run after a scan populates saves_ and before the sort/rebuild.
+  void append_tracked_save_records();
   // Returns false if the user canceled (Square) mid-read, so the caller can keep the name order.
   bool resolve_all_save_times();
   bool resolve_save_time(SaveRecord *save);
@@ -274,6 +283,12 @@ private:
   std::atomic<bool> mount_worker_stop_{false};
   int mount_worker_thread_{-1};
   int mount_worker_wake_{-1};
+  // Tracked homebrew data folders (RetroArch builtin + user config), loaded once at startup and
+  // injected into saves_ after each scan.
+  TrackedFoldersConfig tracked_config_;
+  // Set when tracked-folders.json was present but could not be read or parsed. While set, the
+  // config must never be written back, so a truncated or corrupt file is never overwritten.
+  bool tracked_config_load_failed_{};
   // Triangle pressed on the live-save row while its time was still resolving: open Save Details as
   // soon as the resolve lands instead of swallowing the press. Any other input cancels it.
   bool details_open_pending_{};

@@ -43,8 +43,9 @@ struct SaveRecord {
   // entries follow the database stamp, sfo-derived ones follow the folder fingerprint.
   bool title_from_app_db{};
   // Non-empty marks a tracked data-folder entry (homebrew data backups). Each path's full tree
-  // is archived under its prefix; save.path holds the single path for one-path entries and the
-  // common parent for display on multi-path ones. Tracked saves never touch the PFS mount.
+  // is archived under its prefix; save.path holds the single path for one-path entries, the first
+  // path on multi-path config entries, and the common parent for the RetroArch builtin. Tracked
+  // saves never touch the PFS mount.
   std::vector<TrackedPath> tracked_paths;
 };
 

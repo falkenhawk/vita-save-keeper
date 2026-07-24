@@ -11,6 +11,7 @@
 #include "core/PathUtil.hpp"
 #include "core/SaveScanner.hpp"
 #include "core/Selection.hpp"
+#include "core/TrackedFolders.hpp"
 #include "vita/SaveAppDbMetadata.hpp"
 #include "vita/mount/user/save_data_mount.h"
 #include "vita/net/HttpClient.hpp"
@@ -53,6 +54,10 @@ constexpr const char *kSettingsPath = "ux0:data/save-keeper/settings.txt";
 constexpr const char *kSaveIndexPath = "ux0:data/save-keeper/save-titles.json";
 // The retired times half of the old two-file layout, removed at every boot.
 constexpr const char *kLegacySaveTimesPath = "ux0:data/save-keeper/save-times.json";
+constexpr const char *kTrackedFoldersPath = "ux0:data/save-keeper/tracked-folders.json";
+// Bound the tracked-folders read: a truncated or absurdly large file must never be pulled whole
+// into memory before parsing.
+constexpr std::size_t kMaxTrackedFoldersJsonSize = 256 * 1024;
 constexpr const char *kMountKernelPath =
     "ux0:app/SVK000001/sce_sys/save-data-kernel.skprx";
 constexpr const char *kMountUserPath = "ux0:app/SVK000001/sce_sys/save-data-user.suprx";
@@ -117,6 +122,59 @@ std::vector<SaveRoot> default_save_roots() {
 
 BackupTimestamp backup_timestamp_from(const SaveDateTime &value) {
   return {value.year, value.month, value.day, value.hour, value.minute, value.second};
+}
+
+// The live directories of a tracked entry, each under its own zip path prefix, ready for the
+// multi-source archive writer and the folder-signature check.
+std::vector<BackupSource> tracked_sources(const SaveRecord &save) {
+  std::vector<BackupSource> sources;
+  sources.reserve(save.tracked_paths.size());
+  for (const TrackedPath &tracked : save.tracked_paths) {
+    sources.push_back({tracked.prefix, tracked.path});
+  }
+  return sources;
+}
+
+// Just the paths of a tracked entry, for resolve_tracked_metadata (which takes the newest observed
+// time across all of them).
+std::vector<std::string> tracked_path_list(const SaveRecord &save) {
+  std::vector<std::string> paths;
+  paths.reserve(save.tracked_paths.size());
+  for (const TrackedPath &tracked : save.tracked_paths) {
+    paths.push_back(tracked.path);
+  }
+  return paths;
+}
+
+// Each zip path prefix mapped back to the live directory it repopulates on restore.
+std::vector<RestoreTarget> tracked_restore_targets(const SaveRecord &save) {
+  std::vector<RestoreTarget> targets;
+  targets.reserve(save.tracked_paths.size());
+  for (const TrackedPath &tracked : save.tracked_paths) {
+    targets.push_back({tracked.prefix, tracked.path});
+  }
+  return targets;
+}
+
+// Content signature over a save's live directories - a flat single folder for an ordinary save,
+// the per-prefix multi-source set for a tracked entry - so the duplicate/skip checks and the
+// archive writer always measure the same files. Progress reaches the single-folder walk; the
+// multi-source one is bounded by the picker's size caps and stays quick.
+std::vector<ArchiveEntryInfo> compute_save_entries(
+    const SaveRecord &save, bool *ok,
+    const std::function<void(std::uint64_t, std::uint64_t)> &progress = {}) {
+  if (!save.tracked_paths.empty()) {
+    return compute_sources_entries(tracked_sources(save), ok);
+  }
+  return compute_folder_entries(save.path, ok, progress);
+}
+
+// Resolves and stores a tracked record's save time from its live directories (newest observed file
+// time). This is the tracked stand-in for a mount-resolved time; tracked records never mount.
+void resolve_tracked_record_time(SaveRecord *record) {
+  const SaveMetadata metadata =
+      resolve_tracked_metadata(tracked_path_list(*record), current_local_datetime());
+  apply_mounted_save_time(record, metadata);
 }
 
 // The one function that mounts. Called from the mount worker thread only (or inline when the
@@ -424,14 +482,17 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
   }
   LocalSnapshotResult snapshot;
   // Resolve once so the ZIP name and JSON describe the same moment, even if creating the archive
-  // takes long enough for the wall clock to tick over.
-  const SaveMetadata metadata = resolve_live_save_metadata(
-      save.path, current_local_datetime(), save.platform != SavePlatform::Psp,
-      mount_bridge_ready_);
+  // takes long enough for the wall clock to tick over. Tracked entries resolve across their live
+  // directories instead of a PFS mount.
+  const SaveMetadata metadata =
+      save.tracked_paths.empty()
+          ? resolve_live_save_metadata(save.path, current_local_datetime(),
+                                       save.platform != SavePlatform::Psp, mount_bridge_ready_)
+          : resolve_tracked_metadata(tracked_path_list(save), current_local_datetime());
 
   bool entries_ok = false;
   const std::vector<ArchiveEntryInfo> entries =
-      compute_folder_entries(save.path, &entries_ok, check_progress);
+      compute_save_entries(save, &entries_ok, check_progress);
   if (!entries_ok) {
     snapshot.error = "could not read the save folder";
     return snapshot;
@@ -463,7 +524,13 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
   // otherwise create the pre-allocated name exclusively so a collision can never overwrite it.
   if (!plan.reuse_existing) {
     BackupRequest request;
-    request.source_path = save.path;
+    // A tracked entry bundles several live directories under per-prefix paths; an ordinary save is
+    // a single flat folder. A single-path tracked entry has prefix "", matching the flat layout.
+    if (save.tracked_paths.empty()) {
+      request.source_path = save.path;
+    } else {
+      request.sources = tracked_sources(save);
+    }
     request.backup_root = kBackupRoot;
     request.save_id = save.id;
     request.timestamp = timestamp;
@@ -726,6 +793,10 @@ bool App::resolve_save_time(SaveRecord *save) {
 
 void App::apply_cached_save_times() {
   for (SaveRecord &save : saves_) {
+    // Tracked entries get their time from resolve_tracked_metadata and never touch this cache.
+    if (!save.tracked_paths.empty()) {
+      continue;
+    }
     if (!save.save_time_requires_mount || !save.fingerprint.ok) {
       continue;
     }
@@ -766,6 +837,56 @@ void App::rebuild_save_index(long long app_db_mtime, long long app_db_size) {
   }
   save_index_ = std::move(rebuilt);
   flush_save_index();
+}
+
+void App::load_tracked_folders() {
+  FILE *file = std::fopen(kTrackedFoldersPath, "rb");
+  if (!file) {
+    // No config file yet; an empty tracked set is the normal cold-start state, and a later save
+    // may still create the file.
+    return;
+  }
+  std::string text;
+  char buffer[4096];
+  std::size_t read = 0;
+  bool oversized = false;
+  while ((read = std::fread(buffer, 1, sizeof(buffer), file)) > 0) {
+    text.append(buffer, read);
+    if (text.size() > kMaxTrackedFoldersJsonSize) {
+      oversized = true;
+      break;
+    }
+  }
+  const bool read_error = std::ferror(file) != 0;
+  std::fclose(file);
+
+  if (oversized || read_error) {
+    // Present but unreadable or implausibly large. Treat it like a failed parse so a later save
+    // never truncates a config we could not read whole.
+    tracked_config_load_failed_ = true;
+    return;
+  }
+  const TrackedFoldersParseResult parsed = parse_tracked_folders_json(text);
+  if (!parsed.ok) {
+    // A truncated or corrupt config must survive untouched; persistence stays disabled this run.
+    tracked_config_load_failed_ = true;
+    return;
+  }
+  tracked_config_ = std::move(parsed.config);
+}
+
+void App::append_tracked_save_records() {
+  const auto directory_exists = [](const std::string &path) {
+    struct stat info {};
+    return stat(path.c_str(), &info) == 0 && S_ISDIR(info.st_mode);
+  };
+  std::vector<SaveRecord> tracked = build_tracked_save_records(tracked_config_, directory_exists);
+  for (SaveRecord &record : tracked) {
+    // Times come from the live directories (newest observed file), the tracked equivalent of a
+    // mount-resolved time. This happens here, at injection, not in the scanner.
+    resolve_tracked_record_time(&record);
+    saves_.push_back(std::move(record));
+  }
 }
 
 void App::queue_selected_save_time_read() {
@@ -1089,8 +1210,8 @@ void App::create_new_backup() {
     // timestamp; warn first, and let a second press force it anyway (the batch never forces).
     ui_.draw_busy("Checking current save", 0, -1);
     bool signature_ok = false;
-    const std::vector<ArchiveEntryInfo> entries = compute_folder_entries(
-        save.path, &signature_ok, [this](std::uint64_t done, std::uint64_t total) {
+    const std::vector<ArchiveEntryInfo> entries = compute_save_entries(
+        save, &signature_ok, [this](std::uint64_t done, std::uint64_t total) {
           ui_.draw_busy("Checking current save", static_cast<long long>(done),
                         static_cast<long long>(total));
         });
@@ -1349,8 +1470,8 @@ void App::handle_restore() {
   // file timestamps change on every restore and cannot be trusted).
   ui_.draw_busy("Checking current save", 0, -1);
   bool signature_ok = false;
-  const std::vector<ArchiveEntryInfo> current_entries = compute_folder_entries(
-      save.path, &signature_ok, [this](std::uint64_t done, std::uint64_t total) {
+  const std::vector<ArchiveEntryInfo> current_entries = compute_save_entries(
+      save, &signature_ok, [this](std::uint64_t done, std::uint64_t total) {
         ui_.draw_busy("Checking current save", static_cast<long long>(done),
                       static_cast<long long>(total));
       });
@@ -1413,7 +1534,13 @@ void App::handle_restore() {
   ui_.draw_busy("Restoring save", 0, -1);
   RestoreRequest restore_request;
   restore_request.archive_path = archive_path;
-  restore_request.destination_path = save.path;
+  // A tracked entry restores each zip prefix back to its own live directory; an ordinary save
+  // restores to its single folder.
+  if (save.tracked_paths.empty()) {
+    restore_request.destination_path = save.path;
+  } else {
+    restore_request.targets = tracked_restore_targets(save);
+  }
   restore_request.progress = [this](std::uint64_t done, std::uint64_t total) {
     ui_.draw_busy("Restoring save", static_cast<long long>(done),
                   static_cast<long long>(total));
@@ -1435,6 +1562,17 @@ void App::handle_restore() {
 }
 
 void App::invalidate_save_time(const SaveRecord &restored) {
+  if (!restored.tracked_paths.empty()) {
+    // Tracked entries never live in the save index and never mount. Re-resolve their time from
+    // the (now restored) live directories, the same way injection does.
+    for (SaveRecord &record : saves_) {
+      if (record.id == restored.id && !record.tracked_paths.empty()) {
+        resolve_tracked_record_time(&record);
+        break;
+      }
+    }
+    return;
+  }
   // Belt and braces behind handle_restore's complete_async_read: should a read for this save
   // still be in flight, its result describes the pre-restore folder and must not be applied.
   if (mount_work_.async && mount_work_.async_save_id == restored.id) {
@@ -2431,8 +2569,11 @@ void App::open_save_details() {
     if (save.platform != SavePlatform::Psp) {
       ui_.draw_busy("Loading save details", 0, -1);
     }
-    slot_details_.metadata = resolve_live_save_metadata(
-        save.path, {}, save.platform != SavePlatform::Psp, mount_bridge_ready_);
+    slot_details_.metadata =
+        save.tracked_paths.empty()
+            ? resolve_live_save_metadata(save.path, {}, save.platform != SavePlatform::Psp,
+                                         mount_bridge_ready_)
+            : resolve_tracked_metadata(tracked_path_list(save), {});
     if (!save_metadata_has_observed_time(slot_details_.metadata)) {
       slot_details_.metadata = {};
       slot_details_.unavailable_message = "No save details available";
@@ -2448,11 +2589,29 @@ void App::open_save_details() {
                 "newest file.";
     }
     // On-demand: the live save's on-disk footprint. No ZIP exists yet, so leave archive_bytes unset.
-    bool save_size_ok = false;
-    const std::uint64_t save_bytes = compute_folder_size(save.path, &save_size_ok);
-    if (save_size_ok) {
-      slot_details_.save_bytes = save_bytes;
-      slot_details_.save_bytes_known = true;
+    // A tracked entry sums every live directory; unknown only when all of them are unreadable.
+    if (save.tracked_paths.empty()) {
+      bool save_size_ok = false;
+      const std::uint64_t save_bytes = compute_folder_size(save.path, &save_size_ok);
+      if (save_size_ok) {
+        slot_details_.save_bytes = save_bytes;
+        slot_details_.save_bytes_known = true;
+      }
+    } else {
+      std::uint64_t total = 0;
+      bool any_ok = false;
+      for (const TrackedPath &tracked : save.tracked_paths) {
+        bool path_ok = false;
+        const std::uint64_t bytes = compute_folder_size(tracked.path, &path_ok);
+        if (path_ok) {
+          total += bytes;
+          any_ok = true;
+        }
+      }
+      if (any_ok) {
+        slot_details_.save_bytes = total;
+        slot_details_.save_bytes_known = true;
+      }
     }
     slot_details_.open = true;
     return;
@@ -2884,8 +3043,7 @@ void App::run_sync_all() {
     const std::vector<std::string> backups = scan_local_backup_names(kBackupRoot, save.id);
     SyncItemInput input;
     input.drive_connected = drive_online;
-    const std::vector<ArchiveEntryInfo> entries =
-        compute_folder_entries(save.path, &input.entries_ok);
+    const std::vector<ArchiveEntryInfo> entries = compute_save_entries(save, &input.entries_ok);
     input.folder_empty = entries.empty();
     if (input.entries_ok && !entries.empty()) {
       input.matches_existing = !matching_backup_name(entries, save.id, backups).empty();
@@ -3004,6 +3162,7 @@ int App::run() {
   // Version 2 folded save-times.json into the index; on an upgraded card the old file is dead
   // weight. Unconditional removal costs one failed unlink per boot once it is gone.
   std::remove(kLegacySaveTimesPath);
+  load_tracked_folders();
   long long app_db_mtime = 0;
   long long app_db_size = 0;
   const bool app_db_stamped = stat_file_stamp(kSystemAppDbPath, &app_db_mtime, &app_db_size);
@@ -3045,6 +3204,9 @@ int App::run() {
   // valid times get written back instead of being reset to "never resolved" and re-mounted.
   apply_cached_save_times();
   rebuild_save_index(app_db_stamped ? app_db_mtime : 0, app_db_stamped ? app_db_size : 0);
+  // Fold the tracked homebrew data folders into saves_ now that the scanner, app-database pass
+  // and index are done - they run only over real savedata - and before the sort/rebuild below.
+  append_tracked_save_records();
   load_settings();
   // One pass for folders emptied by older versions, which left them behind. Deletes clean up as
   // they go now, so this never needs to run again. It sits under the "Loading saves" modal that is
