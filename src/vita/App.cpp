@@ -3280,17 +3280,17 @@ void App::browser_track_selected() {
     }
   }
   constexpr std::uint64_t kMebibyte = 1024ULL * 1024ULL;
-  // The ZIP writer has no zip64; a file or the whole archive is capped at 4 GB (BackupArchive.cpp
-  // measure_file), so refuse a folder that would not fit with room to spare for headers.
-  constexpr std::uint64_t kMaxBackupBytes = 3800ULL * kMebibyte;
+  // Saves are small. A data folder this big is almost always the game's bundled assets sitting next
+  // to a tiny save, so refuse it and let the user drill into the actual save subfolder instead. The
+  // limits stay in MiB so ui_.format_size (1024-based) prints them back as exactly "64 MB"/"128 MB".
+  constexpr std::uint64_t kMaxBackupBytes = 128ULL * kMebibyte;
+  constexpr std::uint64_t kLargeFolderWarnBytes = 64ULL * kMebibyte;
   if (row.size_known && row.size_bytes > kMaxBackupBytes) {
-    // format_size on the threshold itself, not a hand-typed "3.8 GB" - format_bytes is 1024-based,
-    // so 3800 MiB prints as "3.7 GB" and a hard-coded "3.8 GB" would misstate the actual limit.
-    set_status(StatusKind::Error,
-               "Too large to back up (over " + ui_.format_size(kMaxBackupBytes) + ").");
+    set_status(StatusKind::Error, "Too large to back up (over " + ui_.format_size(kMaxBackupBytes) +
+                                      ") - drill into the save subfolder.");
     return;
   }
-  if (row.size_known && row.size_bytes > 512ULL * kMebibyte && !browser.large_confirm_pending) {
+  if (row.size_known && row.size_bytes > kLargeFolderWarnBytes && !browser.large_confirm_pending) {
     browser.large_confirm_pending = true;
     set_status(StatusKind::Info, "Large folder (" + ui_.format_size(row.size_bytes) +
                                      ") - press Square again to track it anyway.");
