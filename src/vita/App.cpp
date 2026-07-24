@@ -1170,6 +1170,8 @@ const SaveRecord *App::selected_save_record() const {
 }
 
 bool App::add_folder_tile_focused() const {
+  // Mirrors the free function add_folder_tile_focused(const UiState &) in Ui.cpp - keep both
+  // conditions in sync.
   return category_ == SaveCategory::Homebrew && selected_save_ >= visible_saves_.size();
 }
 
@@ -1286,6 +1288,7 @@ void App::create_new_backup() {
   restore_confirmation_pending_ = false;
   delete_confirmation_pending_ = false;
   delete_scope_prompt_pending_ = false;
+  stop_tracking_confirmation_pending_ = false;
   const SaveRecord *selected = selected_save_record();
   if (!selected) {
     set_status(StatusKind::Info, "No save selected.");
@@ -3043,6 +3046,7 @@ void App::begin_label_edit() {
   restore_confirmation_pending_ = false;
   delete_confirmation_pending_ = false;
   delete_scope_prompt_pending_ = false;
+  stop_tracking_confirmation_pending_ = false;
   duplicate_backup_confirmation_pending_ = false;
   sync_all_confirmation_pending_ = false;
   if (google_auth_pending_) {
@@ -3223,6 +3227,9 @@ void App::resolve_browser_size() {
   if (row.size_known) {
     return;
   }
+  // One busy frame before the stat-walk below, so a folder with many entries does not leave the
+  // screen looking frozen; the walk is synchronous and reports no progress, hence the -1 total.
+  ui_.draw_busy("Measuring folder", 0, -1);
   bool ok = false;
   const std::uint64_t bytes =
       compute_folder_size(directory_browser_.current_path + "/" + row.name, &ok);
@@ -3246,6 +3253,8 @@ void App::browser_track_selected() {
   if (!row.size_known) {
     // The debounce usually has this already; compute inline otherwise, since a stat-walk is fast
     // for the common case and there is no cheaper way to enforce the size limits below.
+    // One busy frame first - the same synchronous walk, same indeterminate progress as above.
+    ui_.draw_busy("Measuring folder", 0, -1);
     bool ok = false;
     const std::uint64_t bytes = compute_folder_size(full_path, &ok);
     if (ok) {
@@ -3256,8 +3265,12 @@ void App::browser_track_selected() {
   constexpr std::uint64_t kMebibyte = 1024ULL * 1024ULL;
   // The ZIP writer has no zip64; a file or the whole archive is capped at 4 GB (BackupArchive.cpp
   // measure_file), so refuse a folder that would not fit with room to spare for headers.
-  if (row.size_known && row.size_bytes > 3800ULL * kMebibyte) {
-    set_status(StatusKind::Error, "Too large to back up (over 3.8 GB).");
+  constexpr std::uint64_t kMaxBackupBytes = 3800ULL * kMebibyte;
+  if (row.size_known && row.size_bytes > kMaxBackupBytes) {
+    // format_size on the threshold itself, not a hand-typed "3.8 GB" - format_bytes is 1024-based,
+    // so 3800 MiB prints as "3.7 GB" and a hard-coded "3.8 GB" would misstate the actual limit.
+    set_status(StatusKind::Error,
+               "Too large to back up (over " + ui_.format_size(kMaxBackupBytes) + ").");
     return;
   }
   if (row.size_known && row.size_bytes > 512ULL * kMebibyte && !browser.large_confirm_pending) {
@@ -3346,6 +3359,7 @@ void App::begin_sync_all() {
   restore_confirmation_pending_ = false;
   delete_confirmation_pending_ = false;
   delete_scope_prompt_pending_ = false;
+  stop_tracking_confirmation_pending_ = false;
   duplicate_backup_confirmation_pending_ = false;
   sync_all_confirmation_pending_ = false;
 

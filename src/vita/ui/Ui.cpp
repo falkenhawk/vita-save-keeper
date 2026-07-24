@@ -250,6 +250,7 @@ std::string truncate_label(const std::string &text, std::size_t max_length) {
 // True when the Homebrew tab's extra "+ Add folder" tile is the focused cell: selected_save sits
 // one past the last visible save (or at 0 when the tab has only the tile). Shared by the grid, the
 // backup pane, and the footer so all three agree on when no real save is selected.
+// Mirrors App::add_folder_tile_focused() in App.cpp - keep both conditions in sync.
 bool add_folder_tile_focused(const UiState &state) {
   return state.show_add_folder_tile && state.visible_saves &&
          state.selected_save >= state.visible_saves->size();
@@ -1242,7 +1243,10 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
   constexpr int kRowH = 36;
   constexpr int kListTop = 76;
   constexpr std::size_t kVisibleRows = 10;
-  constexpr int kSizeRight = 912;
+  // Right edge the size/"tracked" text right-aligns against - a 24px inset from the row's own
+  // right edge (kListX + kListW), not the row width itself. Derived so it cannot drift out of
+  // sync with kListW even though both happen to equal 912 today.
+  constexpr int kSizeRight = kListX + kListW - 24;
 
   if (state.rows.empty()) {
     draw_text(fonts_, kListX + 16, kListTop + 24, kColorMuted, kTextSizeSmall, "no subfolders");
