@@ -1474,6 +1474,33 @@ void test_backup_store_removes_the_save_folder_only_when_it_is_empty() {
   std::filesystem::remove_all(base);
 }
 
+void test_backup_store_sweeps_only_empty_folders_under_the_root() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-folder-sweep-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "PCSE00120_ Persona_4");
+  std::filesystem::create_directories(base / "PCSB00245_ Tearaway");
+  std::filesystem::create_directories(base / "NPWR00001_ Orphan");
+  {
+    std::ofstream(base / "PCSB00245_ Tearaway" / "2026-05-21 16-14.zip") << "backup";
+    std::ofstream(base / "NPWR00001_ Orphan" / "2026-05-21 16-14.json") << "metadata";
+    std::ofstream(base / "settings-like-stray.txt") << "not a folder";
+  }
+
+  EXPECT_EQ(vsm::remove_empty_backup_folders(base.string()), static_cast<std::size_t>(1));
+  EXPECT_TRUE(!std::filesystem::exists(base / "PCSE00120_ Persona_4"));
+  EXPECT_TRUE(std::filesystem::exists(base / "PCSB00245_ Tearaway"));
+  EXPECT_TRUE(std::filesystem::exists(base / "NPWR00001_ Orphan"));
+  EXPECT_TRUE(std::filesystem::exists(base / "settings-like-stray.txt"));
+
+  // Sweeping twice is a no-op, and a backup root that does not exist yet is not an error.
+  EXPECT_EQ(vsm::remove_empty_backup_folders(base.string()), static_cast<std::size_t>(0));
+  EXPECT_EQ(vsm::remove_empty_backup_folders((base / "never-created").string()),
+            static_cast<std::size_t>(0));
+
+  std::filesystem::remove_all(base);
+}
+
 void test_backup_store_builds_normalized_archive_path() {
   EXPECT_EQ(vsm::local_backup_archive_path("/backups", "PCSE00120: Persona/4",
                                            "2026-05-21 16-14.zip"),
@@ -2194,6 +2221,7 @@ int main() {
   test_backup_store_lists_local_zip_backups_newest_first();
   test_backup_store_builds_normalized_archive_path();
   test_backup_store_removes_the_save_folder_only_when_it_is_empty();
+  test_backup_store_sweeps_only_empty_folders_under_the_root();
   test_backup_download_publication_is_exclusive_and_cleans_temporary_files();
   test_google_auth_builds_device_code_request_body();
   test_google_auth_builds_token_poll_request_body();

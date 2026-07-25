@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
@@ -102,6 +103,38 @@ std::string local_backup_metadata_path(const std::string &backup_root, const std
 void remove_local_backup_folder_if_empty(const std::string &backup_root,
                                          const std::string &save_id) {
   rmdir(join_path(backup_root, normalized_save_folder(save_id)).c_str());
+}
+
+std::size_t remove_empty_backup_folders(const std::string &backup_root) {
+  DIR *dir = opendir(backup_root.c_str());
+  if (!dir) {
+    // Nothing has been backed up on this card yet.
+    return 0;
+  }
+
+  // Collect first, remove after closing. Changing a directory while readdir is walking it is
+  // unspecified behavior for entries it has not returned yet, and the Vita's filesystem driver is
+  // not the place to depend on unspecified behavior.
+  std::vector<std::string> folders;
+  while (dirent *entry = readdir(dir)) {
+    if (is_dot_entry(entry->d_name)) {
+      continue;
+    }
+    const std::string path = join_path(backup_root, entry->d_name);
+    struct stat info {};
+    if (stat(path.c_str(), &info) == 0 && S_ISDIR(info.st_mode)) {
+      folders.push_back(path);
+    }
+  }
+  closedir(dir);
+
+  std::size_t removed = 0;
+  for (const std::string &folder : folders) {
+    if (rmdir(folder.c_str()) == 0) {
+      ++removed;
+    }
+  }
+  return removed;
 }
 
 std::string allocate_backup_name(const BackupTimestamp &timestamp, const std::string &suffix,

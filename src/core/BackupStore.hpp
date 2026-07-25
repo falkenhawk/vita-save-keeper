@@ -3,6 +3,7 @@
 #include "core/BackupArchive.hpp"
 #include "core/BackupName.hpp"
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,11 @@ std::string local_backup_metadata_path(const std::string &backup_root, const std
 // Drive - always keeps its folder. Failure is not reported: an empty folder is harmless.
 void remove_local_backup_folder_if_empty(const std::string &backup_root,
                                          const std::string &save_id);
+
+// Sweeps every folder directly under the backup root, removing the ones that are empty, and
+// returns how many went away. Enumerating the root rather than the known saves is deliberate: a
+// backup folder outlives the game it belongs to when that game is uninstalled.
+std::size_t remove_empty_backup_folders(const std::string &backup_root);
 
 std::string allocate_backup_name(const BackupTimestamp &timestamp, const std::string &suffix,
                                  const std::vector<std::string> &local_names,
