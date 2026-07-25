@@ -1217,6 +1217,74 @@ void test_save_index_rejects_bad_input_but_keeps_healthy_entries() {
   EXPECT_EQ(parsed.app_db_mtime, 0LL);
 }
 
+void test_build_save_index_carries_times_prunes_and_stamps() {
+  vsm::SaveRecord plain;
+  plain.id = "BHBB00001";
+  plain.display_name = "Homebrew";
+  plain.icon_path = "icon.png";
+  plain.fingerprint = {true, 100LL, 2LL, 300LL};
+  plain.save_time_known = true;
+  plain.saved_at = {2026, 7, 1, 12, 0, 0};
+  vsm::SaveRecord mounted;
+  mounted.id = "PCSE88888";
+  mounted.display_name = "Encrypted Game";
+  mounted.title_from_app_db = true;
+  mounted.fingerprint = {true, 200LL, 5LL, 700LL};
+  mounted.save_time_requires_mount = true;
+  // A plain save that resolved to nothing readable: resolved must not be conflated with known,
+  // or the negative cache dies and empty saves get re-mounted every launch.
+  vsm::SaveRecord empty_save;
+  empty_save.id = "PCSB77777";
+  empty_save.display_name = "Empty Save";
+  empty_save.fingerprint = {true, 400LL, 1LL, 50LL};
+
+  vsm::SaveIndex previous;
+  // Matching fingerprint: this resolved time must survive the rebuild even though the record
+  // itself still says "requires mount".
+  vsm::SaveIndexEntry cached;
+  cached.fingerprint = {true, 200LL, 5LL, 700LL};
+  cached.time_resolved = true;
+  cached.has_time = true;
+  cached.saved_at = {2026, 6, 15, 9, 30, 0};
+  previous.entries["PCSE88888"] = cached;
+  // A save that no longer exists is pruned from the rebuilt index.
+  previous.entries["GONE00000"] = cached;
+
+  const vsm::SaveIndex built =
+      vsm::build_save_index({plain, mounted, empty_save}, previous, 42LL, 4242LL);
+  EXPECT_EQ(built.app_db_mtime, 42LL);
+  EXPECT_EQ(built.app_db_size, 4242LL);
+  EXPECT_EQ(built.entries.size(), static_cast<std::size_t>(3));
+  EXPECT_TRUE(built.entries.find("GONE00000") == built.entries.end());
+  const vsm::SaveIndexEntry &plain_entry = built.entries.at("BHBB00001");
+  EXPECT_TRUE(plain_entry.time_resolved);
+  EXPECT_TRUE(plain_entry.has_time);
+  EXPECT_EQ(vsm::format_save_datetime(plain_entry.saved_at), "2026-07-01T12:00:00");
+  EXPECT_EQ(plain_entry.display_name, "Homebrew");
+  EXPECT_TRUE(!plain_entry.from_app_db);
+  const vsm::SaveIndexEntry &mounted_entry = built.entries.at("PCSE88888");
+  EXPECT_TRUE(mounted_entry.time_resolved);
+  EXPECT_TRUE(mounted_entry.has_time);
+  EXPECT_EQ(vsm::format_save_datetime(mounted_entry.saved_at), "2026-06-15T09:30:00");
+  EXPECT_TRUE(mounted_entry.from_app_db);
+  const vsm::SaveIndexEntry &empty_entry = built.entries.at("PCSB77777");
+  EXPECT_TRUE(empty_entry.time_resolved);
+  EXPECT_TRUE(!empty_entry.has_time);
+
+  // Folder changed since the cached mount: the stale time is dropped, not carried.
+  vsm::SaveRecord changed = mounted;
+  changed.fingerprint = {true, 999LL, 5LL, 700LL};
+  const vsm::SaveIndex rebuilt = vsm::build_save_index({changed}, previous, 42LL, 4242LL);
+  EXPECT_TRUE(!rebuilt.entries.at("PCSE88888").time_resolved);
+  // A mount-requiring save with no previous entry at all likewise stays unresolved.
+  vsm::SaveRecord fresh_mount;
+  fresh_mount.id = "PCSF00001";
+  fresh_mount.fingerprint = {true, 1LL, 1LL, 1LL};
+  fresh_mount.save_time_requires_mount = true;
+  const vsm::SaveIndex no_previous = vsm::build_save_index({fresh_mount}, {}, 0LL, 0LL);
+  EXPECT_TRUE(!no_previous.entries.at("PCSF00001").time_resolved);
+}
+
 void test_backup_archive_reads_bounded_sdslot_entry_without_restoring() {
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() / "save-keeper-archive-entry-test";
@@ -2464,6 +2532,7 @@ int main() {
   test_save_index_roundtrip_covers_all_three_time_states();
   test_save_index_reads_version_one_titles_forward();
   test_save_index_rejects_bad_input_but_keeps_healthy_entries();
+  test_build_save_index_carries_times_prunes_and_stamps();
   test_backup_archive_reads_bounded_sdslot_entry_without_restoring();
   test_legacy_zip_metadata_can_be_recovered_without_rewriting_the_archive();
   test_backup_archive_extracts_to_isolated_inspection_directory_and_cleans_up();

@@ -43,6 +43,15 @@ std::vector<SaveRecord> scan_save_roots(
     const SaveMetadataResolver &resolve_metadata = {},
     const SaveTimeCache *time_cache = nullptr,
     const SaveTitleCache *title_cache = nullptr);
+// Builds the on-card index from freshly scanned (and app-db-annotated) records: one entry per
+// save, so entries for saves that no longer exist fall away. A record still awaiting its mount
+// keeps a previous resolved time while its folder fingerprint is unchanged; every other record's
+// own time state is authoritative (save_time_known false serializes as savedAt null - the
+// negative cache). Callers must not feed records whose mount attempt failed for a reason that
+// can heal (bridge down): such a record looks identical to a genuine "nothing readable" result,
+// so it must stay marked requires-mount instead.
+SaveIndex build_save_index(const std::vector<SaveRecord> &saves, const SaveIndex &previous,
+                           long long app_db_mtime, long long app_db_size);
 // Applies a save time resolved through the live mount: a real Vita slot time when the save has
 // slots, otherwise the newest-file time as an approximate fallback. Only a backup-clock (no
 // observed time) result is rejected, leaving the save time unknown. Matches what the details

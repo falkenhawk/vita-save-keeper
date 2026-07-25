@@ -333,4 +333,42 @@ std::vector<SaveRecord> scan_save_roots(
   return saves;
 }
 
+SaveIndex build_save_index(const std::vector<SaveRecord> &saves, const SaveIndex &previous,
+                           long long app_db_mtime, long long app_db_size) {
+  SaveIndex index;
+  index.app_db_mtime = app_db_mtime;
+  index.app_db_size = app_db_size;
+  for (const SaveRecord &save : saves) {
+    SaveIndexEntry entry;
+    entry.fingerprint = save.fingerprint;
+    entry.from_app_db = save.title_from_app_db;
+    entry.display_name = save.display_name;
+    entry.title_id = save.title_id;
+    entry.icon_path = save.icon_path;
+    if (!save.save_time_requires_mount) {
+      entry.time_resolved = true;
+      entry.has_time = save.save_time_known;
+      // Zeroed when unknown so the stored entry is canonical and serialized comparisons are
+      // stable regardless of what scan-time clock the record happens to carry.
+      entry.saved_at = save.save_time_known ? save.saved_at : SaveDateTime{};
+    } else {
+      // Still awaiting a mount: carry a previous resolved time forward while the folder is
+      // unchanged, so a valid cached time survives regardless of when the caller applied it.
+      // matches requires both fingerprints ok, so an unreadable live folder never inherits a
+      // stale time.
+      const auto existing = previous.entries.find(save.id);
+      if (existing != previous.entries.end() &&
+          existing->second.fingerprint.matches(save.fingerprint)) {
+        entry.time_resolved = existing->second.time_resolved;
+        entry.has_time = existing->second.has_time;
+        entry.saved_at = existing->second.saved_at;
+      }
+    }
+    // Duplicate ids (the same title on card and cart) resolve last-wins, matching the old
+    // id-keyed caches; the loser just re-resolves its time while both exist.
+    index.entries[save.id] = std::move(entry);
+  }
+  return index;
+}
+
 } // namespace vsm
