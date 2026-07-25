@@ -1412,7 +1412,6 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
   vita2d_draw_rectangle(0, 508, 960, 36, RGBA8(5, 10, 18, 230));
   const ButtonSymbol cancel = enter_is_cross ? ButtonSymbol::Circle : ButtonSymbol::Cross;
   const ButtonSymbol primary = enter_is_cross ? ButtonSymbol::Cross : ButtonSymbol::Circle;
-  const bool at_root = state.current_path == "ux0:data";
   const DirectoryBrowserState::Row *focused_row =
       state.selected < state.rows.size() ? &state.rows[state.selected] : nullptr;
   const char *const close_label = state.return_to_details ? "Back" : "Close";
@@ -1420,12 +1419,9 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
   if (state.included_count > 0) {
     hints.push_back({ButtonSymbol::Label, "L/R  Included", nullptr, nullptr});
   }
-  hints.push_back({cancel, at_root ? close_label : "Up", nullptr, nullptr});
-  // Triangle is the shortcut out from a subfolder. At the root the cancel button already closes, so
-  // offering it there too would just be the same action listed twice.
-  if (!at_root) {
-    hints.push_back({ButtonSymbol::Triangle, close_label, nullptr, nullptr});
-  }
+  // Circle backs out from anywhere - climbing is the ".." row's job - and Triangle closes too but
+  // stays unhinted, mirroring the unhinted Triangle that opens the picker from the overview row.
+  hints.push_back({cancel, close_label, nullptr, nullptr});
   // Square toggles whether the folder is part of this entry's backup. Nothing on disk is created or
   // deleted by it, so the words are about inclusion, not about adding or removing folders. A folder
   // that is covered (a parent is included), in use by another entry, or the ".." link offers none.
@@ -1435,9 +1431,8 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
         {ButtonSymbol::Square, focused_row->tracked_here ? "Exclude" : "Include", nullptr,
          nullptr});
   }
-  // ".." answers to Cross too, but hinting it would print "Up" twice beside Circle's.
-  if (focused_row && !focused_row->parent_link) {
-    hints.push_back({primary, "Open", nullptr, nullptr});
+  if (focused_row) {
+    hints.push_back({primary, focused_row->parent_link ? "Up" : "Open", nullptr, nullptr});
   }
   const int hints_left =
       draw_hints_right_aligned(fonts_, hints.data(), static_cast<int>(hints.size()));

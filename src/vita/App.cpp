@@ -2967,10 +2967,10 @@ void App::repair_remote_backup_metadata(const SaveRecord &save, const BackupRow 
 }
 
 void App::request_save_details() {
-  // The "Data folders" row has no details of its own to show - it is a way into the picker, not a
-  // save or a backup - so Triangle does nothing on it rather than opening a screen about something
-  // else. The footer drops the hint to match.
+  // The "Data folders" row has no details of its own - Triangle opens the picker instead, an
+  // unhinted shortcut that mirrors Triangle silently closing it from inside.
   if (data_folders_row_focused()) {
+    open_directory_browser(false);
     return;
   }
   // Entering details silently drops transient overview feedback: a stale status line is
@@ -4613,11 +4613,9 @@ int App::run() {
         rows_changed = true;
       }
       if (!rows_changed && (pressed & cancel_button) != 0) {
-        if (browser.current_path == kUserDataRoot) {
-          close_directory_browser();
-        } else {
-          browser_go_up();
-        }
+        // Circle backs out of the picker from anywhere, like everywhere else in the app; climbing
+        // is what the ".." row is for.
+        close_directory_browser();
       }
       if (directory_browser_.open && (pressed & SCE_CTRL_TRIANGLE) != 0) {
         close_directory_browser();
