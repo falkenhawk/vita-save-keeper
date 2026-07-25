@@ -9,19 +9,21 @@ more than one Vita (or a PS TV), your saves follow you.
 
 ## What it does
 
-- creates timestamped ZIP backups of Vita, game card, and PSP/Adrenaline saves
+- creates timestamped ZIP backups of Vita, PSP/Adrenaline, and homebrew saves
 - signs in to Google by scanning a QR code with your phone - no typing on the Vita.
   [Set it up once](docs/google-drive-setup.md) and it just works
 - uploads backups to a `PSV Saves` folder in your own Google Drive
 - downloads and restores backups on any of your devices, so a save made on one Vita can
   be picked up on another Vita or a PS TV (you can also download a copy without restoring)
-- backs up and uploads a whole tab in one gesture - every game in the current tab, backed up
-  and synced to Drive at once
+- backs up and uploads a whole tab in one gesture - all games or a remembered selection
 - shows one row per backup, with a small cloud glyph marking where it lives - locally,
   on Google Drive, or both
 - lets you label a backup ("before boss", "100% save") with the on-screen keyboard, so you can
   tell backups apart. The label follows the backup to Drive
 - shows your games in a grid with real titles and icons, grouped into Vita / Homebrew / PSP tabs
+- backs up homebrew saves in `ux0:data` - pick an app's savedata paths (folders or single
+  files) yourself, and Save Keeper ships a built-in config handling popular homebrews (currently
+  only RetroArch, more can be added)
 - sorts by name, by latest backup (whatever was backed up most recently, from any device,
   bubbles to the top), or by last saved
 - keeps multiple backups per game, so you can go back to an older save at any time
@@ -33,12 +35,12 @@ more than one Vita (or a PS TV), your saves follow you.
   to an accidental overwrite
 
 | Google sign-in | Upload with progress |
-| --- | --- |
+| :--- | :--- |
 | ![Sign in](docs/screenshots/google-signin.png) | ![Upload](docs/screenshots/upload-progress.png) |
-
-| Back up & upload all saves at once | Save details |
-| --- | --- |
-| ![Batch](docs/screenshots/batch-upload.png) | ![Details](docs/screenshots/save-details.png) |
+| **Pick what a whole-tab backup takes** | **Save details** |
+| ![Batch selection](docs/screenshots/batch-select.png) | ![Details](docs/screenshots/save-details.png) |
+| **A whole tab, backing up** | **Savedata paths for homebrew** |
+| ![Batch run](docs/screenshots/batch-upload.png) | ![Savedata paths](docs/screenshots/savedata-paths.png) |
 
 ## What you need
 
@@ -73,14 +75,13 @@ Follow the [Google Drive setup guide](docs/google-drive-setup.md).
 | L / R | switch between the Vita / Homebrew / PSP tabs |
 | Right stick | move through the backup list |
 | Cross | create a backup (on "New Backup") or restore the selected one (press twice) |
-| Select | \- upload a local-only backup, or download a Drive-only one<br>\- hold to back up & upload the whole tab |
+| Select | \- upload a local-only backup, or download a Drive-only one<br>\- hold to back up & upload the tab |
 | Start | delete the selected backup - for one that is on both sides, choose local, Drive, or both |
 | Square | \- change sorting (by name, latest backup, or last saved)<br>\- hold to label the selected backup |
 | Triangle | \- view the focused save's slot details and sizes<br>\- hold to connect Google Drive or re-sync its backup list |
 | Circle | cancel a pending confirmation or the Google sign-in |
 
 On Japanese-region consoles Cross and Circle swap automatically, following the system setting.
-Inside Save Details the same actions work on the inspected backup.
 
 ## Syncing between devices
 
@@ -94,21 +95,18 @@ on Drive too, so the two stay matched.
 
 Deleting the last Drive backup of a game also removes its (empty) folder from Drive.
 
+Backup settings (savedata path choices and skip lists) sync through Drive too.
+
 Restoring never destroys the save you had: if the current save is not already covered by one of
 the local backups (compared by content, not by dates), an `[AUTO]` backup is created first.
 
 Slot details are stored in a small optional JSON companion next to each ZIP, locally and on
 Drive. The ZIP is always authoritative: a missing or damaged JSON file never hides a backup and
-never prevents upload, download, restore, labeling, or deletion. Save Keeper reads details lazily
-when you press Triangle, and can recover them from `sce_sys/sdslot.dat` inside older local ZIPs
-without rewriting those ZIPs. Existing 1.0 backups keep their original names and work unchanged.
+never prevents upload, download, restore, labeling, or deletion.
 
 Saves of retail games are encrypted by the system, so Save Keeper uses a small kernel helper to
 read the exact save dates out of them. When that helper is unavailable it falls back to the
-file times of the save - nothing breaks, the dates are just approximate rather than exact. Recovering slot details from an already-encrypted backup
-extracts it into `ur0:user/00/savedata` first, so that step needs enough free space on `ur0:` for
-the save. It is skipped when the save is larger than the space available there, and the ZIP itself
-is never touched.
+file times of the save - nothing breaks, the dates are just approximate rather than exact.
 
 ## Where things are stored
 
@@ -117,7 +115,8 @@ is never touched.
 | `ux0:data/save-keeper/backups/` | local ZIP backups and optional JSON details, one folder per game |
 | `ux0:data/save-keeper/google-client.json` | your OAuth client credentials |
 | `ux0:data/save-keeper/google-token.json` | your sign-in - treat it like a password |
-| `ux0:data/save-keeper/settings.txt` | app settings (sort mode) |
+| `ux0:data/save-keeper/settings.txt` | app settings |
+| `ux0:data/save-keeper/backup-settings.json` | your savedata path choices (overriding the built-in list) and which games a whole-tab backup leaves out - synced through Drive |
 | `PSV Saves/` in your Google Drive | uploaded backups, one folder per game |
 
 To disconnect a device, delete `google-token.json` and revoke the grant at
@@ -169,8 +168,8 @@ natural license for the whole project.
 
 ## AI disclaimer
 
-Built with heavy AI assistance: the code, docs, and art were developed with Claude (Fable 5 and
-Opus 4.8) and GPT-5.6 Sol, through many feedback loops under human control, review, and testing on
-real hardware.
+Built with heavy AI assistance: the code, docs, and art were developed with Claude (Fable 5,
+Opus 5 and 4.8) and GPT-5.6 Sol, through many feedback loops under human control, review, and
+testing on real hardware.
 
 Do not install if you don't accept software built this way.

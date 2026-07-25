@@ -6,17 +6,24 @@ All notable changes to Save Keeper are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- back up homebrew saves in `ux0:data` - pick an app's savedata paths (folders or single files)
+  in its new "Savedata Paths" row above "New Backup", and a built-in config handles popular
+  homebrews (currently only RetroArch, more can be added)
+- Backup & Upload All can take everything or just a selection, picked with checkboxes and
+  remembered for next time
+- backup settings sync through Google Drive, so your other devices pick them up
+
 ### Changed
-- the two on-card scan caches merged into one `save-titles.json` - half the file reads and
-  writes at every boot, and the leftover `save-times.json` is cleaned off the card on first launch
+- cache optimizations for better performance
 - reading save times has been optimized and no longer blocks the interface while sweeping through games
-- the console no longer auto-suspends in the middle of a backup, restore, upload, or download
 
 ### Fixed
-- deleting a game's last backup now removes its folder from the memory card instead of leaving an
-  empty one behind, and folders left empty by earlier versions are cleared out on the next launch
-- better progress bars, updated visual style - large backups, restores, and uploads now fill
-  smoothly instead of freezing mid-sweep or flashing stray percentages
+- the console no longer auto-suspends during backups and transfers
+- h-encore counts as homebrew, not as a Vita game
+- deleting a game's last backup no longer leaves an empty folder on the card - leftovers from
+  older versions are cleaned up too
+- progress bar optimizations and enhancements
 
 ## [1.1.1] - 2026-07-25
 
