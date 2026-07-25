@@ -1853,9 +1853,11 @@ void Ui::draw_footer(const UiState &state) {
       std::string("Sort: ") + save_sort_mode_label(state.sort_mode);
   const BackupRow *focused_row = nullptr;
   bool data_row_focused = false;
+  bool new_backup_focused = false;
   if (state.backup_rows && state.selected_backup < state.backup_rows->size()) {
     const BackupRow &row = (*state.backup_rows)[state.selected_backup];
     data_row_focused = row.data_folders;
+    new_backup_focused = row.new_backup;
     // Sentinels are not snapshots, so none of the per-snapshot hints below apply to them.
     if (!row.is_sentinel()) {
       focused_row = &row;
@@ -1897,7 +1899,7 @@ void Ui::draw_footer(const UiState &state) {
   const char *primary_label = "Restore";
   if (data_row_focused) {
     primary_label = "Open";
-  } else if (state.selected_backup == 0) {
+  } else if (new_backup_focused) {
     primary_label = "Backup";
   }
   hints.push_back({confirm, primary_label, nullptr, nullptr});

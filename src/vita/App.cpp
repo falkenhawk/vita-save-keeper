@@ -1429,7 +1429,7 @@ void App::refresh_local_backups() {
   local_backups_ = scan_local_backup_names(kBackupRoot, save->id);
   rebuild_backup_rows();
   if (selected_backup_ >= backup_rows_.size()) {
-    selected_backup_ = 0;
+    selected_backup_ = default_backup_row();
   }
 }
 
@@ -1441,12 +1441,13 @@ void App::move_selected_save(int delta) {
     cancel_delete_confirmation();
     cancel_sync_all_confirmation();
     cancel_duplicate_backup_confirmation();
-    // A different save means a different backup list; focus its "New Backup" entry. Any status
-    // message described the previous save, so it goes too.
-    selected_backup_ = 0;
+    // A different save means a different backup list; focus its "New Backup" entry - picked after
+    // the refreshes below rebuild the rows, since a homebrew entry seats "Data folders" above it.
+    // Any status message described the previous save, so it goes too.
     queue_selected_save_time_read();
     refresh_local_backups();
     refresh_remote_backups_view();
+    selected_backup_ = default_backup_row();
     clear_status();
   }
 }
@@ -1470,11 +1471,11 @@ void App::move_selected_category(int delta) {
     cancel_sync_all_confirmation();
     cancel_duplicate_backup_confirmation();
     selected_save_ = category_selection_[static_cast<std::size_t>(category_)];
-    selected_backup_ = 0;
     rebuild_visible_saves();
     queue_selected_save_time_read();
     refresh_local_backups();
     refresh_remote_backups_view();
+    selected_backup_ = default_backup_row();
     clear_status();
     return;
   }
@@ -1760,7 +1761,7 @@ void App::handle_action_button() {
   }
   // One context-sensitive action button: the "New Backup" entry creates a snapshot, a backup
   // entry restores it (with a second press to confirm).
-  if (selected_backup_ == 0) {
+  if (new_backup_row_focused()) {
     create_new_backup();
     return;
   }
@@ -2418,7 +2419,7 @@ void App::refresh_remote_backups_view() {
   }
   rebuild_backup_rows();
   if (selected_backup_ >= backup_rows_.size()) {
-    selected_backup_ = 0;
+    selected_backup_ = default_backup_row();
   }
 }
 
@@ -2433,14 +2434,29 @@ std::vector<std::string> App::remote_backup_names() const {
 
 void App::rebuild_backup_rows() {
   backup_rows_ = build_backup_rows(remote_backup_names(), local_backups_);
-  // A homebrew entry gets a "Data folders" row right under "New Backup". Putting the picker in the
+  // A homebrew entry gets a "Data folders" row right above "New Backup". Putting the picker in the
   // list rather than on a button means it is visible without knowing it exists, and it costs no
-  // footer space - the grid's footer has none left.
+  // footer space - the grid's footer has none left. Default focus still lands on "New Backup"
+  // (default_backup_row), so switching titles keeps its familiar landing spot.
   const SaveRecord *save = selected_save_record();
   if (save && classify_save(*save) == SaveCategory::Homebrew && !backup_rows_.empty()) {
-    backup_rows_.insert(backup_rows_.begin() + 1,
+    backup_rows_.insert(backup_rows_.begin(),
                         BackupRow::data_folders_row(save->extra_paths.size()));
   }
+}
+
+std::size_t App::default_backup_row() const {
+  // The "New Backup" row, wherever it sits - the landing spot whenever focus resets.
+  for (std::size_t i = 0; i < backup_rows_.size(); ++i) {
+    if (backup_rows_[i].new_backup) {
+      return i;
+    }
+  }
+  return 0;
+}
+
+bool App::new_backup_row_focused() const {
+  return selected_backup_ < backup_rows_.size() && backup_rows_[selected_backup_].new_backup;
 }
 
 std::size_t App::backup_count() const {
@@ -2477,7 +2493,7 @@ std::string App::selected_backup_name() const {
 // identity keeps the focus on the same snapshot whichever side its name came from.
 void App::focus_backup_row_by_identity(const std::string &backup_name) {
   const std::string identity = backup_identity(backup_name);
-  for (std::size_t i = 1; i < backup_rows_.size(); ++i) {
+  for (std::size_t i = 0; i < backup_rows_.size(); ++i) {
     if (backup_rows_[i].is_sentinel()) {
       continue;
     }
@@ -2934,7 +2950,7 @@ void App::request_save_details() {
   // would race that background read and the press could be swallowed by it, so defer the open until
   // the time lands (the main loop tick fires it, and any other input cancels it). Backup rows carry
   // their own metadata, so they open immediately.
-  if (row && row->new_backup && save && save->save_time_requires_mount) {
+  if (new_backup_row_focused() && save && save->save_time_requires_mount) {
     details_open_pending_ = true;
     return;
   }
@@ -3483,7 +3499,7 @@ void App::close_directory_browser() {
   } else {
     // The entry ceased to exist - its last folder was excluded and it had no savedata of its own -
     // so the grid, refocused by the sort above, is the destination, starting at "New Backup".
-    selected_backup_ = 0;
+    selected_backup_ = default_backup_row();
   }
 }
 

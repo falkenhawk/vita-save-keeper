@@ -209,6 +209,10 @@ private:
   // so selected_backup_row() reports it as no row at all; this is how the action button tells the
   // two "no row" cases apart.
   bool data_folders_row_focused() const;
+  bool new_backup_row_focused() const;
+  // Index of the "New Backup" row - the default focus whenever the backup list resets. Not 0 on
+  // homebrew entries, where the "Data folders" row sits above it.
+  std::size_t default_backup_row() const;
   std::string selected_backup_name() const;
   void focus_backup_row_by_identity(const std::string &backup_name);
   std::string remote_file_id_for(const std::string &remote_name) const;
