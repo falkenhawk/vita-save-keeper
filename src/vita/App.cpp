@@ -49,8 +49,10 @@ constexpr const char *kBackupRoot = "ux0:data/save-keeper/backups";
 constexpr const char *kGoogleClientPath = "ux0:data/save-keeper/google-client.json";
 constexpr const char *kGoogleTokenPath = "ux0:data/save-keeper/google-token.json";
 constexpr const char *kSettingsPath = "ux0:data/save-keeper/settings.txt";
-constexpr const char *kSaveTimeCachePath = "ux0:data/save-keeper/save-times.json";
-constexpr const char *kSaveTitleCachePath = "ux0:data/save-keeper/save-titles.json";
+// Version 2 of save-titles.json is the merged index: times and titles in one file.
+constexpr const char *kSaveIndexPath = "ux0:data/save-keeper/save-titles.json";
+// The retired times half of the old two-file layout, removed at every boot.
+constexpr const char *kLegacySaveTimesPath = "ux0:data/save-keeper/save-times.json";
 constexpr const char *kMountKernelPath =
     "ux0:app/SVK000001/sce_sys/save-data-kernel.skprx";
 constexpr const char *kMountUserPath = "ux0:app/SVK000001/sce_sys/save-data-user.suprx";
@@ -525,24 +527,35 @@ bool App::resolve_save_time(SaveRecord *save) {
   // re-derived every launch. Skip caching when the bridge is down: that is the one failure that
   // can heal without the save folder changing, so those saves must retry next launch.
   if (mount_bridge_ready_) {
-    // Fingerprint after the mount, so bookkeeping the mount itself touched is part of the stored
-    // state and the next scan sees an unchanged folder.
+    // Fingerprint after the mount, so bookkeeping the mount itself touched is part of the
+    // stored state and the next scan sees an unchanged folder.
     save->fingerprint = compute_save_fingerprint(save->path);
     if (save->fingerprint.ok) {
-      save_time_cache_.entries[save->id] = {save->fingerprint, resolved, save->saved_at};
-      save_time_cache_dirty_ = true;
+      // The record carries the title fields too (filled at scan time or by the app-db pass),
+      // so the entry stays whole even when this creates it.
+      SaveIndexEntry &entry = save_index_.entries[save->id];
+      entry.fingerprint = save->fingerprint;
+      entry.time_resolved = true;
+      entry.has_time = resolved;
+      // Zeroed when nothing was readable, matching the canonical form build_save_index writes.
+      entry.saved_at = resolved ? save->saved_at : SaveDateTime{};
+      entry.from_app_db = save->title_from_app_db;
+      entry.display_name = save->display_name;
+      entry.title_id = save->title_id;
+      entry.icon_path = save->icon_path;
+      save_index_dirty_ = true;
     }
   }
   return resolved;
 }
 
-void App::apply_save_time_cache() {
+void App::apply_cached_save_times() {
   for (SaveRecord &save : saves_) {
     if (!save.save_time_requires_mount || !save.fingerprint.ok) {
       continue;
     }
-    const auto entry = save_time_cache_.entries.find(save.id);
-    if (entry == save_time_cache_.entries.end() ||
+    const auto entry = save_index_.entries.find(save.id);
+    if (entry == save_index_.entries.end() || !entry->second.time_resolved ||
         !entry->second.fingerprint.matches(save.fingerprint)) {
       continue;
     }
@@ -558,58 +571,26 @@ void App::apply_save_time_cache() {
   }
 }
 
-void App::flush_save_time_cache() {
-  if (!save_time_cache_dirty_) {
+void App::flush_save_index() {
+  if (!save_index_dirty_) {
     return;
   }
-  // Best effort: a failed write only means these times are read through a mount again next launch.
+  // Best effort: a failed write only means times are re-read (and titles re-derived) next boot.
   std::string error;
-  if (write_save_time_cache_atomic(kSaveTimeCachePath, save_time_cache_, &error)) {
-    save_time_cache_dirty_ = false;
+  if (write_save_index_atomic(kSaveIndexPath, save_index_, &error)) {
+    save_index_dirty_ = false;
   }
 }
 
-void App::store_scanned_save_times() {
-  // Times the scan derived without a mount (plain saves: sdslot or file times) join the cache so
-  // the next scan can skip even those reads while the folder is unchanged.
-  for (const SaveRecord &save : saves_) {
-    if (save.save_time_requires_mount || !save.fingerprint.ok) {
-      continue;
-    }
-    SaveTimeCacheEntry &entry = save_time_cache_.entries[save.id];
-    if (entry.fingerprint.matches(save.fingerprint) && entry.has_time == save.save_time_known) {
-      continue;
-    }
-    entry.fingerprint = save.fingerprint;
-    entry.has_time = save.save_time_known;
-    entry.saved_at = save.saved_at;
-    save_time_cache_dirty_ = true;
+void App::rebuild_save_index(long long app_db_mtime, long long app_db_size) {
+  SaveIndex rebuilt = build_save_index(saves_, save_index_, app_db_mtime, app_db_size);
+  // Serialized comparison doubles as the dirty check; skipping identical writes spares the
+  // flash on the common boot where nothing changed.
+  if (serialize_save_index(rebuilt) != serialize_save_index(save_index_)) {
+    save_index_dirty_ = true;
   }
-  flush_save_time_cache();
-}
-
-void App::rebuild_save_title_cache(long long app_db_mtime, long long app_db_size) {
-  SaveTitleCache rebuilt;
-  rebuilt.app_db_mtime = app_db_mtime;
-  rebuilt.app_db_size = app_db_size;
-  for (const SaveRecord &save : saves_) {
-    SaveTitleCacheEntry entry;
-    entry.from_app_db = save.title_from_app_db;
-    entry.fingerprint = save.fingerprint;
-    entry.display_name = save.display_name;
-    entry.title_id = save.title_id;
-    entry.icon_path = save.icon_path;
-    rebuilt.entries[save.id] = std::move(entry);
-  }
-  // Serialized comparison doubles as the dirty check; skipping identical writes spares the flash
-  // on the common boot where nothing changed.
-  const std::string serialized = serialize_save_title_cache(rebuilt);
-  if (serialized == serialize_save_title_cache(save_title_cache_)) {
-    return;
-  }
-  save_title_cache_ = std::move(rebuilt);
-  std::string error;
-  write_save_title_cache_atomic(kSaveTitleCachePath, save_title_cache_, &error);
+  save_index_ = std::move(rebuilt);
+  flush_save_index();
 }
 
 void App::schedule_selected_save_time_resolve() {
@@ -638,7 +619,7 @@ void App::resolve_selected_save_time() {
   // further mounts. The grid freezes briefly during the read, which the debounce keeps to only the
   // save the user settles on.
   resolve_save_time(&save);
-  flush_save_time_cache();
+  flush_save_index();
 }
 
 bool App::resolve_all_save_times() {
@@ -686,7 +667,7 @@ bool App::resolve_all_save_times() {
         sceCtrlPeekBufferPositive(0, &pad, 1);
       } while ((pad.buttons & SCE_CTRL_SQUARE) != 0);
       // The times read before the cancel are still valid; keep them for the next launch.
-      flush_save_time_cache();
+      flush_save_index();
       return false;
     }
     ui_.draw_busy("Reading save times", static_cast<long long>(done),
@@ -694,7 +675,7 @@ bool App::resolve_all_save_times() {
     resolve_save_time(&save);
     ++done;
   }
-  flush_save_time_cache();
+  flush_save_index();
   return true;
 }
 
@@ -1233,9 +1214,17 @@ void App::handle_restore() {
 }
 
 void App::invalidate_save_time(const SaveRecord &restored) {
-  save_time_cache_.entries.erase(restored.id);
-  save_time_cache_dirty_ = true;
-  flush_save_time_cache();
+  // Only the time resets, back to "never resolved". The title fields and old fingerprint stay:
+  // a stale fingerprint makes the next scan re-read an sfo-derived title and keeps an app-db
+  // one, exactly as the split files behaved.
+  const auto entry = save_index_.entries.find(restored.id);
+  if (entry != save_index_.entries.end() && entry->second.time_resolved) {
+    entry->second.time_resolved = false;
+    entry->second.has_time = false;
+    entry->second.saved_at = {};
+    save_index_dirty_ = true;
+  }
+  flush_save_index();
   for (SaveRecord &record : saves_) {
     if (record.id != restored.id || record.platform != restored.platform) {
       continue;
@@ -2779,20 +2768,22 @@ int App::run() {
   // count) so the bar opens at 0% rather than flashing an indeterminate sweep before it fills.
   ui_.draw_busy("Loading saves", 0, 1);
 
-  // Both scan caches load before the scan so it can consume them: times and titles are trusted
-  // while each save folder's fingerprint (and, for app-database titles, the database stamp) is
-  // unchanged, so a warm start skips the sdslot/sfo reads and the sqlite query entirely.
-  save_time_cache_ = read_save_time_cache(kSaveTimeCachePath);
-  save_title_cache_ = read_save_title_cache(kSaveTitleCachePath);
+  // The index loads before the scan so it can consume it: times and sfo-derived titles are
+  // trusted while each save folder's fingerprint is unchanged, app-database titles while the
+  // database stamp is, so a warm start skips the sdslot/sfo reads and the sqlite query entirely.
+  save_index_ = read_save_index(kSaveIndexPath);
+  // Version 2 folded save-times.json into the index; on an upgraded card the old file is dead
+  // weight. Unconditional removal costs one failed unlink per boot once it is gone.
+  std::remove(kLegacySaveTimesPath);
   long long app_db_mtime = 0;
   long long app_db_size = 0;
   const bool app_db_stamped = stat_file_stamp(kSystemAppDbPath, &app_db_mtime, &app_db_size);
-  const bool titles_fresh = app_db_stamped && app_db_mtime == save_title_cache_.app_db_mtime &&
-                            app_db_size == save_title_cache_.app_db_size;
+  const bool titles_fresh = app_db_stamped && app_db_mtime == save_index_.app_db_mtime &&
+                            app_db_size == save_index_.app_db_size;
 
   // Scan once at startup for the foundation build. Later actions that create, restore, or delete a
   // save will refresh this list explicitly so the UI does not rescan storage every frame.
-  // The title cache is always consulted: it spares the per-save param.sfo probes either way. The
+  // The index is always consulted: it spares the per-save param.sfo probes either way. The
   // stamp only decides whether the app-database query can be skipped - and the stamp read can
   // itself fail (ur0:shell is not statable by an unprivileged app even though the vendored sqlite
   // VFS can read the db), in which case the query simply runs every boot and refreshes any
@@ -2802,10 +2793,10 @@ int App::run() {
                              ui_.draw_busy("Loading saves", static_cast<long long>(done),
                                            static_cast<long long>(total));
                            },
-                           {}, &save_time_cache_, &save_title_cache_);
+                           {}, &save_index_);
 
   // The app-database query (titles, icons) runs only when it can matter: the database changed
-  // since the cache was built, or a save appeared that the cache does not cover. It has no known
+  // since the index was built, or a save appeared that the index does not cover. It has no known
   // row count, so it stays a pulse; repaint a frame every few rows so it does not look frozen.
   bool need_app_db = !titles_fresh;
   for (const SaveRecord &save : saves_) {
@@ -2821,10 +2812,10 @@ int App::run() {
       set_status(StatusKind::Info, "Using save-folder metadata: " + metadata_result.error);
     }
   }
-  rebuild_save_title_cache(app_db_stamped ? app_db_mtime : 0,
-                           app_db_stamped ? app_db_size : 0);
-  store_scanned_save_times();
-  apply_save_time_cache();
+  // Cached times for encrypted saves must apply before the rebuild: records still carrying
+  // valid times get written back instead of being reset to "never resolved" and re-mounted.
+  apply_cached_save_times();
+  rebuild_save_index(app_db_stamped ? app_db_mtime : 0, app_db_stamped ? app_db_size : 0);
   load_settings();
   // One pass for folders emptied by older versions, which left them behind. Deletes clean up as
   // they go now, so this never needs to run again. It sits under the "Loading saves" modal that is

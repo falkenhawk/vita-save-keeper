@@ -6,6 +6,10 @@ All notable changes to Save Keeper are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- the two on-card scan caches merged into one `save-titles.json` - half the file reads and
+  writes at every boot, and the leftover `save-times.json` is cleaned off the card on first launch
+
 ### Fixed
 - deleting a game's last backup now removes its folder from the memory card instead of leaving an
   empty one behind, and folders left empty by earlier versions are cleared out on the next launch

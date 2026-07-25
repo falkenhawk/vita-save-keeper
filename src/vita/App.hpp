@@ -67,17 +67,19 @@ private:
   // Returns false if the user canceled (Square) mid-read, so the caller can keep the name order.
   bool resolve_all_save_times();
   bool resolve_save_time(SaveRecord *save);
-  // Fills save times from save_time_cache_ for every save whose folder fingerprint still matches,
-  // clearing save_time_requires_mount so those saves skip the mount entirely.
-  void apply_save_time_cache();
-  void flush_save_time_cache();
-  // Adds the scan's mount-free time results to the cache and flushes it.
-  void store_scanned_save_times();
-  // Rebuilds the title cache from the scanned records against the given app-database stamp,
-  // writing only when something actually changed.
-  void rebuild_save_title_cache(long long app_db_mtime, long long app_db_size);
-  // After a restore rewrote the live folder: drop the cache entry and re-derive the record's time
-  // state so the grid never keeps showing the pre-restore save time.
+  // Fills save times from save_index_ for every mount-requiring save whose folder fingerprint
+  // still matches a resolved entry, clearing save_time_requires_mount so those saves skip the
+  // mount entirely.
+  void apply_cached_save_times();
+  void flush_save_index();
+  // Rebuilds the index from the scanned records against the given app-database stamp, writing
+  // only when something actually changed. Applied cached times are read from the records, so
+  // apply_cached_save_times runs first; the rebuild's own carry-forward would cover the other
+  // order too.
+  void rebuild_save_index(long long app_db_mtime, long long app_db_size);
+  // After a restore rewrote the live folder: clear the entry's cached time back to never-resolved
+  // (titles and the old fingerprint stay) and re-derive the record's time state so the grid never
+  // keeps showing the pre-restore save time.
   void invalidate_save_time(const SaveRecord &restored);
   std::size_t category_count(SaveCategory category) const;
   const SaveRecord *selected_save_record() const;
@@ -211,13 +213,11 @@ private:
   // True only when both mount-bridge modules loaded at startup. Gates the kernel syscall so slot
   // resolution degrades to the AppMgr mount (and then save-file times) when the bridge is absent.
   bool mount_bridge_ready_{};
-  // Mount-resolved save times keyed by save id, trusted while each save folder's fingerprint is
-  // unchanged. Loaded once at startup; dirty entries are flushed after each resolve batch.
-  SaveTimeCache save_time_cache_;
-  bool save_time_cache_dirty_{};
-  // Title metadata keyed by save id; app-database entries follow the database stamp, sfo-derived
-  // ones the folder fingerprint. Rebuilt (and written only on change) after every scan.
-  SaveTitleCache save_title_cache_;
+  // Merged save index (times and titles) keyed by save id. Times and sfo-derived titles are
+  // trusted while each save folder's fingerprint is unchanged, app-database titles while the
+  // database stamp is. Loaded once at startup; flushed after each resolve batch and rebuild.
+  SaveIndex save_index_;
+  bool save_index_dirty_{};
   // Countdown (frames) until the focused save's mount-only time is read; -1 when nothing pending.
   // Reset on every navigation so scrolling debounces the blocking mount. See the main loop tick.
   int pending_time_resolve_frames_{-1};
