@@ -62,8 +62,12 @@ private:
   void load_settings();
   void save_settings();
   void rebuild_visible_saves();
-  void schedule_selected_save_time_resolve();
-  void resolve_selected_save_time();
+  // Adds the focused save to the read queue when its time still needs a mount. Navigating never
+  // waits on that read, so passing over several encrypted saves simply queues each one.
+  void queue_selected_save_time_read();
+  // Reads one queued save time, focused save first. Returns false when nothing was read, either
+  // because the queue is empty or because a button arrived and navigation takes priority.
+  bool drain_pending_time_read();
   // Returns false if the user canceled (Square) mid-read, so the caller can keep the name order.
   bool resolve_all_save_times();
   bool resolve_save_time(SaveRecord *save);
@@ -218,9 +222,17 @@ private:
   // database stamp is. Loaded once at startup; flushed after each resolve batch and rebuild.
   SaveIndex save_index_;
   bool save_index_dirty_{};
-  // Countdown (frames) until the focused save's mount-only time is read; -1 when nothing pending.
-  // Reset on every navigation so scrolling debounces the blocking mount. See the main loop tick.
-  int pending_time_resolve_frames_{-1};
+  // Save ids whose mount-only time is still unread, in the order they were focused. Each is read
+  // one at a time (mounts must stay sequential) while the pad is idle, so scrolling past a row of
+  // encrypted saves stays smooth and every one of them keeps its spinner until its turn comes.
+  std::vector<std::string> pending_time_reads_;
+  // Frames since the last button. The drain waits for a short idle gap so a read never starts
+  // under a press that is about to move the selection.
+  int input_idle_frames_{};
+  // Buttons seen in the pad's sample history while a read blocked the frame, replayed on the next
+  // frame: the loop peeks one instantaneous sample, so a tap contained inside a mount is
+  // otherwise invisible and the navigation it asked for is lost.
+  unsigned int deferred_buttons_{};
   // Triangle pressed on the live-save row while its time was still resolving: open Save Details as
   // soon as the resolve lands instead of swallowing the press. Any other input cancels it.
   bool details_open_pending_{};

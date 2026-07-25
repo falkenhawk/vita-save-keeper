@@ -593,33 +593,68 @@ void App::rebuild_save_index(long long app_db_mtime, long long app_db_size) {
   flush_save_index();
 }
 
-void App::schedule_selected_save_time_resolve() {
-  // Defer the (blocking) mount until the selection settles, so scrolling past several encrypted
-  // saves does not mount each one in turn. The main loop counts this down and then resolves
-  // without a modal, leaving the grid on screen during the brief read.
+void App::queue_selected_save_time_read() {
   if (visible_saves_.empty()) {
-    pending_time_resolve_frames_ = -1;
     return;
   }
   const SaveRecord &save = saves_[visible_saves_[selected_save_ % visible_saves_.size()]];
-  pending_time_resolve_frames_ =
-      save.save_time_requires_mount ? kSaveTimeResolveDelayFrames : -1;
+  if (!save.save_time_requires_mount ||
+      std::find(pending_time_reads_.begin(), pending_time_reads_.end(), save.id) !=
+          pending_time_reads_.end()) {
+    return;
+  }
+  pending_time_reads_.push_back(save.id);
 }
 
-void App::resolve_selected_save_time() {
-  if (visible_saves_.empty()) {
-    return;
+bool App::drain_pending_time_read() {
+  if (pending_time_reads_.empty()) {
+    return false;
   }
-  SaveRecord &save = saves_[visible_saves_[selected_save_ % visible_saves_.size()]];
-  if (!save.save_time_requires_mount) {
-    return;
+  // The focused save is the one showing a spinner, so it is read first however long the queue
+  // behind it is; the rest follow in the order they were passed over.
+  const std::string focused_id =
+      visible_saves_.empty()
+          ? std::string()
+          : saves_[visible_saves_[selected_save_ % visible_saves_.size()]].id;
+  auto next = std::find(pending_time_reads_.begin(), pending_time_reads_.end(), focused_id);
+  if (next == pending_time_reads_.end()) {
+    next = pending_time_reads_.begin();
   }
-  // Synchronous mount on the main thread. Deliberately not on a background thread: mounting a save
-  // from a second thread leaked AppMgr mount slots until, mid-session, the system refused any
-  // further mounts. The grid freezes briefly during the read, which the debounce keeps to only the
-  // save the user settles on.
-  resolve_save_time(&save);
+  const std::string save_id = *next;
+  pending_time_reads_.erase(next);
+
+  SaveRecord *save = nullptr;
+  for (SaveRecord &record : saves_) {
+    if (record.id == save_id && record.save_time_requires_mount) {
+      save = &record;
+      break;
+    }
+  }
+  if (!save) {
+    // Dropped from the list, or already read by a batch or a restore: nothing left to do, and the
+    // caller still counts this as work so the next frame moves on to the following entry.
+    return true;
+  }
+
+  // Synchronous mount, one save at a time. Deliberately not on a background thread: mounting from
+  // a second thread leaked AppMgr mount slots until, mid-session, the system refused any further
+  // mounts. Blocking is therefore unavoidable - the queue only makes sure it happens between the
+  // user's presses instead of under them.
+  SceCtrlData armed{};
+  sceCtrlPeekBufferPositive(0, &armed, 1);
+  resolve_save_time(save);
   flush_save_index();
+
+  // The read stalled this frame, so any button pressed and released inside it never reached the
+  // loop's own peek. Recover it from the sample history and hand it to the next frame.
+  SceCtrlData pads[64] = {};
+  const int count = sceCtrlPeekBufferPositive(0, pads, 64);
+  for (int i = 0; i < count; ++i) {
+    if (pads[i].timeStamp > armed.timeStamp) {
+      deferred_buttons_ |= pads[i].buttons;
+    }
+  }
+  return true;
 }
 
 bool App::resolve_all_save_times() {
@@ -675,6 +710,9 @@ bool App::resolve_all_save_times() {
     resolve_save_time(&save);
     ++done;
   }
+  // Every queued read just happened here, so the queue would only pop entries with nothing left
+  // to do.
+  pending_time_reads_.clear();
   flush_save_index();
   return true;
 }
@@ -705,7 +743,7 @@ void App::apply_sort_and_rebuild() {
     }
   }
   category_selection_[static_cast<std::size_t>(category_)] = selected_save_;
-  schedule_selected_save_time_resolve();
+  queue_selected_save_time_read();
   refresh_local_backups();
   refresh_remote_backups_view();
 }
@@ -788,7 +826,7 @@ void App::move_selected_save(int delta) {
     // A different save means a different backup list; focus its "New Backup" entry. Any status
     // message described the previous save, so it goes too.
     selected_backup_ = 0;
-    schedule_selected_save_time_resolve();
+    queue_selected_save_time_read();
     refresh_local_backups();
     refresh_remote_backups_view();
     clear_status();
@@ -816,7 +854,7 @@ void App::move_selected_category(int delta) {
     selected_save_ = category_selection_[static_cast<std::size_t>(category_)];
     selected_backup_ = 0;
     rebuild_visible_saves();
-    schedule_selected_save_time_resolve();
+    queue_selected_save_time_read();
     refresh_local_backups();
     refresh_remote_backups_view();
     clear_status();
@@ -1203,7 +1241,7 @@ void App::handle_restore() {
     // The live folder now holds different content; drop the cached time and re-read so the grid
     // does not keep showing the pre-restore save time.
     invalidate_save_time(save);
-    schedule_selected_save_time_resolve();
+    queue_selected_save_time_read();
     set_status(StatusKind::Success,
                status_with_name(
                    remote_restore ? "Downloaded and restored " : "Restored ",
@@ -2841,7 +2879,7 @@ int App::run() {
     }
   }
   rebuild_visible_saves();
-  schedule_selected_save_time_resolve();
+  queue_selected_save_time_read();
   refresh_local_backups();
   load_google_token_cache();
 
@@ -2924,7 +2962,10 @@ int App::run() {
 
     SceCtrlData pad{};
     sceCtrlPeekBufferPositive(0, &pad, 1);
-    const unsigned int buttons = buttons_with_left_analog(pad);
+    // Buttons recovered from a frame that a queued save-time read stalled are replayed here, so a
+    // tap made during that read still moves the selection instead of vanishing with the frame.
+    const unsigned int buttons = buttons_with_left_analog(pad) | deferred_buttons_;
+    deferred_buttons_ = 0;
     const unsigned int pressed =
         apply_hold_repeat(buttons, previous_buttons, &repeat_held_buttons, &repeat_frames);
 
@@ -3203,19 +3244,30 @@ int App::run() {
       square_hold_consumed = false;
     }
 
-    // Once the selection has settled, resolve the focused save's mount-only time. Only the grid
-    // path reaches here; the details mode returns earlier, so an open details screen never triggers
-    // a background mount.
-    if (pending_time_resolve_frames_ > 0) {
-      --pending_time_resolve_frames_;
-    } else if (pending_time_resolve_frames_ == 0) {
-      pending_time_resolve_frames_ = -1;
-      resolve_selected_save_time();
-      if (details_open_pending_) {
-        // A Triangle press was waiting on this resolve; honor it now that the time has landed.
+    // Queued save times are read here, one per frame, and only after the pad has been idle for a
+    // moment: navigation always wins, so scrolling through encrypted saves stays smooth and each
+    // one keeps its spinner until its turn. Only the grid path reaches here; the details mode
+    // returns earlier, so an open details screen never triggers a read.
+    input_idle_frames_ = buttons == 0 ? input_idle_frames_ + 1 : 0;
+    if (details_open_pending_) {
+      // A Triangle press is waiting on the focused save's time. That is an explicit demand, so it
+      // jumps the queue and the idle gap both, exactly as the old blocking resolve did. Only the
+      // focused save is read: anything else queued would just delay the screen the user asked for.
+      const SaveRecord *focused = selected_save_record();
+      if (focused && focused->save_time_requires_mount) {
+        queue_selected_save_time_read();
+        drain_pending_time_read();
+        focused = selected_save_record();
+      }
+      if (!focused || !focused->save_time_requires_mount) {
         details_open_pending_ = false;
+        // The press that opened this screen is the one the read stalled; replaying it into the
+        // details view would fire one of its own actions instead.
+        deferred_buttons_ = 0;
         open_save_details();
       }
+    } else if (input_idle_frames_ >= kSaveTimeResolveDelayFrames) {
+      drain_pending_time_read();
     }
 
     UiState ui_state;
