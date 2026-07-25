@@ -58,13 +58,18 @@ constexpr const char *kSettingsPath = "ux0:data/save-keeper/settings.txt";
 constexpr const char *kSaveIndexPath = "ux0:data/save-keeper/save-titles.json";
 // The retired times half of the old two-file layout, removed at every boot.
 constexpr const char *kLegacySaveTimesPath = "ux0:data/save-keeper/save-times.json";
-constexpr const char *kDataFoldersPath = "ux0:data/save-keeper/data-folders.json";
-// The old name this file shipped under in pre-release test builds. Read when the new name is
-// absent, deleted after the first successful write of the new one.
-constexpr const char *kLegacyDataFoldersPath = "ux0:data/save-keeper/tracked-folders.json";
+// Backup-shaping settings (data folder overrides + the skip list) - the file other devices sync;
+// device-local preferences stay in settings.txt.
+constexpr const char *kBackupSettingsPath = "ux0:data/save-keeper/backup-settings.json";
+// Where a conflict loser's local version is kept - written only when a Drive sync overwrites
+// local changes (a losing remote version is recoverable from Drive's own revision history).
+constexpr const char *kBackupSettingsConflictPath =
+    "ux0:data/save-keeper/backup-settings.conflict.json";
 // Known folder sets shipped inside the VPK (RetroArch first). Same schema as the user file; the
-// user's data-folders.json overrides it per entry id.
+// user's backup-settings.json overrides it per entry id.
 constexpr const char *kBaseDataFoldersPath = "app0:sce_sys/resources/data-folders.json";
+// The file's name in the Drive "PSV Saves" root - the same name it carries on the card.
+constexpr const char *kBackupSettingsDriveName = "backup-settings.json";
 // The homebrew data convention root the folder browser is confined to. Distinct from kDataRoot
 // above, which is this app's own config directory inside it.
 constexpr const char *kUserDataRoot = "ux0:data";
@@ -636,6 +641,7 @@ void App::load_settings() {
     const AppSettings settings = parse_app_settings(text);
     sort_mode_ = settings.sort_mode;
     cleaned_empty_backup_folders_ = settings.cleaned_empty_backup_folders;
+    backup_settings_synced_ = settings.backup_settings_synced;
   }
 }
 
@@ -645,6 +651,7 @@ void App::save_settings() {
   // Every field has to be mirrored back here: this builds a fresh AppSettings, so anything left
   // out is erased from settings.txt the next time any other setting changes.
   settings.cleaned_empty_backup_folders = cleaned_empty_backup_folders_;
+  settings.backup_settings_synced = backup_settings_synced_;
   write_text_file(kSettingsPath, serialize_app_settings(settings));
 }
 
@@ -937,24 +944,12 @@ void App::load_tracked_folders() {
     }
   }
 
-  // User file: the new name wins; the pre-release name is read as a fallback and cleaned up after
-  // the first successful write of the new one (save_data_folders_config).
-  const bool have_new = read_bounded_file(kDataFoldersPath, &text);
-  if (!have_new) {
+  if (!read_bounded_file(kBackupSettingsPath, &text)) {
     struct stat info {};
-    const bool new_exists = stat(kDataFoldersPath, &info) == 0;
-    if (new_exists) {
-      // Present but unreadable or implausibly large. Treat it like a failed parse so a later save
-      // never truncates a config we could not read whole.
-      tracked_config_load_failed_ = true;
-      return;
-    }
-    if (!read_bounded_file(kLegacyDataFoldersPath, &text)) {
-      const bool legacy_exists = stat(kLegacyDataFoldersPath, &info) == 0;
-      // Neither file: the normal cold start. A present-but-unreadable legacy file disables writes.
-      tracked_config_load_failed_ = legacy_exists;
-      return;
-    }
+    // Absent is the normal cold start; present but unreadable or implausibly large disables writes
+    // so a later save never truncates a config we could not read whole.
+    tracked_config_load_failed_ = stat(kBackupSettingsPath, &info) == 0;
+    return;
   }
   const TrackedFoldersParseResult parsed = parse_tracked_folders_json(text);
   if (!parsed.ok) {
@@ -967,13 +962,137 @@ void App::load_tracked_folders() {
 
 bool App::save_data_folders_config() {
   std::string write_error;
-  if (!write_tracked_folders_json_atomic(kDataFoldersPath, tracked_config_, &write_error)) {
-    set_status(StatusKind::Error, "Could not save data-folders.json.");
+  if (!write_tracked_folders_json_atomic(kBackupSettingsPath, tracked_config_, &write_error)) {
+    set_status(StatusKind::Error, "Could not save backup-settings.json.");
     return false;
   }
-  // The new file is now the truth on disk, so the pre-release one has nothing left to say.
-  std::remove(kLegacyDataFoldersPath);
   return true;
+}
+
+bool App::upload_backup_settings() {
+  if (tracked_config_load_failed_ || !google_connected_) {
+    return false;
+  }
+  if (drive_root_folder_id_.empty()) {
+    drive_root_folder_id_ = find_or_create_drive_folder(kGoogleDriveRootFolderName, "root");
+    if (drive_root_folder_id_.empty()) {
+      return false;
+    }
+  }
+  const std::string list_url =
+      std::string(kDriveFilesEndpoint) + "?" +
+      build_drive_find_child_by_name_query(drive_root_folder_id_, kBackupSettingsDriveName);
+  const HttpResponse list_response = drive_request([&](const std::string &token) {
+    return HttpClient().get_json(list_url, token);
+  });
+  if (!list_response.ok) {
+    return false;
+  }
+  const DriveFileList files = parse_drive_file_list(list_response.body);
+  if (!files.ok) {
+    return false;
+  }
+  // Update in place when the file exists: Drive keeps the replaced content as a revision, which is
+  // the recovery path for a lost conflict on the remote side.
+  const HttpResponse upload = drive_request([&](const std::string &token) {
+    if (!files.files.empty()) {
+      return HttpClient().patch_multipart_file(
+          build_drive_multipart_update_url(files.files[0].id),
+          build_drive_rename_metadata_json(kBackupSettingsDriveName), kBackupSettingsPath,
+          "application/json", token);
+    }
+    return HttpClient().post_multipart_file(
+        kDriveUploadEndpoint,
+        build_drive_upload_metadata_json(kBackupSettingsDriveName, drive_root_folder_id_),
+        kBackupSettingsPath, "application/json", token);
+  });
+  if (!upload.ok) {
+    return false;
+  }
+  backup_settings_synced_ = tracked_config_.modified;
+  save_settings();
+  return true;
+}
+
+void App::sync_backup_settings() {
+  if (tracked_config_load_failed_ || !google_connected_) {
+    return;
+  }
+  if (drive_root_folder_id_.empty()) {
+    drive_root_folder_id_ = find_or_create_drive_folder(kGoogleDriveRootFolderName, "root");
+    if (drive_root_folder_id_.empty()) {
+      return;
+    }
+  }
+  const std::string list_url =
+      std::string(kDriveFilesEndpoint) + "?" +
+      build_drive_find_child_by_name_query(drive_root_folder_id_, kBackupSettingsDriveName);
+  const HttpResponse list_response = drive_request([&](const std::string &token) {
+    return HttpClient().get_json(list_url, token);
+  });
+  if (!list_response.ok) {
+    return;
+  }
+  const DriveFileList files = parse_drive_file_list(list_response.body);
+  if (!files.ok) {
+    return;
+  }
+  const bool local_has_content = !tracked_config_.entries.empty() ||
+                                 !tracked_config_.skipped_ids.empty() ||
+                                 tracked_config_.modified > 0;
+  TrackedFoldersConfig remote;
+  if (!files.files.empty()) {
+    const std::string content_url =
+        std::string(kDriveFilesEndpoint) + "/" + files.files[0].id + "?alt=media";
+    const HttpResponse content = drive_request([&](const std::string &token) {
+      return HttpClient().get_json(content_url, token);
+    });
+    if (!content.ok) {
+      return;
+    }
+    TrackedFoldersParseResult parsed = parse_tracked_folders_json(content.body);
+    if (!parsed.ok) {
+      // A remote nobody can read is not worth adopting; replace it when there is something local.
+      if (local_has_content) {
+        upload_backup_settings();
+      }
+      return;
+    }
+    remote = std::move(parsed.config);
+  }
+  switch (decide_backup_settings_sync(tracked_config_.modified, local_has_content,
+                                      !files.files.empty(), remote.modified,
+                                      backup_settings_synced_)) {
+  case BackupSettingsSyncAction::InSync:
+    return;
+  case BackupSettingsSyncAction::Push:
+  case BackupSettingsSyncAction::PushConflict:
+    upload_backup_settings();
+    return;
+  case BackupSettingsSyncAction::AdoptConflict: {
+    // Only the local loser needs a copy - the remote loser of the push case lives on as a Drive
+    // revision. One file, overwritten by the next conflict, so no litter.
+    std::string conflict_error;
+    write_tracked_folders_json_atomic(kBackupSettingsConflictPath, tracked_config_,
+                                      &conflict_error);
+    set_status(StatusKind::Info,
+               "Backup settings conflict - Drive won, yours kept as backup-settings.conflict.json");
+    break;
+  }
+  case BackupSettingsSyncAction::Adopt:
+    set_status(StatusKind::Info, "Backup settings updated from Drive.");
+    break;
+  }
+  std::string write_error;
+  if (!write_tracked_folders_json_atomic(kBackupSettingsPath, remote, &write_error)) {
+    // Nothing changed in memory yet; the next sync simply tries again.
+    return;
+  }
+  tracked_config_ = std::move(remote);
+  backup_settings_synced_ = tracked_config_.modified;
+  save_settings();
+  apply_tracked_folders();
+  apply_sort_and_rebuild();
 }
 
 const TrackedFolderEntry *App::applicable_base_entry(const std::string &id) const {
@@ -995,20 +1114,27 @@ bool App::set_entry_data_folders(const std::string &id, const std::string &title
                                  std::vector<TrackedPath> new_paths) {
   if (tracked_config_load_failed_) {
     // The config could not be read whole this run, so writing it back would truncate it; refuse.
-    set_status(StatusKind::Info, "Cannot update data-folders.json - fix or delete it first.");
+    set_status(StatusKind::Info, "Cannot update backup-settings.json - fix or delete it first.");
     return false;
   }
   const TrackedFolderEntry *base = applicable_base_entry(id);
   // The write is atomic, so a failure leaves the file untouched; restoring the snapshot keeps the
   // in-memory config matching what is still on disk.
   const std::vector<TrackedFolderEntry> snapshot = tracked_config_.entries;
+  const long long previous_modified = tracked_config_.modified;
   update_data_folder_override(&tracked_config_, id, title, new_paths,
                               base ? &base->paths : nullptr);
+  tracked_config_.modified = static_cast<long long>(std::time(nullptr));
   if (!save_data_folders_config()) {
     tracked_config_.entries = snapshot;
+    tracked_config_.modified = previous_modified;
     return false;
   }
   apply_tracked_folders();
+  // Best-effort: an offline change reaches Drive at the next boot or refresh instead.
+  if (google_connected_ && HttpClient::network_reachable()) {
+    upload_backup_settings();
+  }
   return true;
 }
 
@@ -1895,6 +2021,7 @@ void App::handle_google_button() {
       if (sort_mode_ == SaveSortMode::LastBackup) {
         apply_sort_and_rebuild();
       }
+      sync_backup_settings();
       // The overlay already showed the sync happening; whatever status was left over predates
       // the fresh listing.
       clear_status();
@@ -3242,17 +3369,19 @@ void App::toggle_entry_skipped() {
     // The config could not be read whole this run, so writing it back would truncate whatever is
     // on disk; refuse the toggle and leave both the file and the in-memory set untouched.
     set_status(StatusKind::Info,
-               "Cannot update data-folders.json - fix or delete it first.");
+               "Cannot update backup-settings.json - fix or delete it first.");
     return;
   }
   const std::string id = selected->id;
   const std::string name = selected->display_name;
   const bool now_skipped = tracked_config_.skipped_ids.count(id) == 0;
+  const long long previous_modified = tracked_config_.modified;
   if (now_skipped) {
     tracked_config_.skipped_ids.insert(id);
   } else {
     tracked_config_.skipped_ids.erase(id);
   }
+  tracked_config_.modified = static_cast<long long>(std::time(nullptr));
   if (!save_data_folders_config()) {
     // The write is atomic, so a failure means the file on disk was never touched; undoing the flip
     // keeps the in-memory set matching what is still there.
@@ -3261,7 +3390,11 @@ void App::toggle_entry_skipped() {
     } else {
       tracked_config_.skipped_ids.insert(id);
     }
+    tracked_config_.modified = previous_modified;
     return;
+  }
+  if (google_connected_ && HttpClient::network_reachable()) {
+    upload_backup_settings();
   }
   // Details, when open, stays on this save; flip its footer hint to match the new state.
   slot_details_.entry_skipped = now_skipped;
@@ -4062,6 +4195,7 @@ int App::run() {
       if (sort_mode_ == SaveSortMode::LastBackup) {
         apply_sort_and_rebuild();
       }
+      sync_backup_settings();
     }
   }
 
@@ -4072,7 +4206,7 @@ int App::run() {
   // the message actually visible.
   if (tracked_config_load_failed_) {
     set_status(StatusKind::Info,
-               "Data folders config unreadable - fix or delete data-folders.json");
+               "Backup settings unreadable - fix or delete backup-settings.json");
   }
 
   bool running = true;
@@ -4569,6 +4703,7 @@ int App::run() {
         if (sort_mode_ == SaveSortMode::LastBackup) {
           apply_sort_and_rebuild();
         }
+        sync_backup_settings();
         set_status(StatusKind::Success, "Google Drive connected.");
       }
     }

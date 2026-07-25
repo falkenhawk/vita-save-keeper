@@ -572,16 +572,6 @@ void test_save_metadata_json_records_tracked_targets_when_present() {
   EXPECT_EQ(lenient_parsed.metadata.tracked_targets.size(), static_cast<std::size_t>(1));
   EXPECT_EQ(lenient_parsed.metadata.tracked_targets[0].path, "ux0:data/keep");
   EXPECT_EQ(lenient_parsed.metadata.tracked_targets[0].prefix, "");
-
-  // Pre-release test builds wrote the same field as "tracked_targets"; it still reads.
-  const std::string legacy =
-      R"({"version":2,"archiveIdentity":"id","savedAt":"2026-07-23T09:15:00",)"
-      R"("source":"filesystem","approximate":true,"slots":[],"tracked_targets":[)"
-      R"({"prefix":"savefiles","path":"ux0:data/retroarch/savefiles"}]})";
-  const vsm::SaveMetadataJsonResult legacy_parsed = vsm::parse_save_metadata_json(legacy);
-  EXPECT_TRUE(legacy_parsed.ok);
-  EXPECT_EQ(legacy_parsed.metadata.tracked_targets.size(), static_cast<std::size_t>(1));
-  EXPECT_EQ(legacy_parsed.metadata.tracked_targets[0].prefix, "savefiles");
 }
 
 void test_save_metadata_json_omits_tracked_targets_for_regular_saves() {
@@ -2401,6 +2391,16 @@ void test_app_settings_roundtrip_and_unknown_keys() {
                   .cleaned_empty_backup_folders);
   EXPECT_TRUE(!vsm::parse_app_settings("cleaned_empty_backup_folders=0\n")
                    .cleaned_empty_backup_folders);
+  EXPECT_TRUE(defaults.backup_settings_synced == 0);
+
+  vsm::AppSettings synced;
+  synced.backup_settings_synced = 1753430000;
+  const vsm::AppSettings synced_parsed = vsm::parse_app_settings(
+      vsm::serialize_app_settings(synced));
+  EXPECT_TRUE(synced_parsed.backup_settings_synced == 1753430000);
+  // The marker is device-local bookkeeping; zero stays out of the file entirely.
+  EXPECT_TRUE(vsm::serialize_app_settings(vsm::AppSettings{}).find("backup_settings_synced") ==
+              std::string::npos);
 }
 
 void test_tracked_folders_json_roundtrip_and_rejects_bad_input() {
@@ -2433,6 +2433,37 @@ void test_tracked_folders_json_roundtrip_and_rejects_bad_input() {
   EXPECT_EQ(partial.config.entries[0].id, "APPX");
   EXPECT_TRUE(partial.config.entries[0].paths.empty());
   EXPECT_EQ(partial.config.entries[1].id, "APPY");
+}
+
+void test_backup_settings_sync_decision_table() {
+  using A = vsm::BackupSettingsSyncAction;
+  // No remote: publish local content, or nothing to do.
+  EXPECT_TRUE(vsm::decide_backup_settings_sync(0, false, false, 0, 0) == A::InSync);
+  EXPECT_TRUE(vsm::decide_backup_settings_sync(10, true, false, 0, 0) == A::Push);
+  // Remote unchanged since the last agreement: push local changes, else in sync.
+  EXPECT_TRUE(vsm::decide_backup_settings_sync(5, true, true, 5, 5) == A::InSync);
+  EXPECT_TRUE(vsm::decide_backup_settings_sync(9, true, true, 5, 5) == A::Push);
+  // Only remote changed - including the fresh-device case (nothing local, synced 0).
+  EXPECT_TRUE(vsm::decide_backup_settings_sync(5, true, true, 9, 5) == A::Adopt);
+  EXPECT_TRUE(vsm::decide_backup_settings_sync(0, false, true, 9, 0) == A::Adopt);
+  // Both changed: the newer stamp wins; only a losing local side warrants a conflict copy.
+  EXPECT_TRUE(vsm::decide_backup_settings_sync(20, true, true, 9, 5) == A::PushConflict);
+  EXPECT_TRUE(vsm::decide_backup_settings_sync(7, true, true, 9, 5) == A::AdoptConflict);
+}
+
+void test_tracked_folders_json_roundtrips_modified_stamp() {
+  vsm::TrackedFoldersConfig config;
+  config.entries.push_back({"VITADBDLD", "", {{"VitaDB", "ux0:data/VitaDB"}}});
+  config.modified = 1753430000;
+  const vsm::TrackedFoldersParseResult parsed =
+      vsm::parse_tracked_folders_json(vsm::serialize_tracked_folders_json(config));
+  EXPECT_TRUE(parsed.ok);
+  EXPECT_TRUE(parsed.config.modified == 1753430000);
+  // The shipped base file carries no stamp; absent reads as 0 and 0 is never written.
+  vsm::TrackedFoldersConfig unstamped;
+  unstamped.entries = config.entries;
+  const std::string json = vsm::serialize_tracked_folders_json(unstamped);
+  EXPECT_TRUE(json.find("modified") == std::string::npos);
 }
 
 void test_effective_entries_overlay_base_with_user_overrides() {
@@ -2497,23 +2528,6 @@ void test_update_override_snaps_back_to_base_when_equal() {
   EXPECT_EQ(user.entries.size(), static_cast<std::size_t>(1));
   vsm::update_data_folder_override(&user, "VITADBDLD", "", {}, nullptr);
   EXPECT_TRUE(user.entries.empty());
-}
-
-void test_tracked_folders_json_reads_legacy_hidden_as_skipped() {
-  // The earlier draft of this feature wrote the same list under "hidden". A config written by that
-  // build must keep its exclusions rather than silently resetting them, and both spellings merge.
-  const vsm::TrackedFoldersParseResult parsed = vsm::parse_tracked_folders_json(
-      R"({"entries":[{"id":"APPY","paths":[{"path":"ux0:data/y"}]}],)"
-      R"("hidden":["VITASHELL"],"skipped":["AUTOPLUG2"]})");
-  EXPECT_TRUE(parsed.ok);
-  EXPECT_EQ(parsed.config.skipped_ids.size(), static_cast<std::size_t>(2));
-  EXPECT_TRUE(parsed.config.skipped_ids.count("VITASHELL") == 1);
-  EXPECT_TRUE(parsed.config.skipped_ids.count("AUTOPLUG2") == 1);
-
-  // Only "skipped" is ever written back.
-  const std::string json = vsm::serialize_tracked_folders_json(parsed.config);
-  EXPECT_TRUE(json.find("\"skipped\"") != std::string::npos);
-  EXPECT_TRUE(json.find("\"hidden\"") == std::string::npos);
 }
 
 void test_extra_prefix_allocation_normalizes_and_reserves_savedata() {
@@ -3268,7 +3282,8 @@ int main() {
   test_auto_backup_suffix_display_and_content_matching();
   test_app_settings_roundtrip_and_unknown_keys();
   test_tracked_folders_json_roundtrip_and_rejects_bad_input();
-  test_tracked_folders_json_reads_legacy_hidden_as_skipped();
+  test_backup_settings_sync_decision_table();
+  test_tracked_folders_json_roundtrips_modified_stamp();
   test_effective_entries_overlay_base_with_user_overrides();
   test_update_override_snaps_back_to_base_when_equal();
   test_extra_prefix_allocation_normalizes_and_reserves_savedata();

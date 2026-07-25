@@ -577,14 +577,10 @@ SaveMetadataJsonResult parse_save_metadata_json(const std::string &json) {
   }
 
   // Optional: present only for backups that bundle data folders. Missing leaves the vector empty,
-  // so every pre-field sidecar still parses. "tracked_targets" is the same field under the name the
-  // pre-release test builds wrote - read, never written. Entries missing/empty "path", with
-  // non-string fields, or with a control character (see contains_control_character) anywhere in
-  // "path" are skipped, matching the lenient parsing of tracked-folders.json.
+  // so every pre-field sidecar still parses. Entries missing/empty "path", with non-string fields,
+  // or with a control character (see contains_control_character) anywhere in "path" are skipped,
+  // matching the lenient parsing of the backup-settings config.
   const picojson::value *targets = json_member(root, "data_folders");
-  if (!targets) {
-    targets = json_member(root, "tracked_targets");
-  }
   if (targets && targets->is<picojson::array>()) {
     for (const picojson::value &target_value : targets->get<picojson::array>()) {
       if (!target_value.is<picojson::object>()) {

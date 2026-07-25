@@ -37,6 +37,10 @@ struct TrackedFoldersConfig {
   // Save ids left out of the hold-Select batch sweep. Applies to any homebrew entry, whether or
   // not it has extra folders - the point is keeping settings noise out of the sweep.
   std::set<std::string> skipped_ids;
+  // UTC epoch seconds of the last local change, stamped on every mutation. The Drive sync compares
+  // it across devices (last writer wins), so it must be wall-clock UTC, not local time. 0 in the
+  // shipped base file and on a device that never changed anything.
+  long long modified{};
 };
 
 struct TrackedFoldersParseResult {
@@ -44,18 +48,17 @@ struct TrackedFoldersParseResult {
   TrackedFoldersConfig config;
 };
 
-// data-folders.json: {"version":1,"entries":[{id,title,paths:[{prefix,path}]}],"skipped":[ids]}.
-// The same schema serves both the base file shipped inside the VPK (known folder sets, RetroArch
-// first) and the user's file, which overrides it per entry id. An entry with an EMPTY paths array
-// is a tombstone: in the user file it suppresses the base entry with that id. Unknown fields are
-// ignored so older builds can read files written by newer ones. "hidden" is accepted as a
-// read-only alias for "skipped", so a config written by the earlier draft of this feature keeps
-// its exclusions instead of silently resetting them.
+// {"version":1,"modified":epoch,"entries":[{id,title,paths:[{prefix,path}]}],"skipped":[ids]}.
+// One schema serves both the base file shipped inside the VPK (data-folders.json: known folder
+// sets, RetroArch first) and the user's backup-settings.json, which overrides it per entry id and
+// adds the skip list. An entry with an EMPTY paths array is a tombstone: in the user file it
+// suppresses the base entry with that id. Unknown fields are ignored so older builds can read
+// files written by newer ones.
 TrackedFoldersParseResult parse_tracked_folders_json(const std::string &text);
 std::string serialize_tracked_folders_json(const TrackedFoldersConfig &config);
 // Temp file then rename, same as the metadata sidecars (see SaveTimeCache.cpp's write_json_atomic):
 // a reader never sees a half-written file, so a torn write (power loss, full storage) can never
-// corrupt the user's only copy of tracked-folders.json.
+// corrupt the user's only copy of backup-settings.json.
 bool write_tracked_folders_json_atomic(const std::string &path, const TrackedFoldersConfig &config,
                                        std::string *error);
 
@@ -125,6 +128,23 @@ void update_data_folder_override(TrackedFoldersConfig *user, const std::string &
                                  const std::string &title,
                                  const std::vector<TrackedPath> &new_paths,
                                  const std::vector<TrackedPath> *base_paths);
+
+// What one Drive reconciliation should do, decided from three stamps: the local file's modified,
+// the remote file's, and the modified value both sides agreed on at the last successful sync
+// (device-local, kept in settings.txt). "Conflict" means both sides changed since that agreement;
+// the newer stamp wins, and only when the LOCAL side loses is a conflict copy warranted - a losing
+// remote version stays recoverable through Drive's own revision history.
+enum class BackupSettingsSyncAction {
+  InSync,
+  Push,           // only local changed (or no remote exists yet and there is content to publish)
+  Adopt,          // only remote changed
+  PushConflict,   // both changed, local is newer - push, no conflict copy needed
+  AdoptConflict,  // both changed, remote is newer - adopt, keep the local loser as a conflict copy
+};
+BackupSettingsSyncAction decide_backup_settings_sync(long long local_modified,
+                                                     bool local_has_content, bool remote_exists,
+                                                     long long remote_modified,
+                                                     long long synced_modified);
 
 // Records for config entries that no savedata scan produced - apps that keep everything in
 // ux0:data and so have no savedata folder to be found by. is_scanned_id reports whether the scan

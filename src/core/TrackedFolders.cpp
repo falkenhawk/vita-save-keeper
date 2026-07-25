@@ -172,10 +172,11 @@ TrackedFoldersParseResult parse_tracked_folders_json(const std::string &text) {
       result.config.entries.push_back(std::move(entry));
     }
   }
-  // "hidden" is the earlier draft's spelling of the same list. Reading both means a config written
-  // by that build keeps its exclusions; only "skipped" is ever written back.
   read_id_array(root_object, "skipped", &result.config.skipped_ids);
-  read_id_array(root_object, "hidden", &result.config.skipped_ids);
+  const auto modified_field = root_object.find("modified");
+  if (modified_field != root_object.end() && modified_field->second.is<double>()) {
+    result.config.modified = static_cast<long long>(modified_field->second.get<double>());
+  }
   result.ok = true;
   return result;
 }
@@ -183,6 +184,9 @@ TrackedFoldersParseResult parse_tracked_folders_json(const std::string &text) {
 std::string serialize_tracked_folders_json(const TrackedFoldersConfig &config) {
   picojson::object root;
   root["version"] = picojson::value(static_cast<double>(kTrackedFoldersVersion));
+  if (config.modified > 0) {
+    root["modified"] = picojson::value(static_cast<double>(config.modified));
+  }
   picojson::array entries;
   for (const TrackedFolderEntry &entry : config.entries) {
     picojson::object object;
@@ -422,6 +426,24 @@ void update_data_folder_override(TrackedFoldersConfig *user, const std::string &
   } else {
     entries.push_back({id, title, new_paths});
   }
+}
+
+BackupSettingsSyncAction decide_backup_settings_sync(long long local_modified,
+                                                     bool local_has_content, bool remote_exists,
+                                                     long long remote_modified,
+                                                     long long synced_modified) {
+  if (!remote_exists) {
+    return local_has_content ? BackupSettingsSyncAction::Push : BackupSettingsSyncAction::InSync;
+  }
+  if (remote_modified == synced_modified) {
+    return local_modified == synced_modified ? BackupSettingsSyncAction::InSync
+                                             : BackupSettingsSyncAction::Push;
+  }
+  if (local_modified == synced_modified) {
+    return BackupSettingsSyncAction::Adopt;
+  }
+  return local_modified > remote_modified ? BackupSettingsSyncAction::PushConflict
+                                          : BackupSettingsSyncAction::AdoptConflict;
 }
 
 std::vector<SaveRecord>
