@@ -3573,11 +3573,10 @@ void App::reload_browser_rows(bool keep_selection) {
     if (cached != browser_size_cache_.end()) {
       row.size_known = true;
       row.size_bytes = cached->second;
-    } else if (browser_size_walk_.active && browser_size_walk_.target == child) {
-      row.sizing = true;
     }
     directory_browser_.rows.push_back(std::move(row));
   }
+  refresh_browser_sizing_marks();
   if (keep_selection && previous_selected < directory_browser_.rows.size()) {
     directory_browser_.selected = previous_selected;
   }
@@ -3635,34 +3634,43 @@ void App::start_browser_size_walk() {
         }
       }
     }
+    refresh_browser_sizing_marks();
     return;
   }
   // The focused row goes first; otherwise take the oldest hovered folder still worth measuring.
+  bool started = false;
   if (directory_browser_.selected < directory_browser_.rows.size()) {
     DirectoryBrowserState::Row &row = directory_browser_.rows[directory_browser_.selected];
     if (!row.size_known && !row.parent_link) {
       begin_walk(directory_browser_.current_path + "/" + row.name);
-      row.sizing = true;
-      return;
+      started = true;
     }
   }
-  while (!browser_size_queue_.empty()) {
+  while (!started && !browser_size_queue_.empty()) {
     const std::string path = browser_size_queue_.front();
     browser_size_queue_.erase(browser_size_queue_.begin());
+    // A queued folder can already be in the cache: an earlier walk rolled it up as a subfolder.
     if (browser_size_cache_.find(path) == browser_size_cache_.end()) {
       begin_walk(path);
-      const std::size_t slash = path.rfind('/');
-      if (path.substr(0, slash) == directory_browser_.current_path) {
-        const std::string name = path.substr(slash + 1);
-        for (DirectoryBrowserState::Row &row : directory_browser_.rows) {
-          if (row.name == name) {
-            row.sizing = true;
-            break;
-          }
-        }
-      }
-      return;
+      started = true;
     }
+  }
+  refresh_browser_sizing_marks();
+}
+
+void App::refresh_browser_sizing_marks() {
+  // The spinner means "this folder's measurement is under way or lined up" - the active walk's
+  // target and every queued folder alike, so a row enqueued behind a long walk shows its state
+  // immediately instead of sitting on "..." until its turn comes.
+  for (DirectoryBrowserState::Row &row : directory_browser_.rows) {
+    if (row.parent_link || row.size_known) {
+      row.sizing = false;
+      continue;
+    }
+    const std::string path = directory_browser_.current_path + "/" + row.name;
+    row.sizing = (browser_size_walk_.active && browser_size_walk_.target == path) ||
+                 std::find(browser_size_queue_.begin(), browser_size_queue_.end(), path) !=
+                     browser_size_queue_.end();
   }
 }
 

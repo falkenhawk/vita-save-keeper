@@ -175,6 +175,8 @@ private:
   void abort_browser_size_walk();
   void advance_browser_size_walk();
   void fill_browser_row_size(const std::string &path, std::uint64_t bytes);
+  // Recomputes every row's spinner flag from the active walk and the hover queue.
+  void refresh_browser_sizing_marks();
   void handle_action_button();
   void create_new_backup();
   // busy_label, when set, names the modal that animates byte progress while the save is hashed
