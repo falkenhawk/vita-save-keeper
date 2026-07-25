@@ -101,6 +101,9 @@ struct DirectoryBrowserState {
   };
   std::vector<Row> rows;
   std::size_t selected{};
+  // How many folders this entry currently includes, across every directory - drives the L/R
+  // jump-to-included hint.
+  std::size_t included_count{};
   // Set when the focused folder is over the large-folder threshold and a first Square press asked
   // for confirmation; any other input clears it, a second Square press then includes it anyway.
   bool large_confirm_pending{};

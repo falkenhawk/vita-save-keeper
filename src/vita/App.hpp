@@ -167,6 +167,8 @@ private:
   void reload_browser_rows(bool keep_selection = false);
   // Climbs to current_path's parent and lands the cursor on the folder just left.
   void browser_go_up();
+  // L/R: focus the previous/next included folder, switching directories when it lives elsewhere.
+  void browser_jump_included(int delta);
   // Square: includes the focused folder in this entry's backups, or excludes it again if it is
   // already one of theirs. A folder another entry backs up, or one nested either way with an
   // already-included folder, is refused - overlapping trees would back up twice and restore twice.

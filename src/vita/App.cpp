@@ -3618,6 +3618,56 @@ void App::reload_browser_rows(bool keep_selection) {
   if (keep_selection && previous_selected < directory_browser_.rows.size()) {
     directory_browser_.selected = previous_selected;
   }
+  directory_browser_.included_count = mine.size();
+  schedule_browser_size_resolve();
+}
+
+void App::browser_jump_included(int delta) {
+  // L/R hop across the entry's included folders wherever they live, changing directory when the
+  // next one is elsewhere. From an unincluded row, R starts at the first and L at the last.
+  const SaveRecord *record = nullptr;
+  for (const SaveRecord &save : saves_) {
+    if (save.id == directory_browser_.entry_id) {
+      record = &save;
+      break;
+    }
+  }
+  if (!record || record->extra_paths.empty()) {
+    return;
+  }
+  const std::vector<TrackedPath> &paths = record->extra_paths;
+  int current = -1;
+  if (directory_browser_.selected < directory_browser_.rows.size() &&
+      !directory_browser_.rows[directory_browser_.selected].parent_link) {
+    const std::string focused = directory_browser_.current_path + "/" +
+                                directory_browser_.rows[directory_browser_.selected].name;
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+      if (paths[i].path == focused) {
+        current = static_cast<int>(i);
+        break;
+      }
+    }
+  }
+  const int count = static_cast<int>(paths.size());
+  const int target = current < 0 ? (delta > 0 ? 0 : count - 1)
+                                 : (current + delta + count) % count;
+  const std::string &path = paths[static_cast<std::size_t>(target)].path;
+  const std::size_t slash = path.rfind('/');
+  if (slash == std::string::npos) {
+    return;
+  }
+  const std::string parent = path.substr(0, slash);
+  const std::string name = path.substr(slash + 1);
+  if (parent != directory_browser_.current_path) {
+    directory_browser_.current_path = parent;
+    reload_browser_rows();
+  }
+  for (std::size_t i = 0; i < directory_browser_.rows.size(); ++i) {
+    if (!directory_browser_.rows[i].parent_link && directory_browser_.rows[i].name == name) {
+      directory_browser_.selected = i;
+      break;
+    }
+  }
   schedule_browser_size_resolve();
 }
 
@@ -4543,7 +4593,16 @@ int App::run() {
         schedule_browser_size_resolve();
       }
       bool rows_changed = false;
-      if ((pressed & backup_button) != 0 && browser.selected < browser.rows.size()) {
+      // L/R hop across the entry's included folders, wherever they live.
+      if ((pressed & SCE_CTRL_LTRIGGER) != 0) {
+        browser_jump_included(-1);
+        rows_changed = true;
+      }
+      if (!rows_changed && (pressed & SCE_CTRL_RTRIGGER) != 0) {
+        browser_jump_included(1);
+        rows_changed = true;
+      }
+      if (!rows_changed && (pressed & backup_button) != 0 && browser.selected < browser.rows.size()) {
         // Cross opens the focused folder; on the ".." row it climbs instead.
         if (browser.rows[browser.selected].parent_link) {
           browser_go_up();

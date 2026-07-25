@@ -117,18 +117,13 @@ void draw_circle_spinner(float cx, float cy, unsigned int frame, unsigned int ba
   }
 }
 
-// A pencil, for the "Data Folders" row: a diagonal body stepping down-left in small squares - at
-// 13px a true diagonal turns to mush, while pixel steps stay crisp - ending in a two-step taper
-// for the tip. right_x is the glyph's right edge, top_y its top.
-void draw_pencil_glyph(int right_x, int top_y, unsigned int color) {
-  const int bx = right_x - 13;
-  vita2d_draw_rectangle(bx + 10, top_y, 3, 3, color);      // eraser end
-  vita2d_draw_rectangle(bx + 8, top_y + 2, 3, 3, color);   // body...
-  vita2d_draw_rectangle(bx + 6, top_y + 4, 3, 3, color);
-  vita2d_draw_rectangle(bx + 4, top_y + 6, 3, 3, color);
-  vita2d_draw_rectangle(bx + 2, top_y + 8, 3, 3, color);
-  vita2d_draw_rectangle(bx + 1, top_y + 10, 2, 2, color);  // tip taper
-  vita2d_draw_rectangle(bx, top_y + 12, 1, 1, color);      // tip
+// A folder silhouette for the "Data Folders" row: tab over body, all axis-aligned - diagonals turn
+// to mush at this size (a pixel-stepped pencil here read as a smear on hardware). The footer's
+// "Edit" hint carries the verb; the glyph carries the noun. right_x is the right edge, top_y the top.
+void draw_folder_glyph(int right_x, int top_y, unsigned int color) {
+  const int bx = right_x - 14;
+  vita2d_draw_rectangle(bx, top_y, 6, 2, color);
+  vita2d_draw_rectangle(bx, top_y + 2, 14, 9, color);
 }
 
 // Checkbox states for the folder picker's marker column.
@@ -139,25 +134,26 @@ enum class FolderMark {
   InUse,      // grey fill: another entry's folder
 };
 
-// A 12px checkbox. The check mark is pixel-stepped squares - a smooth diagonal turns to mush at
-// this size - and the box outline is four 1px rects. left_x/top_y are the box's top-left corner.
+// A 14px checkbox with 2px borders - the 12px/1px first cut read as flyspecks on the OLED. The
+// check is pixel-stepped 3px squares; a smooth diagonal turns to mush at this size. left_x/top_y
+// are the box's top-left corner.
 void draw_folder_mark(int left_x, int top_y, FolderMark mark) {
-  constexpr int kBox = 12;
+  constexpr int kBox = 14;
   constexpr unsigned int kCheckColor = RGBA8(8, 13, 21, 255);  // background navy, cuts the fill
   switch (mark) {
   case FolderMark::Available:
-    vita2d_draw_rectangle(left_x, top_y, kBox, 1, kColorIdleDot);
-    vita2d_draw_rectangle(left_x, top_y + kBox - 1, kBox, 1, kColorIdleDot);
-    vita2d_draw_rectangle(left_x, top_y + 1, 1, kBox - 2, kColorIdleDot);
-    vita2d_draw_rectangle(left_x + kBox - 1, top_y + 1, 1, kBox - 2, kColorIdleDot);
+    vita2d_draw_rectangle(left_x, top_y, kBox, 2, kColorIdleDot);
+    vita2d_draw_rectangle(left_x, top_y + kBox - 2, kBox, 2, kColorIdleDot);
+    vita2d_draw_rectangle(left_x, top_y + 2, 2, kBox - 4, kColorIdleDot);
+    vita2d_draw_rectangle(left_x + kBox - 2, top_y + 2, 2, kBox - 4, kColorIdleDot);
     return;
   case FolderMark::Included:
     vita2d_draw_rectangle(left_x, top_y, kBox, kBox, kColorSuccess);
-    // Pixel check: short down-stroke, longer up-stroke.
-    vita2d_draw_rectangle(left_x + 2, top_y + 6, 2, 2, kCheckColor);
-    vita2d_draw_rectangle(left_x + 4, top_y + 8, 2, 2, kCheckColor);
-    vita2d_draw_rectangle(left_x + 6, top_y + 6, 2, 2, kCheckColor);
-    vita2d_draw_rectangle(left_x + 8, top_y + 4, 2, 2, kCheckColor);
+    // Bold pixel check: short down-stroke, longer up-stroke.
+    vita2d_draw_rectangle(left_x + 2, top_y + 7, 3, 3, kCheckColor);
+    vita2d_draw_rectangle(left_x + 4, top_y + 9, 3, 3, kCheckColor);
+    vita2d_draw_rectangle(left_x + 7, top_y + 6, 3, 3, kCheckColor);
+    vita2d_draw_rectangle(left_x + 9, top_y + 3, 3, 3, kCheckColor);
     return;
   case FolderMark::Covered:
     vita2d_draw_rectangle(left_x, top_y, kBox, kBox,
@@ -1391,7 +1387,7 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
       } else if (row.tracked_elsewhere) {
         mark = FolderMark::InUse;
       }
-      draw_folder_mark(kListX + 16, y + 12, mark);
+      draw_folder_mark(kListX + 16, y + 11, mark);
       const unsigned int name_color =
           row.tracked_elsewhere ? kColorIdleDot : (focused ? kColorText : kColorMuted);
       const int name_x = kListX + 34;
@@ -1421,6 +1417,9 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
       state.selected < state.rows.size() ? &state.rows[state.selected] : nullptr;
   const char *const close_label = state.return_to_details ? "Back" : "Close";
   std::vector<HintSpec> hints;
+  if (state.included_count > 0) {
+    hints.push_back({ButtonSymbol::Label, "L/R  Included", nullptr, nullptr});
+  }
   hints.push_back({cancel, at_root ? close_label : "Up", nullptr, nullptr});
   // Triangle is the shortcut out from a subfolder. At the root the cancel button already closes, so
   // offering it there too would just be the same action listed twice.
@@ -1436,8 +1435,9 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
         {ButtonSymbol::Square, focused_row->tracked_here ? "Exclude" : "Include", nullptr,
          nullptr});
   }
-  if (focused_row) {
-    hints.push_back({primary, focused_row->parent_link ? "Up" : "Open", nullptr, nullptr});
+  // ".." answers to Cross too, but hinting it would print "Up" twice beside Circle's.
+  if (focused_row && !focused_row->parent_link) {
+    hints.push_back({primary, "Open", nullptr, nullptr});
   }
   const int hints_left =
       draw_hints_right_aligned(fonts_, hints.data(), static_cast<int>(hints.size()));
@@ -1697,7 +1697,7 @@ void Ui::draw_backup_panel(const UiState &state) {
       // An action row, not a backup: no presence glyph (there is nothing on the card or in the
       // Cloud to report), a pencil in its place - the row edits the folder set. The label itself
       // already carries the count.
-      draw_pencil_glyph(926, y + 11, selected ? kColorAccent : kColorIdleDot);
+      draw_folder_glyph(926, y + 12, selected ? kColorAccent : kColorIdleDot);
       max_text_width = 300;
     } else {
       max_text_width = 340;
