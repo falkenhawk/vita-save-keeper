@@ -1395,6 +1395,121 @@ void test_backup_archive_restores_snapshot_and_removes_stale_files() {
   std::filesystem::remove_all(base);
 }
 
+void test_compute_folder_entries_reports_crc_progress() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-check-progress-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source");
+  {
+    // Bigger than the 256 KB report throttle so at least one intermediate report fires.
+    const std::string block(64 * 1024, 'a');
+    std::ofstream big(base / "source" / "big.bin", std::ios::binary);
+    for (int i = 0; i < 6; ++i) {
+      big << block;
+    }
+    std::ofstream(base / "source" / "small.bin", std::ios::binary) << "tail";
+  }
+
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> reports;
+  bool ok = false;
+  const std::vector<vsm::ArchiveEntryInfo> entries = vsm::compute_folder_entries(
+      (base / "source").string(), &ok,
+      [&](std::uint64_t done, std::uint64_t total) { reports.emplace_back(done, total); });
+
+  EXPECT_TRUE(ok);
+  EXPECT_EQ(entries.size(), static_cast<std::size_t>(2));
+  const std::uint64_t total_bytes = 6ULL * 64ULL * 1024ULL + 4ULL;
+  EXPECT_TRUE(reports.size() >= 3);
+  EXPECT_TRUE(reports.front().first == 0 && reports.front().second == total_bytes);
+  EXPECT_TRUE(reports.back().first == total_bytes);
+  for (std::size_t i = 1; i < reports.size(); ++i) {
+    EXPECT_TRUE(reports[i - 1].first <= reports[i].first);
+    EXPECT_TRUE(reports[i].second == total_bytes);
+  }
+
+  std::filesystem::remove_all(base);
+}
+
+void test_restore_and_inspection_report_archive_byte_progress() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-restore-progress-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source");
+  std::filesystem::create_directories(base / "backups");
+  {
+    const std::string block(64 * 1024, 'b');
+    std::ofstream big(base / "source" / "big.bin", std::ios::binary);
+    for (int i = 0; i < 10; ++i) {
+      big << block;
+    }
+  }
+
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> create_reports;
+  vsm::BackupRequest create_request;
+  create_request.source_path = (base / "source").string();
+  create_request.backup_root = (base / "backups").string();
+  create_request.save_id = "PCSE00120";
+  create_request.timestamp = {2026, 5, 21, 16, 14};
+  create_request.progress = [&](std::uint64_t done, std::uint64_t total) {
+    create_reports.emplace_back(done, total);
+  };
+  const vsm::BackupResult backup = vsm::create_backup_archive(create_request);
+  EXPECT_TRUE(backup.ok);
+
+  // The writer reads every byte twice (hash pass, then write pass) but reports one continuous
+  // bar: a single zero start, one shared denominator of twice the content size, monotonic
+  // throughout, and a final report landing exactly on full.
+  const std::uint64_t source_bytes = 10ULL * 64ULL * 1024ULL;
+  std::size_t zero_starts = 0;
+  for (std::size_t i = 0; i < create_reports.size(); ++i) {
+    if (create_reports[i].first == 0) {
+      ++zero_starts;
+    }
+    EXPECT_TRUE(create_reports[i].second == 2 * source_bytes);
+    EXPECT_TRUE(i == 0 || create_reports[i - 1].first <= create_reports[i].first);
+  }
+  EXPECT_EQ(zero_starts, static_cast<std::size_t>(1));
+  EXPECT_TRUE(create_reports.back().first == 2 * source_bytes);
+
+  bool size_ok = false;
+  const std::uint64_t archive_bytes = vsm::archive_file_size(backup.archive_path, &size_ok);
+  EXPECT_TRUE(size_ok);
+
+  // Progress counts bytes consumed from the archive stream, so the final report lands exactly on
+  // the file size once the extractor reaches the central directory.
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> reports;
+  vsm::RestoreRequest request;
+  request.archive_path = backup.archive_path;
+  request.destination_path = (base / "restored").string();
+  request.progress = [&](std::uint64_t done, std::uint64_t total) {
+    reports.emplace_back(done, total);
+  };
+  std::filesystem::create_directories(base / "restored");
+  EXPECT_TRUE(vsm::restore_backup_archive(request).ok);
+
+  EXPECT_TRUE(reports.size() >= 3);
+  EXPECT_TRUE(reports.front().first == 0);
+  EXPECT_TRUE(reports.back().first == archive_bytes);
+  for (std::size_t i = 0; i < reports.size(); ++i) {
+    EXPECT_TRUE(reports[i].second == archive_bytes);
+    EXPECT_TRUE(i == 0 || reports[i - 1].first <= reports[i].first);
+  }
+
+  // The inspection extractor shares the plumbing.
+  reports.clear();
+  EXPECT_TRUE(vsm::extract_backup_archive_for_inspection(
+                  backup.archive_path, (base / "inspection").string(),
+                  512ULL * 1024ULL * 1024ULL,
+                  [&](std::uint64_t done, std::uint64_t total) {
+                    reports.emplace_back(done, total);
+                  })
+                  .ok);
+  EXPECT_TRUE(!reports.empty());
+  EXPECT_TRUE(reports.back().first == archive_bytes);
+
+  std::filesystem::remove_all(base);
+}
+
 void test_backup_archive_missing_file_does_not_clear_destination() {
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() / "save-keeper-missing-restore-test";
@@ -2227,6 +2342,8 @@ int main() {
   test_backup_archive_explicit_name_never_overwrites();
   test_backup_creation_plan_reuses_matching_content_and_counts_collisions();
   test_backup_archive_restores_snapshot_and_removes_stale_files();
+  test_compute_folder_entries_reports_crc_progress();
+  test_restore_and_inspection_report_archive_byte_progress();
   test_backup_archive_missing_file_does_not_clear_destination();
   test_backup_store_lists_local_zip_backups_newest_first();
   test_backup_store_builds_normalized_archive_path();

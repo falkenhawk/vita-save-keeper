@@ -85,8 +85,10 @@ private:
   void cancel_delete_confirmation();
   void handle_action_button();
   void create_new_backup();
+  // busy_label, when set, names the modal that animates byte progress while the save is hashed
+  // and zipped; nullptr keeps the operation silent (the batch draws its own modal instead).
   LocalSnapshotResult create_local_snapshot(const SaveRecord &save, const std::string &suffix,
-                                            bool report_progress, bool force_new = false);
+                                            const char *busy_label, bool force_new = false);
   void handle_restore();
   void handle_delete_button();
   void load_google_token_cache();

@@ -9,6 +9,8 @@ All notable changes to Save Keeper are documented here. The format follows
 ### Fixed
 - deleting a game's last backup now removes its folder from the memory card instead of leaving an
   empty one behind, and folders left empty by earlier versions are cleared out on the next launch
+- checking, backing up, restoring, and inspecting a large save now fill a real progress bar
+  instead of freezing the busy modal until the work is done
 
 ## [1.1.1] - 2026-07-25
 

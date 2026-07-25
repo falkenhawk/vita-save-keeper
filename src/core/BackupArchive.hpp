@@ -34,6 +34,10 @@ struct BackupResult {
 struct RestoreRequest {
   std::string archive_path;
   std::string destination_path;
+  // Optional: called with (bytes consumed from the archive, archive file size) as entries are
+  // extracted, throttled like the writer's callback, so a caller can animate a progress bar for
+  // a large save instead of holding one frozen frame through the whole extraction.
+  std::function<void(std::uint64_t done, std::uint64_t total)> progress;
 };
 
 struct RestoreResult {
@@ -64,15 +68,19 @@ BackupResult create_backup_archive(const BackupRequest &request);
 RestoreResult restore_backup_archive(const RestoreRequest &request);
 // Extracts into a brand-new work directory without touching a live save. Metadata inspection uses
 // this before asking the Vita to mount an encrypted backup copy.
-RestoreResult extract_backup_archive_for_inspection(const std::string &archive_path,
-                                                     const std::string &destination_path,
-                                                     std::uint64_t max_total_bytes =
-                                                         512ULL * 1024ULL * 1024ULL);
+RestoreResult extract_backup_archive_for_inspection(
+    const std::string &archive_path, const std::string &destination_path,
+    std::uint64_t max_total_bytes = 512ULL * 1024ULL * 1024ULL,
+    const std::function<void(std::uint64_t done, std::uint64_t total)> &progress = {});
 // Removes only an isolated inspection directory; empty paths and filesystem roots are rejected.
 bool remove_backup_inspection_directory(const std::string &path);
 // Content signature of a live save folder: relative path, CRC32, and size per file, the same
-// values our ZIP writer stores. Used to detect whether a folder is already backed up.
-std::vector<ArchiveEntryInfo> compute_folder_entries(const std::string &folder_path, bool *ok);
+// values our ZIP writer stores. Used to detect whether a folder is already backed up. The
+// optional callback reports (bytes hashed, total bytes) while the folder is read, throttled,
+// because hashing a large save takes long enough to freeze a single busy frame.
+std::vector<ArchiveEntryInfo> compute_folder_entries(
+    const std::string &folder_path, bool *ok,
+    const std::function<void(std::uint64_t done, std::uint64_t total)> &progress = {});
 // True when the archive's central directory lists exactly the given entries.
 bool entries_match_backup_archive(const std::vector<ArchiveEntryInfo> &folder_entries,
                                   const std::string &archive_path);

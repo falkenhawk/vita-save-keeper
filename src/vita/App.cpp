@@ -352,8 +352,17 @@ std::string App::status_with_name(const std::string &prefix, const std::string &
 
 LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
                                                const std::string &suffix,
-                                               bool report_progress,
+                                               const char *busy_label,
                                                bool force_new) {
+  // The label's bar fills exactly once across the whole snapshot: the folder hash is the first
+  // third and the archive's own two read passes are the rest, phase-offset below so the bar
+  // continues instead of restarting.
+  std::function<void(std::uint64_t, std::uint64_t)> check_progress;
+  if (busy_label != nullptr) {
+    check_progress = [this, busy_label](std::uint64_t done, std::uint64_t total) {
+      ui_.draw_busy(busy_label, static_cast<long long>(done), static_cast<long long>(total * 3));
+    };
+  }
   LocalSnapshotResult snapshot;
   // Resolve once so the ZIP name and JSON describe the same moment, even if creating the archive
   // takes long enough for the wall clock to tick over.
@@ -362,7 +371,8 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
       mount_bridge_ready_);
 
   bool entries_ok = false;
-  const std::vector<ArchiveEntryInfo> entries = compute_folder_entries(save.path, &entries_ok);
+  const std::vector<ArchiveEntryInfo> entries =
+      compute_folder_entries(save.path, &entries_ok, check_progress);
   if (!entries_ok) {
     snapshot.error = "could not read the save folder";
     return snapshot;
@@ -399,10 +409,17 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
     request.save_id = save.id;
     request.timestamp = timestamp;
     request.archive_name = plan.archive_name;
-    if (report_progress) {
-      request.progress = [this](std::uint64_t done, std::uint64_t total) {
-        ui_.draw_busy("Creating backup", static_cast<long long>(done),
-                      static_cast<long long>(total));
+    if (busy_label != nullptr) {
+      // The archive reports its two passes over (0..2x content); offsetting by the bytes the hash
+      // above already covered turns the label's bar into one continuous 0..3x fill.
+      std::uint64_t checked_bytes = 0;
+      for (const ArchiveEntryInfo &entry : entries) {
+        checked_bytes += entry.size;
+      }
+      request.progress = [this, busy_label, checked_bytes](std::uint64_t done,
+                                                          std::uint64_t total) {
+        ui_.draw_busy(busy_label, static_cast<long long>(checked_bytes + done),
+                      static_cast<long long>(checked_bytes + total));
       };
     }
     const BackupResult backup = create_backup_archive(request);
@@ -851,7 +868,11 @@ void App::create_new_backup() {
     // timestamp; warn first, and let a second press force it anyway (the batch never forces).
     ui_.draw_busy("Checking current save", 0, -1);
     bool signature_ok = false;
-    const std::vector<ArchiveEntryInfo> entries = compute_folder_entries(save.path, &signature_ok);
+    const std::vector<ArchiveEntryInfo> entries = compute_folder_entries(
+        save.path, &signature_ok, [this](std::uint64_t done, std::uint64_t total) {
+          ui_.draw_busy("Checking current save", static_cast<long long>(done),
+                        static_cast<long long>(total));
+        });
     if (signature_ok && !entries.empty()) {
       const std::string match = matching_backup_name(entries, save.id, local_backups_);
       if (!match.empty()) {
@@ -868,7 +889,7 @@ void App::create_new_backup() {
 
   // One busy frame before the blocking ZIP work, so the screen does not look frozen.
   ui_.draw_busy("Creating backup", 0, -1);
-  const LocalSnapshotResult result = create_local_snapshot(save, "", true, force_new);
+  const LocalSnapshotResult result = create_local_snapshot(save, "", "Creating backup", force_new);
   if (result.ok) {
     refresh_local_backups();
     // Focus the fresh (or safely reused) snapshot so an immediate Select-to-upload needs no
@@ -1104,14 +1125,18 @@ void App::handle_restore() {
   // file timestamps change on every restore and cannot be trusted).
   ui_.draw_busy("Checking current save", 0, -1);
   bool signature_ok = false;
-  const std::vector<ArchiveEntryInfo> current_entries =
-      compute_folder_entries(save.path, &signature_ok);
+  const std::vector<ArchiveEntryInfo> current_entries = compute_folder_entries(
+      save.path, &signature_ok, [this](std::uint64_t done, std::uint64_t total) {
+        ui_.draw_busy("Checking current save", static_cast<long long>(done),
+                      static_cast<long long>(total));
+      });
   if (signature_ok && !current_entries.empty()) {
     const bool already_backed_up =
         !matching_backup_name(current_entries, save.id, local_backups_).empty();
     if (!already_backed_up) {
       ui_.draw_busy("Backing up current save", 0, -1);
-      const LocalSnapshotResult auto_result = create_local_snapshot(save, " auto", false);
+      const LocalSnapshotResult auto_result =
+          create_local_snapshot(save, " auto", "Backing up current save");
       if (!auto_result.ok) {
         // Losing the current save is the one outcome this feature exists to prevent; a restore
         // does not proceed over a failed safety snapshot.
@@ -1162,10 +1187,14 @@ void App::handle_restore() {
   }
 
   ui_.draw_busy("Restoring save", 0, -1);
-  const RestoreResult result = restore_backup_archive({
-      archive_path,
-      save.path,
-  });
+  RestoreRequest restore_request;
+  restore_request.archive_path = archive_path;
+  restore_request.destination_path = save.path;
+  restore_request.progress = [this](std::uint64_t done, std::uint64_t total) {
+    ui_.draw_busy("Restoring save", static_cast<long long>(done),
+                  static_cast<long long>(total));
+  };
+  const RestoreResult result = restore_backup_archive(restore_request);
   restore_confirmation_pending_ = false;
   if (result.ok) {
     // The live folder now holds different content; drop the cached time and re-read so the grid
@@ -1935,8 +1964,15 @@ SaveMetadataJsonResult App::ensure_local_backup_metadata(const SaveRecord &save,
     const std::string work_root = "ur0:user/00/savedata";
     if (ensure_directory_path(work_root)) {
       BackupInspectionDirectory inspection(work_root + "/SVKMTMP01");
-      const RestoreResult extracted =
-          extract_backup_archive_for_inspection(archive_path, inspection.path());
+      // The cap repeats the declaration default so the progress callback can follow it. The label
+      // matches the modal the details view already put on screen; the mount after the extraction
+      // stays a pulse.
+      const RestoreResult extracted = extract_backup_archive_for_inspection(
+          archive_path, inspection.path(), 512ULL * 1024ULL * 1024ULL,
+          [this](std::uint64_t done, std::uint64_t total) {
+            ui_.draw_busy("Loading save details", static_cast<long long>(done),
+                          static_cast<long long>(total));
+          });
       if (extracted.ok) {
         SaveMetadata mounted = resolve_live_save_metadata(
             inspection.path(), {}, save.platform != SavePlatform::Psp, mount_bridge_ready_);
@@ -2623,7 +2659,7 @@ void App::run_sync_all() {
     if (plan.create_backup) {
       ui_.set_batch_progress("Backing up", save.display_name, i, total, enter_is_cross_);
       ui_.draw_busy("", 0, -1);
-      const LocalSnapshotResult result = create_local_snapshot(save, "", false);
+      const LocalSnapshotResult result = create_local_snapshot(save, "", nullptr);
       if (!result.ok) {
         // The planned upload was this archive; there is nothing to send for this game.
         ++run.failed;

@@ -27,6 +27,9 @@ namespace vsm {
 namespace {
 
 constexpr std::size_t kCopyBufferSize = 32 * 1024;
+// Byte-progress callbacks fire at most every this many bytes, bounding redraw cost while still
+// animating smoothly for saves large enough to need a bar at all.
+constexpr std::uint64_t kProgressReportStep = 256u * 1024u;
 
 struct ZipTimestamp {
   std::uint16_t time{};
@@ -243,7 +246,7 @@ std::uint32_t update_crc32(std::uint32_t crc, const unsigned char *data, std::si
   return ~crc;
 }
 
-bool measure_file(ZipEntry *entry) {
+bool measure_file(ZipEntry *entry, const std::function<void(std::size_t)> &on_bytes = {}) {
   FILE *input = std::fopen(entry->source_path.c_str(), "rb");
   if (!input) {
     return false;
@@ -257,6 +260,9 @@ bool measure_file(ZipEntry *entry) {
     if (read > 0) {
       crc = update_crc32(crc, buffer.data(), read);
       size += read;
+      if (on_bytes) {
+        on_bytes(read);
+      }
     }
     if (read < buffer.size()) {
       if (std::ferror(input) != 0) {
@@ -498,7 +504,8 @@ bool ensure_parent_directory(const std::string &path) {
 }
 
 bool extract_stored_file(FILE *zip, const LocalZipHeader &header,
-                         const std::string &destination_path) {
+                         const std::string &destination_path,
+                         const std::function<void()> &on_chunk = {}) {
   if (!ensure_parent_directory(destination_path)) {
     return false;
   }
@@ -523,6 +530,9 @@ bool extract_stored_file(FILE *zip, const LocalZipHeader &header,
     }
     crc = update_crc32(crc, buffer.data(), chunk);
     remaining -= static_cast<std::uint32_t>(chunk);
+    if (on_chunk) {
+      on_chunk();
+    }
   }
 
   if (std::fclose(output) != 0) {
@@ -538,9 +548,38 @@ bool extract_stored_file(FILE *zip, const LocalZipHeader &header,
   return true;
 }
 
-bool extract_archive_to_directory(FILE *zip, const std::string &destination_path,
-                                  std::uint64_t max_total_bytes,
-                                  bool *file_timestamps_uniform = nullptr) {
+bool extract_archive_to_directory(
+    FILE *zip, const std::string &destination_path, std::uint64_t max_total_bytes,
+    bool *file_timestamps_uniform = nullptr,
+    const std::function<void(std::uint64_t, std::uint64_t)> &progress = {}) {
+  // Progress counts bytes consumed from the archive stream, so headers ride along for free and
+  // the bar lands exactly on the file size when the entries end at the central directory. The
+  // stream position is the single source of truth; no second pass over the archive is needed.
+  std::uint64_t archive_bytes = 0;
+  std::uint64_t last_reported = 0;
+  std::function<void()> on_chunk;
+  if (progress) {
+    const long start = std::ftell(zip);
+    if (start >= 0 && std::fseek(zip, 0, SEEK_END) == 0) {
+      const long end = std::ftell(zip);
+      if (end > 0 && std::fseek(zip, start, SEEK_SET) == 0) {
+        archive_bytes = static_cast<std::uint64_t>(end);
+      }
+    }
+    progress(0, archive_bytes);
+    on_chunk = [&] {
+      const long position = std::ftell(zip);
+      if (position < 0) {
+        return;
+      }
+      const std::uint64_t done = static_cast<std::uint64_t>(position);
+      if (done - last_reported >= kProgressReportStep) {
+        last_reported = done;
+        progress(std::min(done, archive_bytes), archive_bytes);
+      }
+    };
+  }
+
   std::uint64_t total_bytes = 0;
   std::size_t entry_count = 0;
   ZipTimestamp first_timestamp;
@@ -559,6 +598,9 @@ bool extract_archive_to_directory(FILE *zip, const std::string &destination_path
         // from a legacy synthetic backup stamp, so its filesystem time is not trusted as a save
         // time. The caller then leaves the time unknown rather than risk showing the backup time.
         *file_timestamps_uniform = entry_count > 0 && timestamps_uniform;
+      }
+      if (progress) {
+        progress(archive_bytes, archive_bytes);
       }
       return true;
     }
@@ -594,7 +636,7 @@ bool extract_archive_to_directory(FILE *zip, const std::string &destination_path
       timestamps_uniform = false;
     }
 
-    if (!extract_stored_file(zip, header, join_path(destination_path, header.name))) {
+    if (!extract_stored_file(zip, header, join_path(destination_path, header.name), on_chunk)) {
       return false;
     }
   }
@@ -731,11 +773,40 @@ BackupResult create_backup_archive(const BackupRequest &request) {
   if (entries.size() > 0xffffU) {
     return error_result(archive_path, "too many files for simple ZIP archive");
   }
+
+  // The archive reads every byte twice - a hash pass for the entry headers, then the write pass -
+  // but reports one continuous bar: the hash pass fills the first half and the write continues
+  // from the midpoint under a single denominator, so the bar never restarts. Stat sizes fix that
+  // denominator up front; they are advisory, so a file changing mid-scan just clamps in range.
+  std::uint64_t stat_total = 0;
+  std::uint64_t progress_total = 0;
+  std::uint64_t hashed = 0;
+  std::uint64_t hash_reported = 0;
+  std::function<void(std::size_t)> on_hash_bytes;
+  if (request.progress) {
+    for (const ZipEntry &entry : entries) {
+      struct stat info {};
+      if (stat(entry.source_path.c_str(), &info) == 0 && S_ISREG(info.st_mode)) {
+        stat_total += static_cast<std::uint64_t>(info.st_size);
+      }
+    }
+    progress_total = 2 * stat_total;
+    request.progress(0, progress_total);
+    on_hash_bytes = [&](std::size_t chunk) {
+      hashed += chunk;
+      if (hashed - hash_reported >= kProgressReportStep) {
+        hash_reported = hashed;
+        request.progress(std::min(hashed, stat_total), progress_total);
+      }
+    };
+  }
+
   for (ZipEntry &entry : entries) {
     if (entry.zip_path.size() > 0xffffU) {
       return error_result(archive_path, "file path is too long for simple ZIP archive");
     }
-    if (!measure_file(&entry) || !read_file_zip_timestamp(entry.source_path, &entry.modified_at)) {
+    if (!measure_file(&entry, on_hash_bytes) ||
+        !read_file_zip_timestamp(entry.source_path, &entry.modified_at)) {
       return error_result(archive_path, "could not read source file");
     }
   }
@@ -760,19 +831,16 @@ BackupResult create_backup_archive(const BackupRequest &request) {
   }
   std::uint64_t written = 0;
   std::uint64_t last_reported = 0;
-  const std::uint64_t report_step = 256u * 1024u;
   const std::function<void(std::size_t)> on_bytes =
       request.progress ? std::function<void(std::size_t)>([&](std::size_t chunk) {
         written += chunk;
-        if (written - last_reported >= report_step || written == total_bytes) {
+        if (written - last_reported >= kProgressReportStep || written == total_bytes) {
           last_reported = written;
-          request.progress(written, total_bytes);
+          // The write pass continues the same bar from the hash pass's midpoint.
+          request.progress(std::min(stat_total + written, progress_total), progress_total);
         }
       })
                        : std::function<void(std::size_t)>();
-  if (request.progress) {
-    request.progress(0, total_bytes);
-  }
 
   bool ok = true;
   for (ZipEntry &entry : entries) {
@@ -811,6 +879,10 @@ BackupResult create_backup_archive(const BackupRequest &request) {
     std::remove(archive_path.c_str());
     return error_result(archive_path, "could not write archive");
   }
+  if (request.progress) {
+    // Land exactly on full regardless of advisory stat drift.
+    request.progress(progress_total, progress_total);
+  }
 
   BackupResult result;
   result.ok = true;
@@ -818,7 +890,9 @@ BackupResult create_backup_archive(const BackupRequest &request) {
   return result;
 }
 
-std::vector<ArchiveEntryInfo> compute_folder_entries(const std::string &folder_path, bool *ok) {
+std::vector<ArchiveEntryInfo> compute_folder_entries(
+    const std::string &folder_path, bool *ok,
+    const std::function<void(std::uint64_t, std::uint64_t)> &progress) {
   std::vector<ArchiveEntryInfo> result;
   if (ok) {
     *ok = false;
@@ -831,11 +905,38 @@ std::vector<ArchiveEntryInfo> compute_folder_entries(const std::string &folder_p
   if (!collect_files(folder_path, "", &entries)) {
     return result;
   }
+
+  // A cheap stat pass fixes the denominator before any hashing starts; the sizes are advisory
+  // (a file growing mid-scan just clamps at 100%), which is fine for a progress bar.
+  std::uint64_t total_bytes = 0;
+  std::uint64_t hashed = 0;
+  std::uint64_t last_reported = 0;
+  std::function<void(std::size_t)> on_bytes;
+  if (progress) {
+    for (const ZipEntry &entry : entries) {
+      struct stat info {};
+      if (stat(entry.source_path.c_str(), &info) == 0 && S_ISREG(info.st_mode)) {
+        total_bytes += static_cast<std::uint64_t>(info.st_size);
+      }
+    }
+    progress(0, total_bytes);
+    on_bytes = [&](std::size_t chunk) {
+      hashed += chunk;
+      if (hashed - last_reported >= kProgressReportStep) {
+        last_reported = hashed;
+        progress(std::min(hashed, total_bytes), total_bytes);
+      }
+    };
+  }
+
   for (ZipEntry &entry : entries) {
-    if (!measure_file(&entry)) {
+    if (!measure_file(&entry, on_bytes)) {
       return result;
     }
     result.push_back({entry.zip_path, entry.crc32, entry.size});
+  }
+  if (progress) {
+    progress(total_bytes, total_bytes);
   }
   if (ok) {
     *ok = true;
@@ -963,7 +1064,8 @@ RestoreResult restore_backup_archive(const RestoreRequest &request) {
   const std::string staging_path = request.destination_path + ".restore-tmp";
   remove_tree(staging_path);
   const bool ok = ensure_directory(staging_path) &&
-                  extract_archive_to_directory(zip, staging_path, UINT64_MAX);
+                  extract_archive_to_directory(zip, staging_path, UINT64_MAX, nullptr,
+                                               request.progress);
   std::fclose(zip);
   if (!ok) {
     remove_tree(staging_path);
@@ -984,9 +1086,10 @@ RestoreResult restore_backup_archive(const RestoreRequest &request) {
   return result;
 }
 
-RestoreResult extract_backup_archive_for_inspection(const std::string &archive_path,
-                                                     const std::string &destination_path,
-                                                     std::uint64_t max_total_bytes) {
+RestoreResult extract_backup_archive_for_inspection(
+    const std::string &archive_path, const std::string &destination_path,
+    std::uint64_t max_total_bytes,
+    const std::function<void(std::uint64_t, std::uint64_t)> &progress) {
   struct stat info {};
   if (destination_path.empty() || destination_path == "/" ||
       stat(destination_path.c_str(), &info) == 0) {
@@ -999,7 +1102,7 @@ RestoreResult extract_backup_archive_for_inspection(const std::string &archive_p
   bool timestamps_uniform = false;
   const bool extracted = ensure_directory(destination_path) &&
                          extract_archive_to_directory(zip, destination_path, max_total_bytes,
-                                                      &timestamps_uniform);
+                                                      &timestamps_uniform, progress);
   std::fclose(zip);
   const RestoreResult result = extracted ? RestoreResult{true, {}, timestamps_uniform}
                                          : restore_error("could not inspect archive");
