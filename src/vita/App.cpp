@@ -28,6 +28,7 @@
 #include <taihen.h>
 #include <algorithm>
 #include <cerrno>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -502,7 +503,24 @@ std::vector<std::string> list_child_directories(const std::string &root_path) {
     }
   }
   closedir(dir);
-  std::sort(directories.begin(), directories.end());
+  // Case-insensitive, like the game grid's title sort: byte order files ABM and VitaDB ahead of
+  // betterHomebrewBrowser, which reads as random on a mixed-case ux0:data. Byte order breaks ties
+  // so names differing only by case keep a stable order.
+  std::sort(directories.begin(), directories.end(),
+            [](const std::string &a, const std::string &b) {
+              const std::size_t common = std::min(a.size(), b.size());
+              for (std::size_t i = 0; i < common; ++i) {
+                const int left = std::tolower(static_cast<unsigned char>(a[i]));
+                const int right = std::tolower(static_cast<unsigned char>(b[i]));
+                if (left != right) {
+                  return left < right;
+                }
+              }
+              if (a.size() != b.size()) {
+                return a.size() < b.size();
+              }
+              return a < b;
+            });
   return directories;
 }
 
