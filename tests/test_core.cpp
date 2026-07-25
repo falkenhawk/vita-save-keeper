@@ -927,44 +927,6 @@ void test_save_fingerprint_reflects_folder_content() {
   std::filesystem::remove_all(base);
 }
 
-void test_save_time_cache_roundtrip_and_rejects_bad_input() {
-  vsm::SaveTimeCache cache;
-  cache.entries["PCSG00352"] = {{true, 1783382228LL, 412LL, 5767168LL},
-                                true,
-                                {2026, 7, 6, 13, 37, 8}};
-  // A save that resolved to no readable time: cached without a savedAt so it is not re-mounted
-  // every launch just to learn "unknown" again.
-  cache.entries["PCSB00466"] = {{true, 1579216248LL, 4LL, 65536LL}, false, {}};
-
-  vsm::SaveTimeCache parsed;
-  EXPECT_TRUE(vsm::parse_save_time_cache(vsm::serialize_save_time_cache(cache), &parsed));
-  EXPECT_EQ(parsed.entries.size(), static_cast<std::size_t>(2));
-  const vsm::SaveTimeCacheEntry &entry = parsed.entries["PCSG00352"];
-  EXPECT_TRUE(entry.fingerprint.matches(cache.entries["PCSG00352"].fingerprint));
-  EXPECT_TRUE(entry.has_time);
-  EXPECT_EQ(vsm::format_save_datetime(entry.saved_at), "2026-07-06T13:37:08");
-  const vsm::SaveTimeCacheEntry &no_time = parsed.entries["PCSB00466"];
-  EXPECT_TRUE(!no_time.has_time);
-  EXPECT_TRUE(no_time.fingerprint.matches(cache.entries["PCSB00466"].fingerprint));
-
-  // Corrupt document or unknown version: reject the whole file (the cache simply rebuilds).
-  EXPECT_TRUE(!vsm::parse_save_time_cache("not json", &parsed));
-  EXPECT_TRUE(parsed.entries.empty());
-  EXPECT_TRUE(!vsm::parse_save_time_cache("{\"version\":99,\"entries\":{}}", &parsed));
-
-  // A malformed entry is skipped without discarding its healthy neighbors.
-  EXPECT_TRUE(vsm::parse_save_time_cache(
-      "{\"version\":1,\"entries\":{"
-      "\"BAD001\":{\"newestMtime\":1,\"fileCount\":2},"
-      "\"BAD002\":{\"newestMtime\":1,\"fileCount\":2,\"totalBytes\":3,"
-      "\"savedAt\":\"2026-13-40T99:99:99\"},"
-      "\"GOOD01\":{\"newestMtime\":1,\"fileCount\":2,\"totalBytes\":3,"
-      "\"savedAt\":\"2026-07-06T13:37:08\"}}}",
-      &parsed));
-  EXPECT_EQ(parsed.entries.size(), static_cast<std::size_t>(1));
-  EXPECT_TRUE(parsed.entries.find("GOOD01") != parsed.entries.end());
-}
-
 void test_scan_fingerprints_every_save_and_flags_mount_requiring_ones() {
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() / "save-keeper-scan-fingerprint-test";
@@ -1079,31 +1041,7 @@ void test_scan_consumes_index_when_fingerprints_match() {
   std::filesystem::remove_all(base);
 }
 
-void test_save_title_cache_roundtrip_and_stat_stamp() {
-  vsm::SaveTitleCache cache;
-  cache.app_db_mtime = 1784300000LL;
-  cache.app_db_size = 9437184LL;
-  cache.entries["PCSB01084"] = {true, {true, 1LL, 2LL, 3LL}, "Papers, Please", "PCSB01084",
-                                "ur0:appmeta/PCSB01084/icon0.png"};
-  cache.entries["ULUS10336"] = {false, {true, 4LL, 5LL, 6LL}, "Patapon 2", "ULUS10336",
-                                "ICON0.PNG"};
-
-  vsm::SaveTitleCache parsed;
-  EXPECT_TRUE(vsm::parse_save_title_cache(vsm::serialize_save_title_cache(cache), &parsed));
-  EXPECT_EQ(parsed.app_db_mtime, cache.app_db_mtime);
-  EXPECT_EQ(parsed.app_db_size, cache.app_db_size);
-  EXPECT_EQ(parsed.entries.size(), static_cast<std::size_t>(2));
-  EXPECT_TRUE(parsed.entries["PCSB01084"].from_app_db);
-  EXPECT_EQ(parsed.entries["PCSB01084"].display_name, "Papers, Please");
-  EXPECT_TRUE(!parsed.entries["ULUS10336"].from_app_db);
-  EXPECT_TRUE(parsed.entries["ULUS10336"].fingerprint.matches(
-      cache.entries["ULUS10336"].fingerprint));
-
-  EXPECT_TRUE(!vsm::parse_save_title_cache("not json", &parsed));
-  EXPECT_TRUE(parsed.entries.empty());
-  EXPECT_TRUE(!vsm::parse_save_title_cache(
-      "{\"version\":99,\"appDbMtime\":1,\"appDbSize\":2,\"entries\":{}}", &parsed));
-
+void test_stat_file_stamp_reads_regular_files_only() {
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() / "save-keeper-stamp-test";
   std::filesystem::remove_all(base);
@@ -1115,6 +1053,7 @@ void test_save_title_cache_roundtrip_and_stat_stamp() {
   EXPECT_EQ(size, 10LL);
   EXPECT_TRUE(mtime > 0);
   EXPECT_TRUE(!vsm::stat_file_stamp((base / "missing.db").string(), &mtime, &size));
+  EXPECT_TRUE(!vsm::stat_file_stamp(base.string(), &mtime, &size));
   std::filesystem::remove_all(base);
 }
 
@@ -2551,10 +2490,9 @@ int main() {
   test_backup_archive_creates_timestamped_zip_snapshot();
   test_detail_view_sizes_from_folder_and_archive();
   test_save_fingerprint_reflects_folder_content();
-  test_save_time_cache_roundtrip_and_rejects_bad_input();
   test_scan_fingerprints_every_save_and_flags_mount_requiring_ones();
   test_scan_consumes_index_when_fingerprints_match();
-  test_save_title_cache_roundtrip_and_stat_stamp();
+  test_stat_file_stamp_reads_regular_files_only();
   test_save_index_roundtrip_covers_all_three_time_states();
   test_save_index_reads_version_one_titles_forward();
   test_save_index_rejects_bad_input_but_keeps_healthy_entries();
