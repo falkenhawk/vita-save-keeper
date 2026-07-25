@@ -30,10 +30,10 @@ struct BackupRequest {
   // Optional: called with (bytes read, total bytes) across the archive's hash and write passes as
   // one continuous stream, throttled, so a caller can animate a progress bar for a large save.
   std::function<void(std::uint64_t done, std::uint64_t total)> progress;
-  // When non-empty, sources wins over source_path: a tracked entry backed by several directories
-  // (e.g. a RetroArch core's savefiles/ and savestates/) bundles them into one archive, each under
-  // its own zip path prefix. A source whose directory is missing contributes nothing, but at
-  // least one source directory must exist.
+  // When non-empty, sources wins over source_path: a save spread over several directories (its
+  // savedata folder plus extra data folders, e.g. RetroArch's savefiles/ and savestates/) bundles
+  // them into one archive, each under its own zip path prefix. A source whose directory is missing
+  // contributes nothing, but at least one source directory must exist.
   // Appended last (rather than next to source_path) so existing positional-brace-init callers,
   // which only ever supply source_path..progress, keep compiling unchanged.
   std::vector<BackupSource> sources;

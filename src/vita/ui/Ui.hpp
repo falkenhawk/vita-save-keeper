@@ -68,13 +68,13 @@ struct SlotDetailsState {
   std::vector<std::string> extra_paths;
 };
 
-// Directory-picker modal for adding a homebrew data folder to track. Rooted at "ux0:data" and never
-// climbs above it, so a tracked destination always stays on the ux0 filesystem. Rows are the child
-// directories of current_path; each row's size is filled in lazily (debounced) after the selection
-// settles, so browsing a folder full of huge trees does not stat-walk every one at once.
+// Modal picker for a homebrew entry's data folders. Confined to "ux0:data" and never climbs above
+// it, so an included folder always stays on the ux0 filesystem. Rows are the child directories of
+// current_path; each row's size is filled in lazily (debounced) after the selection settles, so
+// browsing a folder full of huge trees does not stat-walk every one at once.
 struct DirectoryBrowserState {
   bool open{};
-  // The entry the picked folder is attached to, captured when the browser opens so a later
+  // The entry whose backups the picked folders join, captured when the browser opens so a later
   // re-sort or refresh cannot retarget an in-flight pick.
   std::string entry_id;
   std::string entry_name;
@@ -83,18 +83,26 @@ struct DirectoryBrowserState {
   std::string current_path;
   struct Row {
     std::string name;
+    // The ".." row shown below the root: Cross goes up a level. Carries no size and no state.
+    bool parent_link{};
     bool size_known{};
     std::uint64_t size_bytes{};
-    // Attached to the entry this browser was opened from, so Square detaches it again.
+    // True while the incremental stat-walk is measuring this row; the size column spins.
+    bool sizing{};
+    // Included in the backups of the entry this browser was opened from; Square excludes it again.
     bool tracked_here{};
-    // Attached to some *other* entry. Shown as taken and left alone: one folder belongs to one
-    // app, and detaching it from here would silently edit an entry the user is not looking at.
+    // Inside a folder this entry already includes (covered_by names it). Backed up through the
+    // parent, so it cannot be included or excluded on its own.
+    std::string covered_by;
+    // Backed up by some *other* entry, directly or through a parent. Shown as taken and left
+    // alone: one folder belongs to one app, and excluding it from here would silently edit an
+    // entry the user is not looking at.
     bool tracked_elsewhere{};
   };
   std::vector<Row> rows;
   std::size_t selected{};
   // Set when the focused folder is over the large-folder threshold and a first Square press asked
-  // for confirmation; any other input clears it, a second Square press then attaches it anyway.
+  // for confirmation; any other input clears it, a second Square press then includes it anyway.
   bool large_confirm_pending{};
   // True when the browser was opened from Save Details, so closing it goes back there rather than
   // dropping the user out to the grid.

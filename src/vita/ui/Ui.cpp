@@ -978,11 +978,8 @@ void Ui::draw_modal_backdrop() {
 }
 
 int Ui::details_max_scroll(const SlotDetailsState &state) const {
-  if (!state.extra_paths.empty()) {
-    // The data-folder list is static (a handful of paths always fits in the metadata pane);
-    // nothing on this screen scrolls when an entry has them.
-    return 0;
-  }
+  // Covers the data-folder list too: it only shows when there are no slots, and it is static (a
+  // handful of paths always fits in the metadata pane).
   if (state.metadata.slots.empty()) {
     return 0;
   }
@@ -1067,11 +1064,15 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
     }
   }
 
+  // Real slot metadata always wins this column - hiding it because the entry also has data folders
+  // would suppress genuine save information. The folder list only stands in when there are no
+  // slots to show, which is the normal case for data-folder homebrew.
+  const bool show_folders = state.metadata.slots.empty() && !state.extra_paths.empty();
   const int slots_heading_y = 72 + card_h + 24;
   const int slots_list_y = slots_heading_y + 12;
   draw_text(fonts_, 18, slots_heading_y, kColorMuted, kTextSizeTiny,
-            state.extra_paths.empty() ? "SLOTS" : "DATA FOLDERS");
-  if (!state.extra_paths.empty()) {
+            show_folders ? "DATA FOLDERS" : "SLOTS");
+  if (show_folders) {
     // The paths themselves render in the metadata pane on the right; this column just echoes how
     // many there are, keeping the same empty look a slotless save already has here.
     const std::string count = state.extra_paths.size() == 1
@@ -1110,7 +1111,7 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
     }
   }
 
-  if (!state.extra_paths.empty()) {
+  if (show_folders) {
     // Same origin as the "no slot metadata" fallback this replaces, styled as a small label like
     // the pane's other labeled blocks (TITLE/SUBTITLE/DETAILS) rather than that fallback's big
     // heading: a homebrew data folder has no sdslot metadata, so this explains what is backed up
@@ -1260,14 +1261,17 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
   vita2d_draw_rectangle(0, 0, 960, 52, kColorHeader);
   vita2d_draw_line(0, 52, 960, 52, RGBA8(255, 255, 255, 20));
   // Naming the entry here is what keeps the screen from reading as a free-floating file browser:
-  // every folder picked lands in this app's own backups, not somewhere of its own.
+  // every folder picked lands in this app's own backups, not somewhere of its own. The path (with
+  // a trailing slash, so it reads as "inside this folder") is laid out first and the heading takes
+  // whatever width it leaves, so a short path never costs the entry name characters.
+  const std::string path = fit_text_left(kTextSizeSmall, state.current_path + "/", 520);
+  const int path_w = measure_text(kTextSizeSmall, path.c_str());
   const std::string heading =
-      state.entry_name.empty() ? std::string("Data folders")
-                               : fit_text(kTextSizeTitle, "Data folders: " + state.entry_name, 380);
+      state.entry_name.empty()
+          ? std::string("Data folders")
+          : fit_text(kTextSizeTitle, "Data folders: " + state.entry_name, 942 - 18 - path_w - 24);
   draw_text(fonts_, 18, 34, kColorText, kTextSizeTitle, heading.c_str());
-  const std::string path = fit_text_left(kTextSizeSmall, state.current_path, 520);
-  draw_text(fonts_, 942 - measure_text(kTextSizeSmall, path.c_str()), 32, kColorMuted,
-            kTextSizeSmall, path.c_str());
+  draw_text(fonts_, 942 - path_w, 32, kColorMuted, kTextSizeSmall, path.c_str());
 
   vita2d_draw_rectangle(0, 52, 960, 456, kColorPanel);
 
@@ -1277,9 +1281,9 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
   constexpr int kRowH = 36;
   constexpr int kListTop = 76;
   constexpr std::size_t kVisibleRows = 10;
-  // Right edge the size/"tracked" text right-aligns against - a 24px inset from the row's own
-  // right edge (kListX + kListW), not the row width itself. Derived so it cannot drift out of
-  // sync with kListW even though both happen to equal 912 today.
+  // Right edge the size/state text right-aligns against - a 24px inset from the row's own right
+  // edge (kListX + kListW), not the row width itself. Derived so it cannot drift out of sync with
+  // kListW even though both happen to equal 912 today.
   constexpr int kSizeRight = kListX + kListW - 24;
 
   if (state.rows.empty()) {
@@ -1300,41 +1304,50 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
         vita2d_draw_rectangle(kListX, y, 4, kRowH, kColorAccent);
       }
       const int text_y = y + 24;
-      // Right column: "included" for a folder this entry backs up, "in use" for one another entry
-      // backs up, else the folder's size. Only the focused row is ever being measured (the walk is
-      // debounced on the selection), so only it spins; every other unsized row shows "..." and sits
-      // still. A screen full of spinners would animate work that is not happening.
-      std::string right_text;
-      unsigned int right_color = focused ? kColorText : kColorMuted;
-      bool sizing = false;
-      if (row.tracked_here) {
-        right_text = "included";
-        right_color = kColorSuccess;
-      } else if (row.tracked_elsewhere) {
-        right_text = "in use";
-        right_color = kColorIdleDot;
-      } else if (row.size_known) {
-        right_text = format_bytes(row.size_bytes);
-      } else if (focused) {
-        sizing = true;
-      } else {
-        right_text = "...";
+      if (row.parent_link) {
+        // The way up: no size, no state, just the conventional name.
+        draw_text(fonts_, kListX + 16, text_y, focused ? kColorText : kColorMuted, kTextSizeSmall,
+                  "..");
+        y += kRowPitch;
+        continue;
       }
-      // The spinner's ring is radius 6, so 16 reserves its full width plus a little air; the name
-      // column measures against the same figure and never overlaps it.
-      const int right_w = sizing ? 16 : measure_text(kTextSizeSmall, right_text.c_str());
-      if (sizing) {
+      // Right column is always the folder's size: measured bytes, a spinner while this row's walk
+      // runs, or "..." while nothing has measured it yet. Inclusion state lives in a small tag
+      // after the name instead, so an included folder still shows how big it is.
+      int right_w;
+      if (row.sizing) {
+        // The spinner's ring is radius 6, so 16 reserves its full width plus a little air; the
+        // name column measures against the same figure and never overlaps it.
+        right_w = 16;
         draw_circle_spinner(static_cast<float>(kSizeRight) - 7.0f,
-                            static_cast<float>(text_y) - 7.0f, frame_counter_, right_color);
+                            static_cast<float>(text_y) - 7.0f, frame_counter_,
+                            focused ? kColorText : kColorMuted);
       } else {
-        draw_text(fonts_, kSizeRight - right_w, text_y, right_color, kTextSizeSmall,
-                  right_text.c_str());
+        const std::string size_text = row.size_known ? format_bytes(row.size_bytes) : "...";
+        right_w = measure_text(kTextSizeSmall, size_text.c_str());
+        draw_text(fonts_, kSizeRight - right_w, text_y, focused ? kColorText : kColorMuted,
+                  kTextSizeSmall, size_text.c_str());
       }
+      // State tag: green "included" whether directly included or covered by an included parent
+      // (both are backed up; Square explains the difference), dim "in use" for another entry's.
+      const char *tag = nullptr;
+      unsigned int tag_color = kColorIdleDot;
+      if (row.tracked_here || !row.covered_by.empty()) {
+        tag = "included";
+        tag_color = kColorSuccess;
+      } else if (row.tracked_elsewhere) {
+        tag = "in use";
+      }
+      const int tag_w = tag ? measure_text(kTextSizeTiny, tag) + 10 : 0;
       const unsigned int name_color =
           row.tracked_elsewhere ? kColorIdleDot : (focused ? kColorText : kColorMuted);
-      const int name_max = kSizeRight - right_w - 16 - (kListX + 16);
+      const int name_max = kSizeRight - right_w - 16 - tag_w - (kListX + 16);
       const std::string name = fit_text(kTextSizeSmall, row.name, std::max(40, name_max));
       draw_text(fonts_, kListX + 16, text_y, name_color, kTextSizeSmall, name.c_str());
+      if (tag) {
+        draw_text(fonts_, kListX + 16 + measure_text(kTextSizeSmall, name.c_str()) + 10, text_y,
+                  tag_color, kTextSizeTiny, tag);
+      }
       y += kRowPitch;
     }
     if (state.rows.size() > kVisibleRows) {
@@ -1365,14 +1378,16 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
     hints.push_back({ButtonSymbol::Triangle, close_label, nullptr, nullptr});
   }
   // Square toggles whether the folder is part of this entry's backup. Nothing on disk is created or
-  // deleted by it, so the words are about inclusion, not about adding or removing folders.
-  if (focused_row && !focused_row->tracked_elsewhere) {
+  // deleted by it, so the words are about inclusion, not about adding or removing folders. A folder
+  // that is covered (a parent is included), in use by another entry, or the ".." link offers none.
+  if (focused_row && !focused_row->parent_link && !focused_row->tracked_elsewhere &&
+      focused_row->covered_by.empty()) {
     hints.push_back({ButtonSymbol::Square,
                      focused_row->tracked_here ? "Exclude" : "Include in backup", nullptr,
                      nullptr});
   }
   if (focused_row) {
-    hints.push_back({primary, "Open", nullptr, nullptr});
+    hints.push_back({primary, focused_row->parent_link ? "Up" : "Open", nullptr, nullptr});
   }
   const int hints_left =
       draw_hints_right_aligned(fonts_, hints.data(), static_cast<int>(hints.size()));
@@ -1854,15 +1869,18 @@ void Ui::draw_footer(const UiState &state) {
   hints.push_back({ButtonSymbol::Square, sort_label.c_str(), nullptr,
                    focused_row ? "(hold: Label)" : nullptr});
   // The connect cue lives in the header next to "not connected"; the footer only notes the
-  // refresh hold once a connection exists. The "Data folders" row has no details of its own and
-  // nothing to delete, so neither button is offered there - both would be dead presses.
+  // refresh hold once a connection exists. The "Data folders" row has no details of its own, so
+  // Triangle is not offered there; Start only appears on a real snapshot - "New Backup" and the
+  // sentinels have nothing to delete, and advertising a dead press is worse than a shorter footer.
   if (!data_row_focused) {
     hints.push_back({ButtonSymbol::Triangle, "Details", nullptr,
                      state.google_connected ? "(hold: Refresh)" : nullptr});
-    hints.push_back({ButtonSymbol::Start, "Delete", nullptr, nullptr});
   } else if (state.google_connected) {
     // The Drive refresh hold is a screen-level action, not a row action, so it survives.
     hints.push_back({ButtonSymbol::Triangle, "Refresh", "(hold)", nullptr});
+  }
+  if (focused_row) {
+    hints.push_back({ButtonSymbol::Start, "Delete", nullptr, nullptr});
   }
   // Select moves the focused snapshot across: Upload from a card-only row, Download to the card
   // from a Drive-only row. A synced row has no tap action left, so the slot disappears rather

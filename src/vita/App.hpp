@@ -17,6 +17,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <dirent.h>
 #include <functional>
 #include <map>
 #include <string>
@@ -101,7 +102,7 @@ private:
   // Attaches each config entry's extra data folders to its app's record in saves_, synthesizes
   // records for configured apps the scan found no savedata folder for, and resolves the time of
   // every entry that ends up with extras. Idempotent, and it *assigns* rather than appends, so a
-  // repeat call after a detach also drops what an earlier call attached. Must run after a scan
+  // repeat call after an exclude also drops what an earlier call attached. Must run after a scan
   // populates saves_ and before the sort/rebuild; callers re-sort afterwards.
   void apply_tracked_folders();
   // Returns false if the user canceled (Square) mid-read, so the caller can keep the name order.
@@ -139,15 +140,23 @@ private:
   // Applies everything the visit changed in one go: re-sort, refocus the entry, refresh its backup
   // lists, and reopen Save Details when that is where the browser came from.
   void close_directory_browser();
-  // Re-lists current_path and re-tags the rows. keep_selection holds the cursor in place, which is
-  // what a toggle wants; a drill or climb passes false and starts at the top.
+  // Re-lists current_path and re-tags the rows (sizes come back from the per-visit cache, so a
+  // toggle never wipes what was already measured). keep_selection holds the cursor in place, which
+  // is what a toggle wants; a drill or climb passes false and starts at the top.
   void reload_browser_rows(bool keep_selection = false);
+  // Climbs to current_path's parent and lands the cursor on the folder just left.
+  void browser_go_up();
   // Square: includes the focused folder in this entry's backups, or excludes it again if it is
-  // already one of theirs. A folder another entry backs up is left alone.
+  // already one of theirs. A folder another entry backs up, or one nested either way with an
+  // already-included folder, is refused - overlapping trees would back up twice and restore twice.
   void browser_toggle_selected();
-  void browser_exclude_selected(const std::string &full_path, const std::string &name);
+  void browser_exclude_selected(const std::string &full_path);
   void schedule_browser_size_resolve();
-  void resolve_browser_size();
+  // The focused row's size is measured incrementally, a bounded slice of stat calls per frame, so
+  // a huge tree (VitaDB's thousands of thumbnails, say) never freezes input while it is sized.
+  void start_browser_size_walk();
+  void abort_browser_size_walk();
+  void advance_browser_size_walk();
   void handle_action_button();
   void create_new_backup();
   // busy_label, when set, names the modal that animates byte progress while the save is hashed
@@ -258,9 +267,6 @@ private:
   std::size_t selected_backup_{};
   bool restore_confirmation_pending_{};
   bool delete_confirmation_pending_{};
-  // Armed by the first Start press on a picker-tracked homebrew entry that has no backups left; a
-  // second Start press then stops tracking it. Cleared by the same navigation/cancel paths as the
-  // other pending confirmations. The RetroArch builtin never arms it (it re-appears every launch).
   // A snapshot living on card and Drive needs a scope choice instead of a plain second press:
   // Start deletes both sides, Triangle only the Drive copy, Square only the card copy.
   bool delete_scope_prompt_pending_{};
@@ -326,24 +332,38 @@ private:
   std::atomic<bool> mount_worker_stop_{false};
   int mount_worker_thread_{-1};
   int mount_worker_wake_{-1};
-  // Tracked homebrew data folders (RetroArch builtin + user config), loaded once at startup and
-  // injected into saves_ after each scan.
+  // Extra data folders per homebrew entry plus the batch-skip list, loaded once at startup and
+  // applied to saves_ after each scan.
   TrackedFoldersConfig tracked_config_;
   // Set when tracked-folders.json was present but could not be read or parsed. While set, the
-  // config must never be written back, so a truncated or corrupt file is never overwritten; the
-  // config write paths added in a later task must check this flag before saving.
+  // config must never be written back, so a truncated or corrupt file is never overwritten; every
+  // write path checks this flag before saving.
   bool tracked_config_load_failed_{};
   // Triangle pressed on the live-save row while its time was still resolving: open Save Details as
   // soon as the resolve lands instead of swallowing the press. Any other input cancels it.
   bool details_open_pending_{};
   // Details is a separate input/rendering mode. Keeping its state here lets Ui stay I/O-free.
   SlotDetailsState slot_details_;
-  // The add-folder directory picker, another separate input/rendering mode (open gates its branch).
+  // The data-folder picker, another separate input/rendering mode (open gates its branch).
   DirectoryBrowserState directory_browser_;
-  // Countdown (frames) until the browser's focused row is stat-walked for its size; -1 when idle or
-  // already known. Mirrors pending_time_resolve_frames_, so scrolling the list does not size every
-  // folder it passes.
+  // Countdown (frames) until the browser starts sizing the focused row; -1 when idle or already
+  // known. Mirrors pending_time_resolve_frames_, so scrolling the list does not size every folder
+  // it passes.
   int pending_browser_size_frames_{-1};
+  // State of the incremental size walk: the directory currently being read (held open across
+  // frames), the subdirectories still queued, and the byte total so far.
+  struct BrowserSizeWalk {
+    bool active{};
+    std::string target;  // the folder being sized, as current_path + "/" + row name
+    std::uint64_t bytes{};
+    DIR *dir{};
+    std::string dir_path;
+    std::vector<std::string> pending;
+  };
+  BrowserSizeWalk browser_size_walk_;
+  // Sizes measured this visit, keyed by full path, so re-tagging or re-entering a directory never
+  // wipes what was already walked. Cleared when the picker opens.
+  std::map<std::string, std::uint64_t> browser_size_cache_;
   bool enter_is_cross_{true};
   // Device-flow state: while a device code is active the main loop polls Google automatically at
   // the server-provided interval, so connecting only takes one Triangle press plus phone approval.
