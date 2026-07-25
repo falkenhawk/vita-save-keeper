@@ -78,9 +78,10 @@ constexpr unsigned int kRepeatableButtons = SCE_CTRL_LEFT | SCE_CTRL_RIGHT | SCE
 // leaving room to abort a hold.
 constexpr int kSelectHoldTriggerFrames = 60;
 constexpr int kSelectHoldTapFrames = 24;
-// Frames the focused save must stay put before its mount-only time is read (~150 ms at 60 fps).
-// Long enough that scrolling through encrypted saves does not mount every one it passes.
-constexpr int kSaveTimeResolveDelayFrames = 10;
+// Frames the pad must stay idle before a queued save time is read (~400 ms at 60 fps). A read
+// blocks the frame it runs on, so the gap has to outlast the pauses between rapid presses:
+// anything shorter lets a burst of navigation start a read that the next press then waits on.
+constexpr int kSaveTimeReadIdleFrames = 24;
 constexpr std::size_t kMaxSdslotFileSize =
     kSdslotHeaderSize + kMaxSaveSlots * kSdslotRecordSize;
 
@@ -122,10 +123,18 @@ SaveMetadata resolve_live_save_metadata(const std::string &save_path,
     // Only call the kernel bridge syscall when its modules actually loaded. Otherwise skip
     // straight to the AppMgr fallback rather than invoke an unresolved weak import.
     static constexpr int kSavedataMountIds[] = {0x6E, 0x12E, 0x12F, 0x3ED};
-    for (const int id : kSavedataMountIds) {
-      args.id = id;
+    static constexpr int kSavedataMountIdCount =
+        static_cast<int>(sizeof(kSavedataMountIds) / sizeof(kSavedataMountIds[0]));
+    // Start from the id that worked last time. Every save on a given system mounts with the same
+    // one, so scanning from the top again would spend failed syscalls on each read, and this path
+    // now runs once per save the user scrolls onto rather than once in a while.
+    static int preferred_mount_id = 0;
+    for (int attempt = 0; attempt < kSavedataMountIdCount; ++attempt) {
+      const int index = (preferred_mount_id + attempt) % kSavedataMountIdCount;
+      args.id = kSavedataMountIds[index];
       mount_result = saveKeeperUserMountById(&args);
       if (mount_result >= 0) {
+        preferred_mount_id = index;
         break;
       }
     }
@@ -643,7 +652,12 @@ bool App::drain_pending_time_read() {
   SceCtrlData armed{};
   sceCtrlPeekBufferPositive(0, &armed, 1);
   resolve_save_time(save);
-  flush_save_index();
+  // Written once the queue runs dry rather than after every read: each write re-serializes the
+  // whole index, which is wasted work between two reads that are about to happen anyway. Losing
+  // power mid-queue only costs the unwritten reads, and those are re-read next boot.
+  if (pending_time_reads_.empty()) {
+    flush_save_index();
+  }
 
   // The read stalled this frame, so any button pressed and released inside it never reached the
   // loop's own peek. Recover it from the sample history and hand it to the next frame.
@@ -3266,7 +3280,7 @@ int App::run() {
         deferred_buttons_ = 0;
         open_save_details();
       }
-    } else if (input_idle_frames_ >= kSaveTimeResolveDelayFrames) {
+    } else if (input_idle_frames_ >= kSaveTimeReadIdleFrames) {
       drain_pending_time_read();
     }
 
@@ -3351,6 +3365,9 @@ int App::run() {
     sceKernelDelayThread(kFrameDelayUs);
   }
 
+  // Any reads still queued when the loop ends are already in memory; write them before leaving so
+  // a clean exit does not throw away work the next boot would have to re-mount for.
+  flush_save_index();
   HttpClient::network_shutdown();
   ui_.shutdown();
   sceKernelExitProcess(0);
