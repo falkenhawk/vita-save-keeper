@@ -68,6 +68,9 @@ private:
   // Reads one queued save time, focused save first. Returns false when nothing was read, either
   // because the queue is empty or because a button arrived and navigation takes priority.
   bool drain_pending_time_read();
+  // Writes the index once the reads are done and the pause has run long, keeping its cost off the
+  // frame that finished the last read.
+  void write_save_index_when_idle();
   // Returns false if the user canceled (Square) mid-read, so the caller can keep the name order.
   bool resolve_all_save_times();
   bool resolve_save_time(SaveRecord *save);

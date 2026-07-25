@@ -82,6 +82,32 @@ constexpr int kSelectHoldTapFrames = 24;
 // blocks the frame it runs on, so the gap has to outlast the pauses between rapid presses:
 // anything shorter lets a burst of navigation start a read that the next press then waits on.
 constexpr int kSaveTimeReadIdleFrames = 24;
+// Frames of idle before the index itself is written (~1 s). Deliberately longer than a read's
+// gap: the write is worth much less than a read, so it waits for a pause deep enough that it is
+// unlikely to be interrupted, rather than stacking onto the read that emptied the queue.
+constexpr int kSaveIndexWriteIdleFrames = 60;
+// Work that blocks a frame is bracketed by these two. The main loop peeks a single instantaneous
+// pad sample per frame, so a button pressed and released inside the stall is never observed at
+// all; the sample history carries it, and replaying it costs the user a few frames of delay
+// instead of the press itself.
+SceCtrlData arm_input_recovery() {
+  SceCtrlData armed{};
+  sceCtrlPeekBufferPositive(0, &armed, 1);
+  return armed;
+}
+
+unsigned int buttons_pressed_since(const SceCtrlData &armed) {
+  SceCtrlData pads[64] = {};
+  const int count = sceCtrlPeekBufferPositive(0, pads, 64);
+  unsigned int seen = 0;
+  for (int i = 0; i < count; ++i) {
+    if (pads[i].timeStamp > armed.timeStamp) {
+      seen |= pads[i].buttons;
+    }
+  }
+  return seen;
+}
+
 constexpr std::size_t kMaxSdslotFileSize =
     kSdslotHeaderSize + kMaxSaveSlots * kSdslotRecordSize;
 
@@ -648,27 +674,23 @@ bool App::drain_pending_time_read() {
   // Synchronous mount, one save at a time. Deliberately not on a background thread: mounting from
   // a second thread leaked AppMgr mount slots until, mid-session, the system refused any further
   // mounts. Blocking is therefore unavoidable - the queue only makes sure it happens between the
-  // user's presses instead of under them.
-  SceCtrlData armed{};
-  sceCtrlPeekBufferPositive(0, &armed, 1);
+  // user's presses instead of under them. The index is not written here: that waits for a longer
+  // idle gap, so its own cost never lands on top of the read that emptied the queue.
+  const SceCtrlData armed = arm_input_recovery();
   resolve_save_time(save);
-  // Written once the queue runs dry rather than after every read: each write re-serializes the
-  // whole index, which is wasted work between two reads that are about to happen anyway. Losing
-  // power mid-queue only costs the unwritten reads, and those are re-read next boot.
-  if (pending_time_reads_.empty()) {
-    flush_save_index();
-  }
-
-  // The read stalled this frame, so any button pressed and released inside it never reached the
-  // loop's own peek. Recover it from the sample history and hand it to the next frame.
-  SceCtrlData pads[64] = {};
-  const int count = sceCtrlPeekBufferPositive(0, pads, 64);
-  for (int i = 0; i < count; ++i) {
-    if (pads[i].timeStamp > armed.timeStamp) {
-      deferred_buttons_ |= pads[i].buttons;
-    }
-  }
+  deferred_buttons_ |= buttons_pressed_since(armed);
   return true;
+}
+
+void App::write_save_index_when_idle() {
+  if (!save_index_dirty_) {
+    return;
+  }
+  // The write blocks the frame the same way a read does, so it gets the same recovery: a press
+  // that starts and ends inside it is replayed next frame instead of disappearing.
+  const SceCtrlData armed = arm_input_recovery();
+  flush_save_index();
+  deferred_buttons_ |= buttons_pressed_since(armed);
 }
 
 bool App::resolve_all_save_times() {
@@ -3281,7 +3303,11 @@ int App::run() {
         open_save_details();
       }
     } else if (input_idle_frames_ >= kSaveTimeReadIdleFrames) {
-      drain_pending_time_read();
+      // Reads first; the index write only happens once they are done and the pause has stretched
+      // well past the read gap, so the two never land on the same frame.
+      if (!drain_pending_time_read() && input_idle_frames_ >= kSaveIndexWriteIdleFrames) {
+        write_save_index_when_idle();
+      }
     }
 
     UiState ui_state;
