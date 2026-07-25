@@ -32,17 +32,16 @@ using SaveMetadataResolver =
 // percentage while scanning. The total is known up front from the directory listing.
 using SaveScanProgress = std::function<void(std::size_t done, std::size_t total)>;
 
-// time_cache and title_cache are optional accelerators: a save whose folder fingerprint matches
-// its time entry skips the metadata resolver, and one whose title entry is valid (see
-// SaveTitleCacheEntry) skips the param.sfo reads, with title_from_cache set so the caller knows
-// the app-database pass is not needed for it. The scan never writes the caches; callers rebuild
-// entries from the returned records.
+// index is an optional accelerator: a save whose folder fingerprint matches its entry and whose
+// time is resolved skips the metadata resolver, and one whose title half is valid (app-db titles
+// ignore the fingerprint, sfo-derived ones require it) skips the param.sfo reads, with
+// title_from_cache set so the caller knows the app-database pass is not needed for it. The scan
+// never writes the index; callers rebuild it from the returned records via build_save_index.
 std::vector<SaveRecord> scan_save_roots(
     const std::vector<SaveRoot> &roots,
     const SaveScanProgress &on_progress = {},
     const SaveMetadataResolver &resolve_metadata = {},
-    const SaveTimeCache *time_cache = nullptr,
-    const SaveTitleCache *title_cache = nullptr);
+    const SaveIndex *index = nullptr);
 // Builds the on-card index from freshly scanned (and app-db-annotated) records: one entry per
 // save, so entries for saves that no longer exist fall away. A record still awaiting its mount
 // keeps a previous resolved time while its folder fingerprint is unchanged; every other record's

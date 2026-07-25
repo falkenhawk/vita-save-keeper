@@ -247,8 +247,7 @@ SaveSortMode save_sort_mode_from_string(const std::string &value) {
 
 std::vector<SaveRecord> scan_save_roots(
     const std::vector<SaveRoot> &roots, const SaveScanProgress &on_progress,
-    const SaveMetadataResolver &resolve_metadata, const SaveTimeCache *time_cache,
-    const SaveTitleCache *title_cache) {
+    const SaveMetadataResolver &resolve_metadata, const SaveIndex *index) {
   const SaveMetadataResolver metadata_resolver =
       resolve_metadata ? resolve_metadata : resolve_save_metadata;
 
@@ -277,24 +276,29 @@ std::vector<SaveRecord> scan_save_roots(
     save.id = item.id;
     save.display_name = item.id;
     save.path = std::move(item.path);
-    // One stat-only walk per save. It is the freshness check for both caches: mount-resolved
-    // times for encrypted saves, resolver results for plain ones, and sfo-derived titles.
+    // One stat-only walk per save. It is the freshness check for both halves of the index:
+    // mount-resolved times for encrypted saves, resolver results for plain ones, and sfo-derived
+    // titles.
     save.fingerprint = compute_save_fingerprint(save.path);
     save.save_time_requires_mount =
         save.platform != SavePlatform::Psp && save_directory_has_pfs_metadata(save.path);
-    if (!save.save_time_requires_mount) {
-      const SaveTimeCacheEntry *cached_time = nullptr;
-      if (time_cache && save.fingerprint.ok) {
-        const auto found = time_cache->entries.find(save.id);
-        if (found != time_cache->entries.end() &&
-            found->second.fingerprint.matches(save.fingerprint)) {
-          cached_time = &found->second;
-        }
+    const SaveIndexEntry *cached = nullptr;
+    if (index) {
+      const auto found = index->entries.find(save.id);
+      if (found != index->entries.end()) {
+        cached = &found->second;
       }
-      if (cached_time) {
-        if (cached_time->has_time) {
-          save.saved_at = cached_time->saved_at;
-          save.saved_at_epoch = save_datetime_to_local_epoch(cached_time->saved_at);
+    }
+    const bool fingerprint_fresh =
+        cached && save.fingerprint.ok && cached->fingerprint.matches(save.fingerprint);
+    if (!save.save_time_requires_mount) {
+      // A resolved time is trusted only while the folder is unchanged. A never-resolved entry
+      // is not a time even when the fingerprint matches (a restore can recreate identical
+      // content right after its time was cleared), so it falls through to the resolver.
+      if (fingerprint_fresh && cached->time_resolved) {
+        if (cached->has_time) {
+          save.saved_at = cached->saved_at;
+          save.saved_at_epoch = save_datetime_to_local_epoch(cached->saved_at);
           save.save_time_known = true;
         }
       } else {
@@ -304,22 +308,13 @@ std::vector<SaveRecord> scan_save_roots(
         save.save_time_known = metadata.source != SaveTimeSource::BackupClock;
       }
     }
-    const SaveTitleCacheEntry *cached_title = nullptr;
-    if (title_cache) {
-      const auto found = title_cache->entries.find(save.id);
-      if (found != title_cache->entries.end() &&
-          (found->second.from_app_db ||
-           (save.fingerprint.ok && found->second.fingerprint.matches(save.fingerprint)))) {
-        cached_title = &found->second;
-      }
-    }
-    if (cached_title) {
-      save.display_name = cached_title->display_name.empty() ? save.id
-                                                             : cached_title->display_name;
-      save.title_id = cached_title->title_id;
-      save.icon_path = cached_title->icon_path;
+    if (cached && (cached->from_app_db || fingerprint_fresh)) {
+      save.display_name = cached->display_name.empty() ? save.id
+                                                       : cached->display_name;
+      save.title_id = cached->title_id;
+      save.icon_path = cached->icon_path;
       save.title_from_cache = true;
-      save.title_from_app_db = cached_title->from_app_db;
+      save.title_from_app_db = cached->from_app_db;
     } else {
       apply_sfo_metadata(&save);
     }

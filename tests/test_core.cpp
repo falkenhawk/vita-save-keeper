@@ -996,24 +996,29 @@ void test_scan_fingerprints_every_save_and_flags_mount_requiring_ones() {
   std::filesystem::remove_all(base);
 }
 
-void test_scan_consumes_time_and_title_caches_when_fingerprints_match() {
+void test_scan_consumes_index_when_fingerprints_match() {
   const std::filesystem::path base =
-      std::filesystem::temp_directory_path() / "save-keeper-scan-cache-test";
+      std::filesystem::temp_directory_path() / "save-keeper-scan-index-test";
   std::filesystem::remove_all(base);
   std::filesystem::create_directories(base / "vita" / "BHBB00001");
   { std::ofstream(base / "vita" / "BHBB00001" / "save.dat", std::ios::binary) << "homebrew"; }
   const std::vector<vsm::SaveRoot> roots = {
       {vsm::SavePlatform::Vita, (base / "vita").string()}};
 
-  // First scan derives everything and gives us the fingerprint to build cache entries from.
+  // First scan derives everything and gives us the fingerprint to build the entry from.
   const std::vector<vsm::SaveRecord> cold = vsm::scan_save_roots(roots, {}, {});
   EXPECT_EQ(cold.size(), static_cast<std::size_t>(1));
 
-  vsm::SaveTimeCache times;
-  times.entries["BHBB00001"] = {cold[0].fingerprint, true, {2026, 7, 1, 12, 0, 0}};
-  vsm::SaveTitleCache titles;
-  titles.entries["BHBB00001"] = {false, cold[0].fingerprint, "Cached Homebrew", "BHBB00001",
-                                 "cached-icon.png"};
+  vsm::SaveIndex index;
+  vsm::SaveIndexEntry entry;
+  entry.fingerprint = cold[0].fingerprint;
+  entry.time_resolved = true;
+  entry.has_time = true;
+  entry.saved_at = {2026, 7, 1, 12, 0, 0};
+  entry.display_name = "Cached Homebrew";
+  entry.title_id = "BHBB00001";
+  entry.icon_path = "cached-icon.png";
+  index.entries["BHBB00001"] = entry;
 
   // A cached save must not invoke the metadata resolver at all, and the cached title must win
   // (distinct from anything the folder could produce - there is no param.sfo in it).
@@ -1024,7 +1029,7 @@ void test_scan_consumes_time_and_title_caches_when_fingerprints_match() {
     return vsm::resolve_save_metadata(path, clock);
   };
   const std::vector<vsm::SaveRecord> warm =
-      vsm::scan_save_roots(roots, {}, counting_resolver, &times, &titles);
+      vsm::scan_save_roots(roots, {}, counting_resolver, &index);
   EXPECT_EQ(resolver_calls, static_cast<std::size_t>(0));
   EXPECT_EQ(warm.size(), static_cast<std::size_t>(1));
   EXPECT_TRUE(warm[0].save_time_known);
@@ -1033,19 +1038,40 @@ void test_scan_consumes_time_and_title_caches_when_fingerprints_match() {
   EXPECT_EQ(warm[0].display_name, "Cached Homebrew");
   EXPECT_EQ(warm[0].icon_path, "cached-icon.png");
 
-  // Touch the save: both caches must be bypassed again.
+  // A resolved-empty time (savedAt null) is the negative cache: consumed without a resolver
+  // call, and the save's time stays unknown.
+  index.entries["BHBB00001"].has_time = false;
+  const std::vector<vsm::SaveRecord> negative =
+      vsm::scan_save_roots(roots, {}, counting_resolver, &index);
+  EXPECT_EQ(resolver_calls, static_cast<std::size_t>(0));
+  EXPECT_TRUE(!negative[0].save_time_known);
+
+  // A never-resolved time is not consumed even though the fingerprint still matches (a restore
+  // can recreate identical content right after its time was cleared): the resolver must run.
+  // The title half still counts as fresh.
+  index.entries["BHBB00001"].time_resolved = false;
+  const std::vector<vsm::SaveRecord> time_cleared =
+      vsm::scan_save_roots(roots, {}, counting_resolver, &index);
+  EXPECT_EQ(resolver_calls, static_cast<std::size_t>(1));
+  EXPECT_TRUE(time_cleared[0].title_from_cache);
+  index.entries["BHBB00001"].time_resolved = true;
+  index.entries["BHBB00001"].has_time = true;
+
+  // Touch the save: the time and the sfo-derived title must both be re-derived.
   { std::ofstream(base / "vita" / "BHBB00001" / "save.dat", std::ios::binary) << "homebrew!!"; }
   const std::vector<vsm::SaveRecord> changed =
-      vsm::scan_save_roots(roots, {}, counting_resolver, &times, &titles);
-  EXPECT_EQ(resolver_calls, static_cast<std::size_t>(1));
+      vsm::scan_save_roots(roots, {}, counting_resolver, &index);
+  EXPECT_EQ(resolver_calls, static_cast<std::size_t>(2));
   EXPECT_TRUE(!changed[0].title_from_cache);
   EXPECT_EQ(changed[0].display_name, "BHBB00001");
 
-  // An app-database entry ignores the fingerprint: it stays valid until the db stamp changes,
-  // which the caller checks before passing the cache in.
-  titles.entries["BHBB00001"].from_app_db = true;
+  // An app-database title ignores the fingerprint: it stays valid until the db stamp changes,
+  // which the caller checks before passing the index in. The stale time is still re-derived
+  // (resolver call three), only the title half survives.
+  index.entries["BHBB00001"].from_app_db = true;
   const std::vector<vsm::SaveRecord> db_titled =
-      vsm::scan_save_roots(roots, {}, counting_resolver, &times, &titles);
+      vsm::scan_save_roots(roots, {}, counting_resolver, &index);
+  EXPECT_EQ(resolver_calls, static_cast<std::size_t>(3));
   EXPECT_TRUE(db_titled[0].title_from_cache);
   EXPECT_TRUE(db_titled[0].title_from_app_db);
   EXPECT_EQ(db_titled[0].display_name, "Cached Homebrew");
@@ -2527,7 +2553,7 @@ int main() {
   test_save_fingerprint_reflects_folder_content();
   test_save_time_cache_roundtrip_and_rejects_bad_input();
   test_scan_fingerprints_every_save_and_flags_mount_requiring_ones();
-  test_scan_consumes_time_and_title_caches_when_fingerprints_match();
+  test_scan_consumes_index_when_fingerprints_match();
   test_save_title_cache_roundtrip_and_stat_stamp();
   test_save_index_roundtrip_covers_all_three_time_states();
   test_save_index_reads_version_one_titles_forward();
