@@ -1767,13 +1767,14 @@ void Ui::draw_busy(const std::string &label, long long done, long long total,
   }
   // Spacing is measured in rendered ink, not cap height: the title's quotes reach above the caps
   // and its descenders below the baseline, so it occupies 18 rows while the digits occupy 12.
-  // The title gets 19px of air under the accent strip and 16px down to the bar - deliberately
-  // top-heavy, since the strip is a hard edge and the bar is not - and the percent sits on an
-  // even 17/17 in the space below.
-  draw_text(fonts_, kBoxX + 24, kBoxY + 37, kColorText, kTextSizeNormal, fitted_label.c_str());
+  // The title gets 20px of air under the accent strip and 15px down to the bar - deliberately
+  // top-heavy, since the strip is a hard edge and the bar is not - and the percent hugs the bar
+  // at 13px with 21px left to the bottom edge, so the caption reads as the bar's own value.
+  // The batch cancel hint keeps its own line.
+  draw_text(fonts_, kBoxX + 24, kBoxY + 38, kColorText, kTextSizeNormal, fitted_label.c_str());
   if (batch_transfer) {
     const int pw = text_width(fonts_, kTextSizeSmall, transfer_pct);
-    draw_text(fonts_, kBoxX + kBoxW - 24 - pw, kBoxY + 37, kColorAccent, kTextSizeSmall,
+    draw_text(fonts_, kBoxX + kBoxW - 24 - pw, kBoxY + 38, kColorAccent, kTextSizeSmall,
               transfer_pct);
   }
 
@@ -1813,11 +1814,12 @@ void Ui::draw_busy(const std::string &label, long long done, long long total,
     show_overall = true;
   }
   if (show_overall) {
-    draw_text(fonts_, bar_x, kBoxY + 94, kColorMuted, kTextSizeSmall, overall_pct);
+    draw_text(fonts_, bar_x, kBoxY + 90, kColorMuted, kTextSizeSmall, overall_pct);
   }
 
   if (batch_active_) {
-    // "hold (cancel) to cancel" hint, right-aligned on the percent line.
+    // "hold (cancel) to cancel" hint, right-aligned under the bar; the percent label sits 4px
+    // higher than this line by design.
     const char *hold_text = "hold";
     const char *cancel_text = "to cancel";
     const int hold_w = text_width(fonts_, kTextSizeSmall, hold_text);

@@ -291,6 +291,28 @@ bool read_text_file(const char *path, std::string *contents) {
   }
 }
 
+// Single-operation transfer budget: while a scope is active, the progress hook maps every
+// reported transfer onto one continuous bar over the operation's payload bytes. Small metadata
+// requests hold the bar in place instead of sweeping, and a finished payload's bytes move into
+// the base so a follow-up transfer (the companion) holds the bar full rather than restarting it.
+// The batch never opens a scope; its corner percent keeps its own endpoint-suppression rules.
+long long g_transfer_budget_base = 0;
+long long g_transfer_budget_total = 0;
+
+struct TransferBudgetScope {
+  explicit TransferBudgetScope(long long total_bytes) {
+    g_transfer_budget_base = 0;
+    g_transfer_budget_total = total_bytes > 0 ? total_bytes : 0;
+  }
+  ~TransferBudgetScope() {
+    g_transfer_budget_base = 0;
+    g_transfer_budget_total = 0;
+  }
+  static void advance(long long bytes) { g_transfer_budget_base += bytes; }
+  TransferBudgetScope(const TransferBudgetScope &) = delete;
+  TransferBudgetScope &operator=(const TransferBudgetScope &) = delete;
+};
+
 bool write_text_file(const char *path, const std::string &contents) {
   ensure_directory(kDataRoot);
   FILE *file = std::fopen(path, "wb");
@@ -1908,6 +1930,12 @@ void App::handle_transfer_button() {
   const std::string busy_label =
       ui_.compose_modal_label("Uploading ", display_backup_name(backup_name), "");
   BusyLabelScope busy(busy_label.c_str());
+  // One bar for the whole operation: the folder lookups hold it at zero, the archive fills it,
+  // and the companion upload holds it full. Without a readable size the hook reports as before.
+  bool zip_size_ok = false;
+  const std::uint64_t zip_bytes = archive_file_size(
+      local_backup_archive_path(kBackupRoot, selected->id, backup_name), &zip_size_ok);
+  TransferBudgetScope budget(zip_size_ok ? static_cast<long long>(zip_bytes) : 0);
   const BackupUploadResult uploaded = upload_local_backup(*selected, backup_name);
   if (!uploaded.ok) {
     return;
@@ -2392,6 +2420,13 @@ BackupUploadResult App::upload_local_backup_impl(const SaveRecord &save,
     set_status(StatusKind::Error, "Cloud upload failed.");
     return result;
   }
+  // The archive's bytes are done; folding them into the budget base keeps the single-operation
+  // bar full through the companion upload and any index refresh. A no-op when no budget is open.
+  bool uploaded_size_ok = false;
+  const std::uint64_t uploaded_bytes = archive_file_size(archive_path, &uploaded_size_ok);
+  if (uploaded_size_ok) {
+    TransferBudgetScope::advance(static_cast<long long>(uploaded_bytes));
+  }
 
   // The upload response carries the new file's id; slotting it into the index directly keeps the
   // Drive list current without another full sync.
@@ -2829,6 +2864,14 @@ int App::run() {
   }
   network_connected_ = HttpClient::network_reachable();
   HttpClient::set_progress_hook([this](const std::string &label, long long done, long long total) {
+    if (g_transfer_budget_total > 0) {
+      // One continuous bar per operation: payload requests advance it, metadata requests hold it.
+      const long long shown =
+          total > 0 ? std::min(g_transfer_budget_base + done, g_transfer_budget_total)
+                    : g_transfer_budget_base;
+      ui_.draw_busy(label, shown, g_transfer_budget_total);
+      return;
+    }
     ui_.draw_busy(label, done, total);
   });
   HttpClient::set_cancel_check([this] { return poll_batch_cancel(); });
