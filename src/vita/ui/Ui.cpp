@@ -1228,7 +1228,8 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
     }
     const char *primary_label = "Backup";
     if (state.data_folders_row) {
-      primary_label = "Data folders";
+      // Opens the picker; the focused row already reads "Data folders (N)".
+      primary_label = "Open";
     } else if (is_snapshot) {
       primary_label = "Restore";
     }
@@ -1305,15 +1306,14 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
       }
       const int text_y = y + 24;
       if (row.parent_link) {
-        // The way up: no size, no state, just the conventional name.
-        draw_text(fonts_, kListX + 16, text_y, focused ? kColorText : kColorMuted, kTextSizeSmall,
+        // The way up: no size, no marker, just the conventional name, aligned with the others.
+        draw_text(fonts_, kListX + 34, text_y, focused ? kColorText : kColorMuted, kTextSizeSmall,
                   "..");
         y += kRowPitch;
         continue;
       }
       // Right column is always the folder's size: measured bytes, a spinner while this row's walk
-      // runs, or "..." while nothing has measured it yet. Inclusion state lives in a small tag
-      // after the name instead, so an included folder still shows how big it is.
+      // runs, or "..." while nothing has measured it yet.
       int right_w;
       if (row.sizing) {
         // The spinner's ring is radius 6, so 16 reserves its full width plus a little air; the
@@ -1328,26 +1328,25 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
         draw_text(fonts_, kSizeRight - right_w, text_y, focused ? kColorText : kColorMuted,
                   kTextSizeSmall, size_text.c_str());
       }
-      // State tag: green "included" whether directly included or covered by an included parent
-      // (both are backed up; Square explains the difference), dim "in use" for another entry's.
-      const char *tag = nullptr;
-      unsigned int tag_color = kColorIdleDot;
-      if (row.tracked_here || !row.covered_by.empty()) {
-        tag = "included";
-        tag_color = kColorSuccess;
-      } else if (row.tracked_elsewhere) {
-        tag = "in use";
+      // Inclusion marker: a disc in a fixed column ahead of the name, so states line up down the
+      // list instead of trailing ragged after names of every length. Bright green = included here
+      // (directly, or through an included parent - Square explains the difference), grey = another
+      // entry's. No marker means available.
+      if (row.tracked_here || !row.covered_by.empty() || row.tracked_elsewhere) {
+        const unsigned int mark_color = row.tracked_elsewhere
+                                            ? kColorIdleDot
+                                            : (row.tracked_here
+                                                   ? kColorSuccess
+                                                   : (kColorSuccess & 0x00FFFFFFu) | 0x8C000000u);
+        vita2d_draw_fill_circle(static_cast<float>(kListX) + 22.0f,
+                                static_cast<float>(y) + 18.0f, 4.0f, mark_color);
       }
-      const int tag_w = tag ? measure_text(kTextSizeTiny, tag) + 10 : 0;
       const unsigned int name_color =
           row.tracked_elsewhere ? kColorIdleDot : (focused ? kColorText : kColorMuted);
-      const int name_max = kSizeRight - right_w - 16 - tag_w - (kListX + 16);
+      const int name_x = kListX + 34;
+      const int name_max = kSizeRight - right_w - 16 - name_x;
       const std::string name = fit_text(kTextSizeSmall, row.name, std::max(40, name_max));
-      draw_text(fonts_, kListX + 16, text_y, name_color, kTextSizeSmall, name.c_str());
-      if (tag) {
-        draw_text(fonts_, kListX + 16 + measure_text(kTextSizeSmall, name.c_str()) + 10, text_y,
-                  tag_color, kTextSizeTiny, tag);
-      }
+      draw_text(fonts_, name_x, text_y, name_color, kTextSizeSmall, name.c_str());
       y += kRowPitch;
     }
     if (state.rows.size() > kVisibleRows) {
@@ -1382,9 +1381,9 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
   // that is covered (a parent is included), in use by another entry, or the ".." link offers none.
   if (focused_row && !focused_row->parent_link && !focused_row->tracked_elsewhere &&
       focused_row->covered_by.empty()) {
-    hints.push_back({ButtonSymbol::Square,
-                     focused_row->tracked_here ? "Exclude" : "Include in backup", nullptr,
-                     nullptr});
+    hints.push_back(
+        {ButtonSymbol::Square, focused_row->tracked_here ? "Exclude" : "Include", nullptr,
+         nullptr});
   }
   if (focused_row) {
     hints.push_back({primary, focused_row->parent_link ? "Up" : "Open", nullptr, nullptr});
@@ -1893,9 +1892,11 @@ void Ui::draw_footer(const UiState &state) {
   } else if (!focused_row->has_remote()) {
     hints.push_back({ButtonSymbol::Select, "Upload", nullptr, nullptr});
   }
+  // On the "Data folders" row the press opens the picker; the row already names what it is, so
+  // the hint names the action.
   const char *primary_label = "Restore";
   if (data_row_focused) {
-    primary_label = "Data folders";
+    primary_label = "Open";
   } else if (state.selected_backup == 0) {
     primary_label = "Backup";
   }

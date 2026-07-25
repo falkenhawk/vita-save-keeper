@@ -3291,9 +3291,10 @@ void App::reload_browser_rows(bool keep_selection) {
     }
   }
   // Re-tagging after a toggle must not move the cursor - the folder list is the same, only its
-  // tags changed. Drilling in or out passes false and starts at the top.
+  // tags changed. Drilling in or out passes false and starts at the top. A size walk in flight is
+  // left running: its result lands in the cache wherever the user is by then, and the sizing flag
+  // is re-marked below if its row is still on screen.
   const std::size_t previous_selected = directory_browser_.selected;
-  abort_browser_size_walk();
   directory_browser_.rows.clear();
   directory_browser_.selected = 0;
   directory_browser_.large_confirm_pending = false;
@@ -3336,6 +3337,8 @@ void App::reload_browser_rows(bool keep_selection) {
     if (cached != browser_size_cache_.end()) {
       row.size_known = true;
       row.size_bytes = cached->second;
+    } else if (browser_size_walk_.active && browser_size_walk_.target == child) {
+      row.sizing = true;
     }
     directory_browser_.rows.push_back(std::move(row));
   }
@@ -3364,9 +3367,9 @@ void App::browser_go_up() {
 
 void App::schedule_browser_size_resolve() {
   // Debounce until the focused row settles, mirroring the save-time resolve, so scrolling the list
-  // does not size every folder it passes. Rows already sized (or the ".." link) need nothing; a
-  // walk for a row the cursor left is abandoned.
-  abort_browser_size_walk();
+  // does not size every folder it passes. A walk already running is NOT abandoned - its progress
+  // (VitaDB is thousands of stat calls) finishes into the cache, and completion chains to the row
+  // the cursor sits on then.
   if (directory_browser_.selected >= directory_browser_.rows.size() ||
       directory_browser_.rows[directory_browser_.selected].size_known ||
       directory_browser_.rows[directory_browser_.selected].parent_link) {
@@ -3377,6 +3380,11 @@ void App::schedule_browser_size_resolve() {
 }
 
 void App::start_browser_size_walk() {
+  if (browser_size_walk_.active) {
+    // One walk at a time; when it completes it chains straight to the focused row, so this row is
+    // not forgotten, just queued behind the work already under way.
+    return;
+  }
   if (directory_browser_.selected >= directory_browser_.rows.size()) {
     return;
   }
@@ -3405,15 +3413,24 @@ void App::advance_browser_size_walk() {
   if (!browser_size_walk_.active) {
     return;
   }
-  // One frame's slice. ~256 stat/readdir steps at 60 fps clears roughly 15k files a second, so
-  // even VitaDB's thumbnail store sizes in about a second with input still live the whole time -
-  // the synchronous walk this replaces froze the screen for that long instead.
-  constexpr int kStepsPerFrame = 256;
+  // One frame's slice, budgeted by TIME, not by step count: a stat on the memory card's FAT stack
+  // can cost a millisecond or more when a directory holds thousands of entries, so a fixed step
+  // count still ate whole frames on trees like VitaDB's. 5 ms leaves most of a 60 fps frame for
+  // input and drawing however slow the card is; the step cap is only a backstop for a clock hiccup.
+  constexpr SceUInt64 kFrameBudgetUs = 5000;
+  constexpr int kMaxStepsPerFrame = 4096;
+  const SceUInt64 slice_start = sceKernelGetProcessTimeWide();
   BrowserSizeWalk &walk = browser_size_walk_;
-  for (int step = 0; step < kStepsPerFrame; ++step) {
+  for (int step = 0; step < kMaxStepsPerFrame; ++step) {
+    if ((step & 15) == 0 && step != 0 &&
+        sceKernelGetProcessTimeWide() - slice_start >= kFrameBudgetUs) {
+      return;
+    }
     if (!walk.dir) {
       if (walk.pending.empty()) {
-        // Done: remember the total and fill the row in, if it is still on screen.
+        // Done: remember the total, fill the row in if the walk's directory is the one on screen,
+        // and chain straight to the row the cursor sits on now - so scrolling away mid-walk never
+        // loses the progress, it just queues the next measurement.
         browser_size_cache_[walk.target] = walk.bytes;
         const std::size_t slash = walk.target.rfind('/');
         if (walk.target.substr(0, slash) == directory_browser_.current_path) {
@@ -3427,6 +3444,7 @@ void App::advance_browser_size_walk() {
           }
         }
         abort_browser_size_walk();
+        start_browser_size_walk();
         return;
       }
       walk.dir_path = walk.pending.back();
@@ -3496,9 +3514,13 @@ void App::browser_toggle_selected() {
   if (!row.size_known) {
     // The debounce usually has this already; measure now otherwise, since the size caps below need
     // it. A deliberate press gets the standard busy modal - the incremental walk exists so that
-    // *browsing* never blocks, but here the user asked for this folder specifically.
+    // *browsing* never blocks, but here the user asked for this folder specifically. A walk on the
+    // same folder is dropped (this measurement replaces it); one on another folder keeps going.
     ui_.draw_busy("Measuring folder", 0, -1);
-    abort_browser_size_walk();
+    if (browser_size_walk_.active &&
+        browser_size_walk_.target == full_path) {
+      abort_browser_size_walk();
+    }
     bool ok = false;
     const std::uint64_t bytes = compute_folder_size(full_path, &ok);
     if (ok) {
