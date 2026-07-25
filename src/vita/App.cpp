@@ -431,13 +431,18 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
 void App::load_settings() {
   std::string text;
   if (read_text_file(kSettingsPath, &text)) {
-    sort_mode_ = parse_app_settings(text).sort_mode;
+    const AppSettings settings = parse_app_settings(text);
+    sort_mode_ = settings.sort_mode;
+    cleaned_empty_backup_folders_ = settings.cleaned_empty_backup_folders;
   }
 }
 
 void App::save_settings() {
   AppSettings settings;
   settings.sort_mode = sort_mode_;
+  // Every field has to be mirrored back here: this builds a fresh AppSettings, so anything left
+  // out is erased from settings.txt the next time any other setting changes.
+  settings.cleaned_empty_backup_folders = cleaned_empty_backup_folders_;
   write_text_file(kSettingsPath, serialize_app_settings(settings));
 }
 
@@ -2747,6 +2752,15 @@ int App::run() {
   store_scanned_save_times();
   apply_save_time_cache();
   load_settings();
+  // One pass for folders emptied by older versions, which left them behind. Deletes clean up as
+  // they go now, so this never needs to run again. It sits under the "Loading saves" modal that is
+  // already on screen - no extra stage, no extra label. Marked done even when some folder resists
+  // removal: a read-only card fails identically on every boot, and retrying forever buys nothing.
+  if (!cleaned_empty_backup_folders_) {
+    remove_empty_backup_folders(kBackupRoot);
+    cleaned_empty_backup_folders_ = true;
+    save_settings();
+  }
   if (save_sort_requires_all_times(sort_mode_) && !resolve_all_save_times()) {
     // Canceled the startup read (the saved sort was Last Saved); fall back to name.
     sort_mode_ = SaveSortMode::Name;

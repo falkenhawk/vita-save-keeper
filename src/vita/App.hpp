@@ -161,6 +161,7 @@ private:
   std::vector<std::size_t> visible_saves_;
   SaveCategory category_{SaveCategory::VitaGame};
   SaveSortMode sort_mode_{SaveSortMode::Name};
+  bool cleaned_empty_backup_folders_{};
   // Which save was focused in each category tab, so L/R returns to where the user left off.
   std::array<std::size_t, kSaveCategoryCount> category_selection_{};
   std::vector<std::string> local_backups_;
