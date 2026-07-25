@@ -407,6 +407,8 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
     }
     const BackupResult backup = create_backup_archive(request);
     if (!backup.ok) {
+      // create_backup_archive makes the folder before any failure it can realistically hit here.
+      remove_local_backup_folder_if_empty(kBackupRoot, save.id);
       snapshot.error = backup.error;
       return snapshot;
     }
@@ -1027,6 +1029,9 @@ void App::perform_scoped_delete(bool delete_local, bool delete_remote) {
         local_backup_metadata_path(kBackupRoot, selected->id, metadata_name);
     std::remove(metadata_path.c_str());
   }
+  // The folder is worth nothing without backups in it. Unconditional because a Cloud-only delete
+  // also drops the stale local companion, and the call does nothing while anything remains.
+  remove_local_backup_folder_if_empty(kBackupRoot, selected->id);
   if (selected_backup_ > backup_count()) {
     selected_backup_ = backup_count();
   }
@@ -1142,6 +1147,8 @@ void App::handle_restore() {
     if (!download.ok) {
       // A failed stream leaves a partial zip that would list as a real backup on next refresh.
       std::remove(archive_path.c_str());
+      // ensure_parent_directory created the folder for this download; do not leave it behind empty.
+      remove_local_backup_folder_if_empty(kBackupRoot, save.id);
       restore_confirmation_pending_ = false;
       set_status(StatusKind::Error, "Cloud download failed.");
       return;
@@ -1786,6 +1793,8 @@ bool App::download_remote_backup_to_card(const SaveRecord &save, const BackupRow
   });
   if (!download.ok) {
     std::remove(temporary_path.c_str());
+    // A Drive-only row may have had its folder created just above; do not leave it behind empty.
+    remove_local_backup_folder_if_empty(kBackupRoot, save.id);
     if (error) {
       *error = "Cloud download failed.";
     }
@@ -1793,6 +1802,9 @@ bool App::download_remote_backup_to_card(const SaveRecord &save, const BackupRow
   }
   std::string publish_error;
   if (!publish_backup_download(temporary_path, archive_path, &publish_error)) {
+    // publish_backup_download already removed the temporary. When it failed because the backup
+    // already exists the folder is not empty and this does nothing.
+    remove_local_backup_folder_if_empty(kBackupRoot, save.id);
     if (error) {
       *error = publish_error == "backup already exists"
                    ? "This backup is already on the card."
@@ -2008,30 +2020,37 @@ SaveMetadataJsonResult App::download_remote_backup_metadata(
   // Download beside the cache and validate first. A broken response must not replace a healthy
   // companion left by an earlier run.
   const std::string temporary_path = metadata_path + ".download";
+  // Discarding must also drop a folder that ensure_parent_directory created just for this
+  // download; when the save has no card backups the folder would otherwise linger empty. Kept
+  // in-function because the rename-failure path below still reports success to the caller.
+  const auto discard_download = [&] {
+    std::remove(temporary_path.c_str());
+    remove_local_backup_folder_if_empty(kBackupRoot, save.id);
+  };
   const std::string url = std::string(kDriveFilesEndpoint) + "/" +
                           form_url_encode(sidecar.id) + "?alt=media";
   const HttpResponse downloaded = drive_request([&](const std::string &token) {
     return HttpClient().download_file(url, temporary_path, token);
   });
   if (!downloaded.ok) {
-    std::remove(temporary_path.c_str());
+    discard_download();
     return {false, {}, {}, "slot details download failed"};
   }
   SaveMetadataJsonResult metadata = read_save_metadata_json(temporary_path);
   if (!save_metadata_is_usable(metadata, expected_identity)) {
-    std::remove(temporary_path.c_str());
+    discard_download();
     metadata.ok = false;
     metadata.error = "slot details do not match this backup";
     return metadata;
   }
   if (!upgrade_legacy_metadata_file(temporary_path, expected_identity, &metadata)) {
-    std::remove(temporary_path.c_str());
+    discard_download();
     return metadata;
   }
   if (std::rename(temporary_path.c_str(), metadata_path.c_str()) != 0) {
     // The details were downloaded and validated; only caching them for next time failed. Return
     // the in-memory metadata so the screen can still show it instead of "unavailable".
-    std::remove(temporary_path.c_str());
+    discard_download();
     metadata.error.clear();
   }
   return metadata;
