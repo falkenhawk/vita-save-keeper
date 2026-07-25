@@ -4,6 +4,12 @@ All notable changes to Save Keeper are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- deleting a game's last backup now removes its folder from the memory card instead of leaving an
+  empty one behind, and folders left empty by earlier versions are cleared out on the next launch
+
 ## [1.1.1] - 2026-07-25
 
 ### Changed
