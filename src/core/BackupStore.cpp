@@ -99,6 +99,11 @@ std::string local_backup_metadata_path(const std::string &backup_root, const std
                    backup_metadata_name(backup_name));
 }
 
+void remove_local_backup_folder_if_empty(const std::string &backup_root,
+                                         const std::string &save_id) {
+  rmdir(join_path(backup_root, normalized_save_folder(save_id)).c_str());
+}
+
 std::string allocate_backup_name(const BackupTimestamp &timestamp, const std::string &suffix,
                                  const std::vector<std::string> &local_names,
                                  const std::vector<std::string> &remote_names) {

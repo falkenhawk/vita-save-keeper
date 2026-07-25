@@ -14,6 +14,13 @@ std::string local_backup_archive_path(const std::string &backup_root, const std:
                                       const std::string &backup_name);
 std::string local_backup_metadata_path(const std::string &backup_root, const std::string &save_id,
                                        const std::string &backup_name);
+
+// Removes a save's backup folder once nothing is left inside it. rmdir refuses a non-empty
+// directory, so a leftover companion - the cached details of a backup that now lives only on
+// Drive - always keeps its folder. Failure is not reported: an empty folder is harmless.
+void remove_local_backup_folder_if_empty(const std::string &backup_root,
+                                         const std::string &save_id);
+
 std::string allocate_backup_name(const BackupTimestamp &timestamp, const std::string &suffix,
                                  const std::vector<std::string> &local_names,
                                  const std::vector<std::string> &remote_names);

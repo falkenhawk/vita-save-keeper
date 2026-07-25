@@ -1445,6 +1445,35 @@ void test_backup_store_lists_local_zip_backups_newest_first() {
   std::filesystem::remove_all(base);
 }
 
+void test_backup_store_removes_the_save_folder_only_when_it_is_empty() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-empty-folder-test";
+  std::filesystem::remove_all(base);
+  const std::filesystem::path folder = base / "PCSE00120_ Persona_4";
+  std::filesystem::create_directories(folder);
+  { std::ofstream(folder / "2026-05-21 16-14.zip") << "backup"; }
+
+  // A folder holding a backup is never touched.
+  vsm::remove_local_backup_folder_if_empty(base.string(), "PCSE00120: Persona/4");
+  EXPECT_TRUE(std::filesystem::exists(folder));
+
+  // A leftover companion is the cached metadata of a Cloud-only backup, so it also protects the
+  // folder - only a truly empty folder goes away.
+  std::filesystem::remove(folder / "2026-05-21 16-14.zip");
+  { std::ofstream(folder / "2026-05-21 16-14.json") << "metadata"; }
+  vsm::remove_local_backup_folder_if_empty(base.string(), "PCSE00120: Persona/4");
+  EXPECT_TRUE(std::filesystem::exists(folder));
+
+  std::filesystem::remove(folder / "2026-05-21 16-14.json");
+  vsm::remove_local_backup_folder_if_empty(base.string(), "PCSE00120: Persona/4");
+  EXPECT_TRUE(!std::filesystem::exists(folder));
+
+  // A save that never had a backup folder is not an error.
+  vsm::remove_local_backup_folder_if_empty(base.string(), "missing-save");
+
+  std::filesystem::remove_all(base);
+}
+
 void test_backup_store_builds_normalized_archive_path() {
   EXPECT_EQ(vsm::local_backup_archive_path("/backups", "PCSE00120: Persona/4",
                                            "2026-05-21 16-14.zip"),
@@ -2164,6 +2193,7 @@ int main() {
   test_backup_archive_missing_file_does_not_clear_destination();
   test_backup_store_lists_local_zip_backups_newest_first();
   test_backup_store_builds_normalized_archive_path();
+  test_backup_store_removes_the_save_folder_only_when_it_is_empty();
   test_backup_download_publication_is_exclusive_and_cleans_temporary_files();
   test_google_auth_builds_device_code_request_body();
   test_google_auth_builds_token_poll_request_body();
