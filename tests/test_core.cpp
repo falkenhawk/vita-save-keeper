@@ -1092,6 +1092,131 @@ void test_save_title_cache_roundtrip_and_stat_stamp() {
   std::filesystem::remove_all(base);
 }
 
+void test_save_index_roundtrip_covers_all_three_time_states() {
+  vsm::SaveIndex index;
+  index.app_db_mtime = 1784971273LL;
+  index.app_db_size = 1134592LL;
+  // Known time; titleId equals the key, so the writer omits it and the reader restores it.
+  vsm::SaveIndexEntry known;
+  known.fingerprint = {true, 1704639788LL, 12LL, 471064LL};
+  known.time_resolved = true;
+  known.has_time = true;
+  known.saved_at = {2024, 1, 7, 16, 57, 38};
+  known.from_app_db = true;
+  known.display_name = "Adrenaline Bubbles Manager";
+  known.title_id = "ADRBUBMAN";
+  known.icon_path = "ur0:appmeta/ADRBUBMAN/icon0.png";
+  index.entries["ADRBUBMAN"] = known;
+  // Resolved to no readable time (savedAt null), sfo-derived title, explicitly empty titleId.
+  vsm::SaveIndexEntry no_time;
+  no_time.fingerprint = {true, 1579216248LL, 4LL, 65536LL};
+  no_time.time_resolved = true;
+  no_time.display_name = "CORPSE PARTY";
+  no_time.icon_path = "ux0:pspemu/PSP/SAVEDATA/NPEH00130USER1/ICON0.PNG";
+  index.entries["NPEH00130USER1"] = no_time;
+  // Never resolved: an encrypted save still waiting for its first mount.
+  vsm::SaveIndexEntry unresolved;
+  unresolved.fingerprint = {true, 1784971117LL, 12LL, 471064LL};
+  unresolved.from_app_db = true;
+  unresolved.display_name = "VitaShell";
+  unresolved.title_id = "VITASHELL";
+  unresolved.icon_path = "ur0:appmeta/VITASHELL/icon0.png";
+  index.entries["VITASHELL"] = unresolved;
+  // Partial fingerprint walk (some file unreadable): the entry survives, but the fingerprint
+  // must come back still refusing to match anything.
+  vsm::SaveIndexEntry partial;
+  partial.fingerprint = {false, 500LL, 3LL, 900LL};
+  partial.from_app_db = true;
+  partial.display_name = "Half Seen";
+  partial.title_id = "PCSX00001";
+  partial.icon_path = "ur0:appmeta/PCSX00001/icon0.png";
+  index.entries["PCSX00001"] = partial;
+
+  const std::string json = vsm::serialize_save_index(index);
+  // titleId omitted when it equals the key, kept when it differs (here: explicitly empty).
+  EXPECT_TRUE(json.find("\"titleId\": \"\"") != std::string::npos);
+  EXPECT_TRUE(json.find("\"titleId\": \"ADRBUBMAN\"") == std::string::npos);
+  EXPECT_TRUE(json.find("\"savedAt\": null") != std::string::npos);
+
+  vsm::SaveIndex parsed;
+  EXPECT_TRUE(vsm::parse_save_index(json, &parsed));
+  EXPECT_EQ(parsed.app_db_mtime, index.app_db_mtime);
+  EXPECT_EQ(parsed.app_db_size, index.app_db_size);
+  EXPECT_EQ(parsed.entries.size(), static_cast<std::size_t>(4));
+  const vsm::SaveIndexEntry &a = parsed.entries["ADRBUBMAN"];
+  EXPECT_TRUE(a.time_resolved);
+  EXPECT_TRUE(a.has_time);
+  EXPECT_EQ(vsm::format_save_datetime(a.saved_at), "2024-01-07T16:57:38");
+  EXPECT_EQ(a.title_id, "ADRBUBMAN");
+  EXPECT_TRUE(a.from_app_db);
+  const vsm::SaveIndexEntry &b = parsed.entries["NPEH00130USER1"];
+  EXPECT_TRUE(b.time_resolved);
+  EXPECT_TRUE(!b.has_time);
+  EXPECT_EQ(b.title_id, "");
+  EXPECT_TRUE(!b.from_app_db);
+  const vsm::SaveIndexEntry &c = parsed.entries["VITASHELL"];
+  EXPECT_TRUE(!c.time_resolved);
+  EXPECT_TRUE(c.fingerprint.matches(index.entries["VITASHELL"].fingerprint));
+  EXPECT_TRUE(json.find("\"fingerprintOk\": false") != std::string::npos);
+  const vsm::SaveIndexEntry &d = parsed.entries["PCSX00001"];
+  EXPECT_TRUE(!d.fingerprint.ok);
+  EXPECT_TRUE(!d.fingerprint.matches({true, 500LL, 3LL, 900LL}));
+  EXPECT_TRUE(d.from_app_db);
+}
+
+void test_save_index_reads_version_one_titles_forward() {
+  // A version-1 file is the old titles-only save-titles.json: titles and app-db stamp carry
+  // over so the upgrade boot stays warm, and every save time starts unresolved.
+  vsm::SaveIndex parsed;
+  EXPECT_TRUE(vsm::parse_save_index(
+      "{\"version\":1,\"appDbMtime\":1784971273,\"appDbSize\":1134592,\"entries\":{"
+      "\"PCSB01084\":{\"fromAppDb\":true,\"newestMtime\":1,\"fileCount\":2,\"totalBytes\":3,"
+      "\"displayName\":\"Papers, Please\",\"titleId\":\"PCSB01084\","
+      "\"iconPath\":\"ur0:appmeta/PCSB01084/icon0.png\"}}}",
+      &parsed));
+  EXPECT_EQ(parsed.app_db_mtime, 1784971273LL);
+  EXPECT_EQ(parsed.app_db_size, 1134592LL);
+  EXPECT_EQ(parsed.entries.size(), static_cast<std::size_t>(1));
+  const vsm::SaveIndexEntry &entry = parsed.entries["PCSB01084"];
+  EXPECT_TRUE(!entry.time_resolved);
+  EXPECT_TRUE(entry.from_app_db);
+  EXPECT_EQ(entry.display_name, "Papers, Please");
+  EXPECT_EQ(entry.title_id, "PCSB01084");
+  EXPECT_TRUE(entry.fingerprint.matches({true, 1LL, 2LL, 3LL}));
+}
+
+void test_save_index_rejects_bad_input_but_keeps_healthy_entries() {
+  // A malformed entry is skipped without discarding its healthy neighbors: a missing field, a
+  // negative count, a garbled savedAt, a wrongly typed one.
+  vsm::SaveIndex parsed;
+  EXPECT_TRUE(vsm::parse_save_index(
+      "{\"version\":2,\"appDbMtime\":1,\"appDbSize\":2,\"entries\":{"
+      "\"BAD001\":{\"fromAppDb\":false,\"newestMtime\":1,\"fileCount\":2,\"totalBytes\":3,"
+      "\"displayName\":\"x\"},"
+      "\"BAD002\":{\"fromAppDb\":false,\"newestMtime\":1,\"fileCount\":-2,\"totalBytes\":3,"
+      "\"displayName\":\"x\",\"iconPath\":\"\"},"
+      "\"BAD003\":{\"fromAppDb\":false,\"newestMtime\":1,\"fileCount\":2,\"totalBytes\":3,"
+      "\"displayName\":\"x\",\"iconPath\":\"\",\"savedAt\":\"2026-13-40T99:99:99\"},"
+      "\"BAD004\":{\"fromAppDb\":false,\"newestMtime\":1,\"fileCount\":2,\"totalBytes\":3,"
+      "\"displayName\":\"x\",\"iconPath\":\"\",\"savedAt\":12345},"
+      "\"GOOD01\":{\"fromAppDb\":false,\"newestMtime\":1,\"fileCount\":2,\"totalBytes\":3,"
+      "\"displayName\":\"x\",\"iconPath\":\"\",\"savedAt\":null}}}",
+      &parsed));
+  EXPECT_EQ(parsed.entries.size(), static_cast<std::size_t>(1));
+  EXPECT_TRUE(parsed.entries.find("GOOD01") != parsed.entries.end());
+  EXPECT_TRUE(parsed.entries["GOOD01"].time_resolved);
+  EXPECT_TRUE(!parsed.entries["GOOD01"].has_time);
+
+  // Rejected input clears the previously populated index, never leaves it half-stale.
+  EXPECT_TRUE(!vsm::parse_save_index("not json", &parsed));
+  EXPECT_TRUE(parsed.entries.empty());
+  EXPECT_EQ(parsed.app_db_mtime, 0LL);
+  EXPECT_TRUE(!vsm::parse_save_index(
+      "{\"version\":99,\"appDbMtime\":1,\"appDbSize\":2,\"entries\":{}}", &parsed));
+  EXPECT_TRUE(parsed.entries.empty());
+  EXPECT_EQ(parsed.app_db_mtime, 0LL);
+}
+
 void test_backup_archive_reads_bounded_sdslot_entry_without_restoring() {
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() / "save-keeper-archive-entry-test";
@@ -2336,6 +2461,9 @@ int main() {
   test_scan_fingerprints_every_save_and_flags_mount_requiring_ones();
   test_scan_consumes_time_and_title_caches_when_fingerprints_match();
   test_save_title_cache_roundtrip_and_stat_stamp();
+  test_save_index_roundtrip_covers_all_three_time_states();
+  test_save_index_reads_version_one_titles_forward();
+  test_save_index_rejects_bad_input_but_keeps_healthy_entries();
   test_backup_archive_reads_bounded_sdslot_entry_without_restoring();
   test_legacy_zip_metadata_can_be_recovered_without_rewriting_the_archive();
   test_backup_archive_extracts_to_isolated_inspection_directory_and_cleans_up();

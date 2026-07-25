@@ -138,7 +138,7 @@ namespace {
 // Temp file then rename, same as the metadata sidecars: a reader never sees a half-written
 // cache, and durability across a power cut is not worth an fsync - the caches rebuild themselves.
 bool write_json_atomic(const std::string &path, const std::string &json, std::string *error) {
-  if (json.size() > kMaxSaveTimeCacheSize) {
+  if (json.size() > kMaxSaveIndexSize) {
     if (error) *error = "cache too large";
     return false;
   }
@@ -175,7 +175,7 @@ std::string read_bounded_file(const std::string &path) {
   std::size_t read = 0;
   while ((read = std::fread(buffer, 1, sizeof(buffer), file)) > 0) {
     content.append(buffer, read);
-    if (content.size() > kMaxSaveTimeCacheSize) {
+    if (content.size() > kMaxSaveIndexSize) {
       content.clear();
       break;
     }
@@ -295,6 +295,152 @@ SaveTitleCache read_save_title_cache(const std::string &path) {
 bool write_save_title_cache_atomic(const std::string &path, const SaveTitleCache &cache,
                                    std::string *error) {
   return write_json_atomic(path, serialize_save_title_cache(cache), error);
+}
+
+std::string serialize_save_index(const SaveIndex &index) {
+  picojson::object root;
+  root["version"] = picojson::value(static_cast<double>(kSaveIndexVersion));
+  root["appDbMtime"] = picojson::value(static_cast<double>(index.app_db_mtime));
+  root["appDbSize"] = picojson::value(static_cast<double>(index.app_db_size));
+  picojson::object entries;
+  for (const auto &item : index.entries) {
+    const SaveIndexEntry &entry = item.second;
+    picojson::object object;
+    object["newestMtime"] =
+        picojson::value(static_cast<double>(entry.fingerprint.newest_mtime));
+    object["fileCount"] = picojson::value(static_cast<double>(entry.fingerprint.file_count));
+    object["totalBytes"] = picojson::value(static_cast<double>(entry.fingerprint.total_bytes));
+    if (!entry.fingerprint.ok) {
+      // A partial walk's numbers can coincide with a complete one later; the flag must survive
+      // the round-trip so matches() keeps refusing it, while the entry itself survives (an
+      // app-db title outlives an unreadable folder).
+      object["fingerprintOk"] = picojson::value(false);
+    }
+    if (entry.time_resolved) {
+      // null marks "resolved, nothing readable"; an unresolved time has no savedAt at all.
+      object["savedAt"] = entry.has_time
+                              ? picojson::value(format_save_datetime(entry.saved_at))
+                              : picojson::value();
+    }
+    object["displayName"] = picojson::value(entry.display_name);
+    if (entry.title_id != item.first) {
+      object["titleId"] = picojson::value(entry.title_id);
+    }
+    object["iconPath"] = picojson::value(entry.icon_path);
+    object["fromAppDb"] = picojson::value(entry.from_app_db);
+    entries[item.first] = picojson::value(std::move(object));
+  }
+  root["entries"] = picojson::value(std::move(entries));
+  return picojson::value(std::move(root)).serialize(true);
+}
+
+bool parse_save_index(const std::string &json, SaveIndex *index) {
+  *index = {};
+  picojson::value root;
+  const std::string parse_error = picojson::parse(root, json);
+  if (!parse_error.empty() || !root.is<picojson::object>()) {
+    return false;
+  }
+  const picojson::object &root_object = root.get<picojson::object>();
+  const auto root_number = [&root_object](const char *key, long long *value) {
+    const auto found = root_object.find(key);
+    if (found == root_object.end() || !found->second.is<double>()) {
+      return false;
+    }
+    *value = static_cast<long long>(found->second.get<double>());
+    return true;
+  };
+  // Version 1 is the old titles-only save-titles.json, read forward. Its entries carry the same
+  // fields minus savedAt, so one uniform entry parser below covers both versions.
+  long long version = 0;
+  if (!root_number("version", &version) || (version != 1 && version != kSaveIndexVersion) ||
+      !root_number("appDbMtime", &index->app_db_mtime) ||
+      !root_number("appDbSize", &index->app_db_size)) {
+    *index = {};
+    return false;
+  }
+  const auto entries = root_object.find("entries");
+  if (entries == root_object.end() || !entries->second.is<picojson::object>()) {
+    *index = {};
+    return false;
+  }
+  for (const auto &item : entries->second.get<picojson::object>()) {
+    if (!item.second.is<picojson::object>()) {
+      continue;
+    }
+    const picojson::object &object = item.second.get<picojson::object>();
+    const auto number = [&object](const char *key, long long *value) {
+      const auto found = object.find(key);
+      if (found == object.end() || !found->second.is<double>()) {
+        return false;
+      }
+      *value = static_cast<long long>(found->second.get<double>());
+      return *value >= 0;
+    };
+    const auto text = [&object](const char *key, std::string *value) {
+      const auto found = object.find(key);
+      if (found == object.end() || !found->second.is<std::string>()) {
+        return false;
+      }
+      *value = found->second.get<std::string>();
+      return true;
+    };
+    SaveIndexEntry entry;
+    entry.fingerprint.ok = true;
+    const auto from_db = object.find("fromAppDb");
+    if (from_db == object.end() || !from_db->second.is<bool>() ||
+        !number("newestMtime", &entry.fingerprint.newest_mtime) ||
+        !number("fileCount", &entry.fingerprint.file_count) ||
+        !number("totalBytes", &entry.fingerprint.total_bytes) ||
+        !text("displayName", &entry.display_name) || !text("iconPath", &entry.icon_path)) {
+      continue;
+    }
+    entry.from_app_db = from_db->second.get<bool>();
+    // Absent means a complete walk; version-1 files never carry it. A wrong type is a malformed
+    // entry, not "assume true".
+    const auto fingerprint_ok = object.find("fingerprintOk");
+    if (fingerprint_ok != object.end()) {
+      if (!fingerprint_ok->second.is<bool>()) {
+        continue;
+      }
+      entry.fingerprint.ok = fingerprint_ok->second.get<bool>();
+    }
+    // An omitted titleId means "equals the save id"; an explicit value (even "") wins.
+    const auto title_id = object.find("titleId");
+    if (title_id != object.end()) {
+      if (!title_id->second.is<std::string>()) {
+        continue;
+      }
+      entry.title_id = title_id->second.get<std::string>();
+    } else {
+      entry.title_id = item.first;
+    }
+    const auto saved_at = object.find("savedAt");
+    if (saved_at != object.end()) {
+      if (saved_at->second.is<std::string>()) {
+        if (!parse_save_datetime(saved_at->second.get<std::string>(), &entry.saved_at)) {
+          continue;
+        }
+        entry.has_time = true;
+      } else if (!saved_at->second.is<picojson::null>()) {
+        continue;
+      }
+      entry.time_resolved = true;
+    }
+    index->entries[item.first] = std::move(entry);
+  }
+  return true;
+}
+
+SaveIndex read_save_index(const std::string &path) {
+  SaveIndex index;
+  parse_save_index(read_bounded_file(path), &index);
+  return index;
+}
+
+bool write_save_index_atomic(const std::string &path, const SaveIndex &index,
+                             std::string *error) {
+  return write_json_atomic(path, serialize_save_index(index), error);
 }
 
 bool stat_file_stamp(const std::string &path, long long *mtime, long long *size) {
