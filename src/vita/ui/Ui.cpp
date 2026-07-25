@@ -1262,7 +1262,7 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
   // Naming the entry here is what keeps the screen from reading as a free-floating file browser:
   // every folder picked lands in this app's own backups, not somewhere of its own.
   const std::string heading =
-      state.entry_name.empty() ? std::string("Add data folders")
+      state.entry_name.empty() ? std::string("Data folders")
                                : fit_text(kTextSizeTitle, "Data folders: " + state.entry_name, 380);
   draw_text(fonts_, 18, 34, kColorText, kTextSizeTitle, heading.c_str());
   const std::string path = fit_text_left(kTextSizeSmall, state.current_path, 520);
@@ -1300,23 +1300,25 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
         vita2d_draw_rectangle(kListX, y, 4, kRowH, kColorAccent);
       }
       const int text_y = y + 24;
-      // Right column: "added" for a folder on this entry, "in use" for one on another entry, else
-      // the folder's size. While the debounced stat-walk is still running the size is replaced by
-      // the same circle spinner the grid uses for an unresolved save time - sizing must not block
-      // the screen behind a modal, since the browser is meant to be scrolled through freely.
+      // Right column: "included" for a folder this entry backs up, "in use" for one another entry
+      // backs up, else the folder's size. Only the focused row is ever being measured (the walk is
+      // debounced on the selection), so only it spins; every other unsized row shows "..." and sits
+      // still. A screen full of spinners would animate work that is not happening.
       std::string right_text;
       unsigned int right_color = focused ? kColorText : kColorMuted;
       bool sizing = false;
       if (row.tracked_here) {
-        right_text = "added";
+        right_text = "included";
         right_color = kColorSuccess;
       } else if (row.tracked_elsewhere) {
         right_text = "in use";
         right_color = kColorIdleDot;
       } else if (row.size_known) {
         right_text = format_bytes(row.size_bytes);
-      } else {
+      } else if (focused) {
         sizing = true;
+      } else {
+        right_text = "...";
       }
       // The spinner's ring is radius 6, so 16 reserves its full width plus a little air; the name
       // column measures against the same figure and never overlaps it.
@@ -1357,13 +1359,17 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
   const char *const close_label = state.return_to_details ? "Back" : "Close";
   std::vector<HintSpec> hints;
   hints.push_back({cancel, at_root ? close_label : "Up", nullptr, nullptr});
-  hints.push_back({ButtonSymbol::Triangle, close_label, nullptr, nullptr});
-  // Square is a toggle: it adds the focused folder, or removes one this entry already has, and the
-  // browser stays open either way so several folders can be set in one visit.
+  // Triangle is the shortcut out from a subfolder. At the root the cancel button already closes, so
+  // offering it there too would just be the same action listed twice.
+  if (!at_root) {
+    hints.push_back({ButtonSymbol::Triangle, close_label, nullptr, nullptr});
+  }
+  // Square toggles whether the folder is part of this entry's backup. Nothing on disk is created or
+  // deleted by it, so the words are about inclusion, not about adding or removing folders.
   if (focused_row && !focused_row->tracked_elsewhere) {
-    hints.push_back(
-        {ButtonSymbol::Square, focused_row->tracked_here ? "Remove" : "Add folder", nullptr,
-         nullptr});
+    hints.push_back({ButtonSymbol::Square,
+                     focused_row->tracked_here ? "Exclude" : "Include in backup", nullptr,
+                     nullptr});
   }
   if (focused_row) {
     hints.push_back({primary, "Open", nullptr, nullptr});
@@ -1848,11 +1854,16 @@ void Ui::draw_footer(const UiState &state) {
   hints.push_back({ButtonSymbol::Square, sort_label.c_str(), nullptr,
                    focused_row ? "(hold: Label)" : nullptr});
   // The connect cue lives in the header next to "not connected"; the footer only notes the
-  // refresh hold once a connection exists.
-  hints.push_back({ButtonSymbol::Triangle, "Details", nullptr,
-                   state.google_connected ? "(hold: Refresh)" : nullptr});
-  hints.push_back({ButtonSymbol::Start, data_row_focused ? "Remove folders" : "Delete", nullptr,
-                   nullptr});
+  // refresh hold once a connection exists. The "Data folders" row has no details of its own and
+  // nothing to delete, so neither button is offered there - both would be dead presses.
+  if (!data_row_focused) {
+    hints.push_back({ButtonSymbol::Triangle, "Details", nullptr,
+                     state.google_connected ? "(hold: Refresh)" : nullptr});
+    hints.push_back({ButtonSymbol::Start, "Delete", nullptr, nullptr});
+  } else if (state.google_connected) {
+    // The Drive refresh hold is a screen-level action, not a row action, so it survives.
+    hints.push_back({ButtonSymbol::Triangle, "Refresh", "(hold)", nullptr});
+  }
   // Select moves the focused snapshot across: Upload from a card-only row, Download to the card
   // from a Drive-only row. A synced row has no tap action left, so the slot disappears rather
   // than advertise a no-op; on the New Backup entry it names the hold gesture instead, with the

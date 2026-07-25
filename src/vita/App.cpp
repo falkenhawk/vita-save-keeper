@@ -1231,7 +1231,6 @@ void App::move_selected_save(int delta) {
   if (selected_save_ != previous) {
     cancel_restore_confirmation();
     cancel_delete_confirmation();
-    cancel_stop_tracking_confirmation();
     cancel_sync_all_confirmation();
     cancel_duplicate_backup_confirmation();
     // A different save means a different backup list; focus its "New Backup" entry. Any status
@@ -1262,7 +1261,6 @@ void App::move_selected_category(int delta) {
     category_ = candidate;
     cancel_restore_confirmation();
     cancel_delete_confirmation();
-    cancel_stop_tracking_confirmation();
     cancel_sync_all_confirmation();
     cancel_duplicate_backup_confirmation();
     selected_save_ = category_selection_[static_cast<std::size_t>(category_)];
@@ -1284,7 +1282,6 @@ void App::move_selected_backup(int delta) {
     details_open_pending_ = false;
     cancel_restore_confirmation();
     cancel_delete_confirmation();
-    cancel_stop_tracking_confirmation();
     cancel_sync_all_confirmation();
     // The "press again to force" state refers to the New Backup entry; leaving it must not arm a
     // silent force for later.
@@ -1307,18 +1304,10 @@ void App::cancel_delete_confirmation() {
   }
 }
 
-void App::cancel_stop_tracking_confirmation() {
-  if (stop_tracking_confirmation_pending_) {
-    stop_tracking_confirmation_pending_ = false;
-    set_status(StatusKind::Info, "Stop tracking canceled.");
-  }
-}
-
 void App::create_new_backup() {
   restore_confirmation_pending_ = false;
   delete_confirmation_pending_ = false;
   delete_scope_prompt_pending_ = false;
-  stop_tracking_confirmation_pending_ = false;
   const SaveRecord *selected = selected_save_record();
   if (!selected) {
     set_status(StatusKind::Info, "No save selected.");
@@ -1390,91 +1379,10 @@ void App::handle_delete_button() {
     set_status(StatusKind::Info, "No save selected.");
     return;
   }
-  // Start on the "Data folders" row removes them all, dropping the config entry only - existing
-  // backups are never auto-dropped. Scoped to that row so Start on a backup row still deletes that
-  // backup. An entry with its own savedata folder simply loses its extras and keeps its row. An
-  // entry that exists *because* of those folders (an app with no savedata folder) loses its row
-  // with them, so removal is refused while it still has backups: there would be no row left to
-  // reach them from.
-  const bool has_extras = !selected->extra_paths.empty();
-  const bool row_is_config_only = selected->path.empty();
-  if (data_folders_row_focused() && !has_extras) {
-    set_status(StatusKind::Info, "No data folders to remove.");
-    return;
-  }
-  if (data_folders_row_focused() && row_is_config_only && backup_count() != 0) {
-    set_status(StatusKind::Info,
-               status_with_name("Delete the backups of ", selected->display_name,
-                                " before removing its folders."));
-    return;
-  }
+  // Start deletes the focused backup and nothing else. The "Data folders" row has no Start action:
+  // folders are added and removed inside the picker itself, which is the only place that shows which
+  // ones an entry actually has.
   if (data_folders_row_focused()) {
-    const std::string name = selected->display_name;
-    if (!stop_tracking_confirmation_pending_) {
-      restore_confirmation_pending_ = false;
-      delete_confirmation_pending_ = false;
-      delete_scope_prompt_pending_ = false;
-      stop_tracking_confirmation_pending_ = true;
-      set_status(StatusKind::Info,
-                 status_with_name("Remove data folders from ", name, "? Press Start again."));
-      return;
-    }
-    stop_tracking_confirmation_pending_ = false;
-    if (tracked_config_load_failed_) {
-      set_status(StatusKind::Info,
-                 "Cannot update tracked-folders.json - fix or delete it first.");
-      return;
-    }
-    const std::string id = selected->id;
-    std::size_t removed_at = tracked_config_.entries.size();
-    for (std::size_t i = 0; i < tracked_config_.entries.size(); ++i) {
-      if (tracked_config_.entries[i].id == id) {
-        removed_at = i;
-        break;
-      }
-    }
-    if (removed_at == tracked_config_.entries.size()) {
-      // An entry with extras is always a config entry; guard anyway so a mismatch never writes.
-      set_status(StatusKind::Info, "No data folders to remove.");
-      return;
-    }
-    const TrackedFolderEntry saved = tracked_config_.entries[removed_at];
-    tracked_config_.entries.erase(tracked_config_.entries.begin() +
-                                  static_cast<long>(removed_at));
-    std::string write_error;
-    if (!write_tracked_folders_json_atomic(kTrackedFoldersPath, tracked_config_, &write_error)) {
-      // The write is atomic, so the file on disk is untouched; put the entry back so memory matches.
-      tracked_config_.entries.insert(
-          tracked_config_.entries.begin() + static_cast<long>(removed_at), saved);
-      set_status(StatusKind::Error, "Could not save tracked-folders.json.");
-      return;
-    }
-    for (std::size_t i = 0; i < saves_.size(); ++i) {
-      if (saves_[i].id != id) {
-        continue;
-      }
-      if (row_is_config_only) {
-        // Nothing but the config was holding this row up, so it goes too. Guarded above: this only
-        // runs when the entry has no backups that would be left unreachable.
-        saves_.erase(saves_.begin() + static_cast<long>(i));
-      } else {
-        // A real savedata row stays; it just stops carrying the extras.
-        saves_[i].extra_paths.clear();
-        resolve_data_folder_time(&saves_[i]);
-      }
-      break;
-    }
-    // Keep the cursor where the entry was, clamped in case the row itself went away.
-    const std::size_t focus_target = selected_save_;
-    rebuild_visible_saves();
-    selected_save_ = visible_saves_.empty()
-                         ? 0
-                         : std::min(focus_target, visible_saves_.size() - 1);
-    category_selection_[static_cast<std::size_t>(category_)] = selected_save_;
-    schedule_selected_save_time_resolve();
-    refresh_local_backups();
-    refresh_remote_backups_view();
-    set_status(StatusKind::Success, status_with_name("Removed data folders from ", name, "."));
     return;
   }
   const BackupRow *row = selected_backup_row();
@@ -2802,12 +2710,17 @@ void App::repair_remote_backup_metadata(const SaveRecord &save, const BackupRow 
 }
 
 void App::request_save_details() {
+  // The "Data folders" row has no details of its own to show - it is a way into the picker, not a
+  // save or a backup - so Triangle does nothing on it rather than opening a screen about something
+  // else. The footer drops the hint to match.
+  if (data_folders_row_focused()) {
+    return;
+  }
   // Entering details silently drops transient overview feedback: a stale status line is
   // irrelevant on the new screen, and a pending confirmation must not carry a primed second
   // press across screens.
   restore_confirmation_pending_ = false;
   duplicate_backup_confirmation_pending_ = false;
-  stop_tracking_confirmation_pending_ = false;
   clear_status();
   const BackupRow *row = selected_backup_row();
   const SaveRecord *save = selected_save_record();
@@ -3164,7 +3077,6 @@ void App::begin_label_edit() {
   restore_confirmation_pending_ = false;
   delete_confirmation_pending_ = false;
   delete_scope_prompt_pending_ = false;
-  stop_tracking_confirmation_pending_ = false;
   duplicate_backup_confirmation_pending_ = false;
   sync_all_confirmation_pending_ = false;
   if (google_auth_pending_) {
@@ -3312,7 +3224,7 @@ void App::open_directory_browser(bool from_details) {
     return;
   }
   if (classify_save(*selected) != SaveCategory::Homebrew) {
-    set_status(StatusKind::Info, "Extra data folders are for homebrew entries.");
+    set_status(StatusKind::Info, "Data folders are for homebrew entries.");
     return;
   }
   directory_browser_ = {};
@@ -3439,7 +3351,7 @@ void App::browser_toggle_selected() {
   }
   const std::string full_path = browser.current_path + "/" + row.name;
   if (row.tracked_here) {
-    browser_detach_selected(full_path, row.name);
+    browser_exclude_selected(full_path, row.name);
     return;
   }
   if (!row.size_known) {
@@ -3467,7 +3379,7 @@ void App::browser_toggle_selected() {
   if (row.size_known && row.size_bytes > kLargeFolderWarnBytes && !browser.large_confirm_pending) {
     browser.large_confirm_pending = true;
     set_status(StatusKind::Info, "Large folder (" + ui_.format_size(row.size_bytes) +
-                                     ") - press Square again to track it anyway.");
+                                     ") - press Square again to include it anyway.");
     return;
   }
   if (tracked_config_load_failed_) {
@@ -3480,7 +3392,7 @@ void App::browser_toggle_selected() {
   const std::string entry_name = browser.entry_name;
   if (entry_id.empty()) {
     // The browser is always opened from an entry; without one there is nothing to attach to.
-    set_status(StatusKind::Info, "No entry to add this folder to.");
+    set_status(StatusKind::Info, "No entry to include this folder in.");
     return;
   }
   const std::string name = row.name;
@@ -3530,10 +3442,10 @@ void App::browser_toggle_selected() {
   // after each one made that a chore. The grid is re-sorted once, on close.
   apply_tracked_folders();
   reload_browser_rows(true);
-  set_status(StatusKind::Success, "Added " + name + " to " + entry_name + ".");
+  set_status(StatusKind::Success, name + " is now backed up with " + entry_name + ".");
 }
 
-void App::browser_detach_selected(const std::string &full_path, const std::string &name) {
+void App::browser_exclude_selected(const std::string &full_path, const std::string &name) {
   if (tracked_config_load_failed_) {
     set_status(StatusKind::Info,
                "Cannot update tracked-folders.json - fix or delete it first.");
@@ -3581,7 +3493,7 @@ void App::browser_detach_selected(const std::string &full_path, const std::strin
   }
   apply_tracked_folders();
   reload_browser_rows(true);
-  set_status(StatusKind::Info, "Removed " + name + ".");
+  set_status(StatusKind::Info, name + " is no longer backed up.");
 }
 
 void App::cancel_sync_all_confirmation() {
@@ -3617,7 +3529,6 @@ void App::begin_sync_all() {
   restore_confirmation_pending_ = false;
   delete_confirmation_pending_ = false;
   delete_scope_prompt_pending_ = false;
-  stop_tracking_confirmation_pending_ = false;
   duplicate_backup_confirmation_pending_ = false;
   sync_all_confirmation_pending_ = false;
 
@@ -4247,8 +4158,7 @@ int App::run() {
     if ((pressed & cancel_button) != 0) {
       cancel_restore_confirmation();
       cancel_delete_confirmation();
-      cancel_stop_tracking_confirmation();
-      cancel_sync_all_confirmation();
+        cancel_sync_all_confirmation();
       cancel_duplicate_backup_confirmation();
       cancel_google_auth();
     }

@@ -125,14 +125,16 @@ private:
   const SaveRecord *selected_save_record() const;
   void cancel_restore_confirmation();
   void cancel_delete_confirmation();
-  void cancel_stop_tracking_confirmation();
   // Where the folder picker opens for this entry: beside a folder it already has, else the closest
   // ux0:data name match for its title, else ux0:data itself. app.db stores no data-folder path, so
   // this is a guess and only ever picks a starting point.
   std::string browser_start_path(const SaveRecord &save) const;
   // Directory picker for the focused homebrew entry's data folders. Confined to ux0:data; Square
-  // adds or removes the focused folder and the browser stays open, so several can be set in one
-  // visit. from_details makes closing return to Save Details instead of the grid.
+  // includes or excludes the focused folder and the browser stays open, so several can be set in
+  // one visit. from_details makes closing return to Save Details instead of the grid.
+  //
+  // Nothing here creates or deletes a directory - it only records which existing folders the entry
+  // backs up - so the wording stays "include"/"exclude" throughout, in the UI and in these names.
   void open_directory_browser(bool from_details);
   // Applies everything the visit changed in one go: re-sort, refocus the entry, refresh its backup
   // lists, and reopen Save Details when that is where the browser came from.
@@ -140,10 +142,10 @@ private:
   // Re-lists current_path and re-tags the rows. keep_selection holds the cursor in place, which is
   // what a toggle wants; a drill or climb passes false and starts at the top.
   void reload_browser_rows(bool keep_selection = false);
-  // Square: adds the focused folder to this entry, or removes it if it is already one of theirs.
-  // A folder belonging to another entry is left alone.
+  // Square: includes the focused folder in this entry's backups, or excludes it again if it is
+  // already one of theirs. A folder another entry backs up is left alone.
   void browser_toggle_selected();
-  void browser_detach_selected(const std::string &full_path, const std::string &name);
+  void browser_exclude_selected(const std::string &full_path, const std::string &name);
   void schedule_browser_size_resolve();
   void resolve_browser_size();
   void handle_action_button();
@@ -259,7 +261,6 @@ private:
   // Armed by the first Start press on a picker-tracked homebrew entry that has no backups left; a
   // second Start press then stops tracking it. Cleared by the same navigation/cancel paths as the
   // other pending confirmations. The RetroArch builtin never arms it (it re-appears every launch).
-  bool stop_tracking_confirmation_pending_{};
   // A snapshot living on card and Drive needs a scope choice instead of a plain second press:
   // Start deletes both sides, Triangle only the Drive copy, Square only the card copy.
   bool delete_scope_prompt_pending_{};
