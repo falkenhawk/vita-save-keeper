@@ -82,13 +82,20 @@ struct DirectoryBrowserState {
     std::string name;
     bool size_known{};
     std::uint64_t size_bytes{};
-    bool already_tracked{};  // exact path already attached to some entry
+    // Attached to the entry this browser was opened from, so Square detaches it again.
+    bool tracked_here{};
+    // Attached to some *other* entry. Shown as taken and left alone: one folder belongs to one
+    // app, and detaching it from here would silently edit an entry the user is not looking at.
+    bool tracked_elsewhere{};
   };
   std::vector<Row> rows;
   std::size_t selected{};
   // Set when the focused folder is over the large-folder threshold and a first Square press asked
-  // for confirmation; any other input clears it, a second Square press then tracks it anyway.
+  // for confirmation; any other input clears it, a second Square press then attaches it anyway.
   bool large_confirm_pending{};
+  // True when the browser was opened from Save Details, so closing it goes back there rather than
+  // dropping the user out to the grid.
+  bool return_to_details{};
 };
 
 // Grid width of the save panel; D-pad up/down moves by one full row, so the input handler in App

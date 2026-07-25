@@ -130,14 +130,20 @@ private:
   // ux0:data name match for its title, else ux0:data itself. app.db stores no data-folder path, so
   // this is a guess and only ever picks a starting point.
   std::string browser_start_path(const SaveRecord &save) const;
-  // Directory picker for adding a data folder to the focused homebrew entry. Confined to ux0:data,
-  // lists child dirs, and (Square) attaches the focused one to that entry. reload_browser_rows
-  // re-lists after a drill/climb; the focused row's size is filled in lazily by
-  // resolve_browser_size a few frames after it settles.
-  void open_directory_browser();
+  // Directory picker for the focused homebrew entry's data folders. Confined to ux0:data; Square
+  // adds or removes the focused folder and the browser stays open, so several can be set in one
+  // visit. from_details makes closing return to Save Details instead of the grid.
+  void open_directory_browser(bool from_details);
+  // Applies everything the visit changed in one go: re-sort, refocus the entry, refresh its backup
+  // lists, and reopen Save Details when that is where the browser came from.
   void close_directory_browser();
-  void reload_browser_rows();
-  void browser_track_selected();
+  // Re-lists current_path and re-tags the rows. keep_selection holds the cursor in place, which is
+  // what a toggle wants; a drill or climb passes false and starts at the top.
+  void reload_browser_rows(bool keep_selection = false);
+  // Square: adds the focused folder to this entry, or removes it if it is already one of theirs.
+  // A folder belonging to another entry is left alone.
+  void browser_toggle_selected();
+  void browser_detach_selected(const std::string &full_path, const std::string &name);
   void schedule_browser_size_resolve();
   void resolve_browser_size();
   void handle_action_button();

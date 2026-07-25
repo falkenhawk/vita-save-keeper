@@ -117,6 +117,15 @@ void draw_circle_spinner(float cx, float cy, unsigned int frame, unsigned int ba
   }
 }
 
+// A "no entry" mark: a ring with a bar across it, drawn as a filled disc punched out by a disc of
+// the plate colour behind it. At this size (radius 5) a diagonal slash turns to mush, so the bar is
+// horizontal - it still reads as "not this one" and stays crisp on the 18px tag plate.
+void draw_no_entry_glyph(float cx, float cy, unsigned int color, unsigned int plate_color) {
+  vita2d_draw_fill_circle(cx, cy, 5.0f, color);
+  vita2d_draw_fill_circle(cx, cy, 3.2f, plate_color);
+  vita2d_draw_rectangle(cx - 3.6f, cy - 1.0f, 7.2f, 2.0f, color);
+}
+
 enum class ButtonSymbol {
   Circle,
   Cross,
@@ -1246,7 +1255,12 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
   // the left so the folder you are inside stays legible at its trailing end.
   vita2d_draw_rectangle(0, 0, 960, 52, kColorHeader);
   vita2d_draw_line(0, 52, 960, 52, RGBA8(255, 255, 255, 20));
-  draw_text(fonts_, 18, 34, kColorText, kTextSizeTitle, "Add folder to back up");
+  // Naming the entry here is what keeps the screen from reading as a free-floating file browser:
+  // every folder picked lands in this app's own backups, not somewhere of its own.
+  const std::string heading =
+      state.entry_name.empty() ? std::string("Add data folders")
+                               : fit_text(kTextSizeTitle, "Data folders: " + state.entry_name, 380);
+  draw_text(fonts_, 18, 34, kColorText, kTextSizeTitle, heading.c_str());
   const std::string path = fit_text_left(kTextSizeSmall, state.current_path, 520);
   draw_text(fonts_, 942 - measure_text(kTextSizeSmall, path.c_str()), 32, kColorMuted,
             kTextSizeSmall, path.c_str());
@@ -1282,22 +1296,36 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
         vita2d_draw_rectangle(kListX, y, 4, kRowH, kColorAccent);
       }
       const int text_y = y + 24;
-      // Right column: "tracked" for a folder already covered by an entry (not selectable for a new
-      // one), otherwise its size ("..." until the debounced stat-walk fills it in).
+      // Right column: "added" for a folder on this entry, "in use" for one on another entry, else
+      // the folder's size. While the debounced stat-walk is still running the size is replaced by
+      // the same circle spinner the grid uses for an unresolved save time - sizing must not block
+      // the screen behind a modal, since the browser is meant to be scrolled through freely.
       std::string right_text;
-      unsigned int right_color;
-      if (row.already_tracked) {
-        right_text = "tracked";
+      unsigned int right_color = focused ? kColorText : kColorMuted;
+      bool sizing = false;
+      if (row.tracked_here) {
+        right_text = "added";
+        right_color = kColorSuccess;
+      } else if (row.tracked_elsewhere) {
+        right_text = "in use";
         right_color = kColorIdleDot;
+      } else if (row.size_known) {
+        right_text = format_bytes(row.size_bytes);
       } else {
-        right_text = row.size_known ? format_bytes(row.size_bytes) : "...";
-        right_color = focused ? kColorText : kColorMuted;
+        sizing = true;
       }
-      const int right_w = measure_text(kTextSizeSmall, right_text.c_str());
-      draw_text(fonts_, kSizeRight - right_w, text_y, right_color, kTextSizeSmall,
-                right_text.c_str());
+      // The spinner's ring is radius 6, so 16 reserves its full width plus a little air; the name
+      // column measures against the same figure and never overlaps it.
+      const int right_w = sizing ? 16 : measure_text(kTextSizeSmall, right_text.c_str());
+      if (sizing) {
+        draw_circle_spinner(static_cast<float>(kSizeRight) - 7.0f,
+                            static_cast<float>(text_y) - 7.0f, frame_counter_, right_color);
+      } else {
+        draw_text(fonts_, kSizeRight - right_w, text_y, right_color, kTextSizeSmall,
+                  right_text.c_str());
+      }
       const unsigned int name_color =
-          row.already_tracked ? kColorIdleDot : (focused ? kColorText : kColorMuted);
+          row.tracked_elsewhere ? kColorIdleDot : (focused ? kColorText : kColorMuted);
       const int name_max = kSizeRight - right_w - 16 - (kListX + 16);
       const std::string name = fit_text(kTextSizeSmall, row.name, std::max(40, name_max));
       draw_text(fonts_, kListX + 16, text_y, name_color, kTextSizeSmall, name.c_str());
@@ -1322,11 +1350,16 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
   const bool at_root = state.current_path == "ux0:data";
   const DirectoryBrowserState::Row *focused_row =
       state.selected < state.rows.size() ? &state.rows[state.selected] : nullptr;
+  const char *const close_label = state.return_to_details ? "Back" : "Close";
   std::vector<HintSpec> hints;
-  hints.push_back({cancel, at_root ? "Close" : "Up", nullptr, nullptr});
-  hints.push_back({ButtonSymbol::Triangle, "Close", nullptr, nullptr});
-  if (focused_row && !focused_row->already_tracked) {
-    hints.push_back({ButtonSymbol::Square, "Track folder", nullptr, nullptr});
+  hints.push_back({cancel, at_root ? close_label : "Up", nullptr, nullptr});
+  hints.push_back({ButtonSymbol::Triangle, close_label, nullptr, nullptr});
+  // Square is a toggle: it adds the focused folder, or removes one this entry already has, and the
+  // browser stays open either way so several folders can be set in one visit.
+  if (focused_row && !focused_row->tracked_elsewhere) {
+    hints.push_back(
+        {ButtonSymbol::Square, focused_row->tracked_here ? "Remove" : "Add folder", nullptr,
+         nullptr});
   }
   if (focused_row) {
     hints.push_back({primary, "Open", nullptr, nullptr});
@@ -1471,10 +1504,15 @@ void Ui::draw_title_grid(const UiState &state) {
       // sits out the batch sweep - so it gets a corner tag and no dimming overlay. Marking it any
       // heavier would read as "excluded", which is what the old "hidden" state got wrong.
       if (state.skipped_ids && state.skipped_ids->count(save.id) != 0) {
+        constexpr unsigned int kPlate = RGBA8(5, 10, 18, 210);
         const char *tag = "skip";
         const int tag_w = measure_text(kTextSizeTiny, tag);
-        vita2d_draw_rectangle(x, y + kTileSize - 18, tag_w + 12, 18, RGBA8(5, 10, 18, 210));
-        draw_text(fonts_, x + 6, y + kTileSize - 5, kColorMuted, kTextSizeTiny, tag);
+        const int plate_y = y + kTileSize - 18;
+        // Glyph then label: 6 left inset, a 12-wide glyph cell, 4 of air, the word, 6 right inset.
+        vita2d_draw_rectangle(x, plate_y, 6 + 12 + 4 + tag_w + 6, 18, kPlate);
+        draw_no_entry_glyph(static_cast<float>(x) + 12.0f, static_cast<float>(plate_y) + 9.0f,
+                            kColorMuted, kPlate);
+        draw_text(fonts_, x + 22, y + kTileSize - 5, kColorMuted, kTextSizeTiny, tag);
       }
     }
   }

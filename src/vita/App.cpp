@@ -3269,7 +3269,7 @@ std::string App::browser_start_path(const SaveRecord &save) const {
   return match.empty() ? std::string(kUserDataRoot) : std::string(kUserDataRoot) + "/" + match;
 }
 
-void App::open_directory_browser() {
+void App::open_directory_browser(bool from_details) {
   const SaveRecord *selected = selected_save_record();
   if (!selected) {
     set_status(StatusKind::Info, "No save selected.");
@@ -3284,38 +3284,70 @@ void App::open_directory_browser() {
   directory_browser_.entry_id = selected->id;
   directory_browser_.entry_name = selected->display_name;
   directory_browser_.current_path = browser_start_path(*selected);
+  directory_browser_.return_to_details = from_details;
   reload_browser_rows();
   clear_status();
 }
 
 void App::close_directory_browser() {
+  const std::string entry_id = directory_browser_.entry_id;
+  const bool return_to_details = directory_browser_.return_to_details;
   directory_browser_.open = false;
   directory_browser_.rows.clear();
   directory_browser_.large_confirm_pending = false;
   pending_browser_size_frames_ = -1;
-  // Drop any browser feedback so a stale "Already tracked." or large-folder prompt does not follow
-  // back to the overview; a successful track sets its own status after this returns.
+  // Drop any browser feedback so a stale prompt does not follow back out; the caller sets its own
+  // status afterwards if it has something to say.
   clear_status();
+
+  // Folder changes were applied to saves_ as they happened but the grid was left alone, so the
+  // re-sort happens once here rather than after every toggle.
+  apply_sort_and_rebuild();
+  refocus_selection_by_id(entry_id);
+  selected_backup_ = 0;
+  schedule_selected_save_time_resolve();
+  refresh_local_backups();
+  refresh_remote_backups_view();
+
+  // Back to where the browser was opened from. Reopening details rather than just re-flagging it
+  // rebuilds its folder list and sizes, so the changes just made are what shows. If the entry no
+  // longer exists - its last folder was removed and it had no savedata of its own - there is
+  // nothing to reopen and the grid is the only sensible destination.
+  if (return_to_details && selected_save_record() != nullptr &&
+      selected_save_record()->id == entry_id) {
+    open_save_details();
+  }
 }
 
-void App::reload_browser_rows() {
-  // Folders already attached to some entry, pulled straight from saves_ so the tag always matches
-  // what is actually attached - including folders on entries other than the one being added to.
-  std::unordered_set<std::string> attached_paths;
+void App::reload_browser_rows(bool keep_selection) {
+  // Folders already attached, pulled straight from saves_ so the tags always match what is really
+  // attached. Split by owner: this entry's own folders can be removed again from here, another
+  // entry's cannot - one folder belongs to one app, and detaching it here would silently edit an
+  // entry the user is not looking at.
+  std::unordered_set<std::string> mine;
+  std::unordered_set<std::string> others;
   for (const SaveRecord &save : saves_) {
+    const bool is_target = save.id == directory_browser_.entry_id;
     for (const TrackedPath &extra : save.extra_paths) {
-      attached_paths.insert(extra.path);
+      (is_target ? mine : others).insert(extra.path);
     }
   }
+  // Re-tagging after a toggle must not move the cursor - the folder list is the same, only its
+  // tags changed. Drilling in or out passes false and starts at the top.
+  const std::size_t previous_selected = directory_browser_.selected;
   directory_browser_.rows.clear();
   directory_browser_.selected = 0;
   directory_browser_.large_confirm_pending = false;
   for (const std::string &name : list_child_directories(directory_browser_.current_path)) {
     DirectoryBrowserState::Row row;
     row.name = name;
-    row.already_tracked =
-        attached_paths.count(directory_browser_.current_path + "/" + name) != 0;
+    const std::string child = directory_browser_.current_path + "/" + name;
+    row.tracked_here = mine.count(child) != 0;
+    row.tracked_elsewhere = !row.tracked_here && others.count(child) != 0;
     directory_browser_.rows.push_back(std::move(row));
+  }
+  if (keep_selection && previous_selected < directory_browser_.rows.size()) {
+    directory_browser_.selected = previous_selected;
   }
   schedule_browser_size_resolve();
 }
@@ -3339,9 +3371,9 @@ void App::resolve_browser_size() {
   if (row.size_known) {
     return;
   }
-  // One busy frame before the stat-walk below, so a folder with many entries does not leave the
-  // screen looking frozen; the walk is synchronous and reports no progress, hence the -1 total.
-  ui_.draw_busy("Measuring folder", 0, -1);
+  // No busy modal here. The walk is synchronous, but the row shows a spinner in its size column
+  // while it runs, which is enough feedback: covering the whole screen for every row the cursor
+  // rests on made scrolling the list flash constantly and blocked the view behind it.
   bool ok = false;
   const std::uint64_t bytes =
       compute_folder_size(directory_browser_.current_path + "/" + row.name, &ok);
@@ -3351,22 +3383,25 @@ void App::resolve_browser_size() {
   }
 }
 
-void App::browser_track_selected() {
+void App::browser_toggle_selected() {
   DirectoryBrowserState &browser = directory_browser_;
   if (browser.selected >= browser.rows.size()) {
     return;
   }
   DirectoryBrowserState::Row &row = browser.rows[browser.selected];
-  if (row.already_tracked) {
-    set_status(StatusKind::Info, "Already tracked.");
+  if (row.tracked_elsewhere) {
+    set_status(StatusKind::Info, "Already backed up by another entry.");
     return;
   }
   const std::string full_path = browser.current_path + "/" + row.name;
+  if (row.tracked_here) {
+    browser_detach_selected(full_path, row.name);
+    return;
+  }
   if (!row.size_known) {
     // The debounce usually has this already; compute inline otherwise, since a stat-walk is fast
-    // for the common case and there is no cheaper way to enforce the size limits below.
-    // One busy frame first - the same synchronous walk, same indeterminate progress as above.
-    ui_.draw_busy("Measuring folder", 0, -1);
+    // for the common case and there is no cheaper way to enforce the size limits below. No busy
+    // frame: the row's spinner is already standing in for exactly this walk.
     bool ok = false;
     const std::uint64_t bytes = compute_folder_size(full_path, &ok);
     if (ok) {
@@ -3446,19 +3481,63 @@ void App::browser_track_selected() {
     set_status(StatusKind::Error, "Could not save tracked-folders.json.");
     return;
   }
-  // Re-attach from the config (idempotent), re-sort, focus the entry, and leave the browser.
+  // Re-attach from the config and re-tag the rows, but stay put: picking several folders for one
+  // app is the common case (RetroArch's savefiles and savestates), and bouncing back to the grid
+  // after each one made that a chore. The grid is re-sorted once, on close.
   apply_tracked_folders();
-  apply_sort_and_rebuild();
-  refocus_selection_by_id(entry_id);
-  // apply_sort_and_rebuild refreshed the backup panel for whatever it focused first (index 0), so
-  // re-point it at the entry the refocus above actually landed on, the way move_selected_save does.
-  selected_backup_ = 0;
-  schedule_selected_save_time_resolve();
-  refresh_local_backups();
-  refresh_remote_backups_view();
-  close_directory_browser();
-  set_status(StatusKind::Success,
-             status_with_name("Added " + name + " to ", entry_name, "."));
+  reload_browser_rows(true);
+  set_status(StatusKind::Success, "Added " + name + " to " + entry_name + ".");
+}
+
+void App::browser_detach_selected(const std::string &full_path, const std::string &name) {
+  if (tracked_config_load_failed_) {
+    set_status(StatusKind::Info,
+               "Cannot update tracked-folders.json - fix or delete it first.");
+    return;
+  }
+  std::size_t entry_index = tracked_config_.entries.size();
+  for (std::size_t i = 0; i < tracked_config_.entries.size(); ++i) {
+    if (tracked_config_.entries[i].id == directory_browser_.entry_id) {
+      entry_index = i;
+      break;
+    }
+  }
+  if (entry_index == tracked_config_.entries.size()) {
+    set_status(StatusKind::Info, "Not one of this entry's folders.");
+    return;
+  }
+  // Keep a copy to restore on a failed write, since the config is only truly changed once the file
+  // on disk is.
+  const TrackedFolderEntry previous = tracked_config_.entries[entry_index];
+  std::vector<TrackedPath> &paths = tracked_config_.entries[entry_index].paths;
+  for (std::size_t i = 0; i < paths.size(); ++i) {
+    if (paths[i].path == full_path) {
+      paths.erase(paths.begin() + static_cast<long>(i));
+      break;
+    }
+  }
+  // An entry with no folders left is not a thing the config can express (parsing drops it), so the
+  // whole entry goes. For an app with its own savedata that just returns it to an ordinary row.
+  const bool dropping_entry = paths.empty();
+  if (dropping_entry) {
+    tracked_config_.entries.erase(tracked_config_.entries.begin() +
+                                  static_cast<long>(entry_index));
+  }
+  std::string write_error;
+  if (!write_tracked_folders_json_atomic(kTrackedFoldersPath, tracked_config_, &write_error)) {
+    // The write is atomic, so the file on disk is untouched; put the entry back as it was.
+    if (dropping_entry) {
+      tracked_config_.entries.insert(
+          tracked_config_.entries.begin() + static_cast<long>(entry_index), previous);
+    } else {
+      tracked_config_.entries[entry_index] = previous;
+    }
+    set_status(StatusKind::Error, "Could not save tracked-folders.json.");
+    return;
+  }
+  apply_tracked_folders();
+  reload_browser_rows(true);
+  set_status(StatusKind::Info, "Removed " + name + ".");
 }
 
 void App::cancel_sync_all_confirmation() {
@@ -3918,8 +3997,10 @@ int App::run() {
       // L opens the data-folder picker for a homebrew entry, folding extra ux0:data folders into
       // this entry's own backups. Nothing else in details uses the triggers.
       if ((pressed & SCE_CTRL_LTRIGGER) != 0 && slot_details_.entry_is_homebrew) {
+        // Details must close while the browser is up: the draw and input paths both check details
+        // first, so leaving it open would hide the browser behind it.
         slot_details_.open = false;
-        open_directory_browser();
+        open_directory_browser(true);
         previous_buttons = buttons;
         sceKernelDelayThread(kFrameDelayUs);
         continue;
@@ -4031,7 +4112,7 @@ int App::run() {
         close_directory_browser();
       }
       if (directory_browser_.open && !rows_changed && (pressed & SCE_CTRL_SQUARE) != 0) {
-        browser_track_selected();
+        browser_toggle_selected();
       }
       if (!directory_browser_.open) {
         // Closed this frame (cancel at root, Triangle, or a completed track); skip the partial
