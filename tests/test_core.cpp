@@ -1182,6 +1182,48 @@ void test_save_index_rejects_bad_input_but_keeps_healthy_entries() {
   EXPECT_EQ(parsed.app_db_mtime, 0LL);
 }
 
+void test_save_index_file_roundtrip_and_size_cap() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-index-file-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base);
+  const std::string path = (base / "save-titles.json").string();
+
+  vsm::SaveIndex index;
+  index.app_db_mtime = 7LL;
+  index.app_db_size = 11LL;
+  vsm::SaveIndexEntry entry;
+  entry.fingerprint = {true, 1LL, 2LL, 3LL};
+  entry.time_resolved = true;
+  entry.has_time = true;
+  entry.saved_at = {2026, 7, 25, 10, 0, 0};
+  entry.display_name = "Round Trip";
+  entry.title_id = "PCSR00001";
+  entry.icon_path = "icon.png";
+  index.entries["PCSR00001"] = entry;
+
+  std::string error;
+  EXPECT_TRUE(vsm::write_save_index_atomic(path, index, &error));
+  EXPECT_TRUE(error.empty());
+  const vsm::SaveIndex reread = vsm::read_save_index(path);
+  EXPECT_EQ(reread.app_db_mtime, 7LL);
+  EXPECT_EQ(reread.entries.size(), static_cast<std::size_t>(1));
+  EXPECT_EQ(vsm::format_save_datetime(reread.entries.at("PCSR00001").saved_at),
+            "2026-07-25T10:00:00");
+
+  // Oversized serialization must fail without touching the existing file.
+  vsm::SaveIndex huge = index;
+  huge.entries["PCSR00001"].display_name.assign(vsm::kMaxSaveIndexSize, 'x');
+  EXPECT_TRUE(!vsm::write_save_index_atomic(path, huge, &error));
+  EXPECT_EQ(error, "index too large");
+  EXPECT_EQ(vsm::read_save_index(path).entries["PCSR00001"].display_name, "Round Trip");
+
+  // A missing file reads as an empty index, not an error.
+  EXPECT_TRUE(vsm::read_save_index((base / "absent.json").string()).entries.empty());
+
+  std::filesystem::remove_all(base);
+}
+
 void test_build_save_index_carries_times_prunes_and_stamps() {
   vsm::SaveRecord plain;
   plain.id = "BHBB00001";
@@ -1202,6 +1244,7 @@ void test_build_save_index_carries_times_prunes_and_stamps() {
   empty_save.id = "PCSB77777";
   empty_save.display_name = "Empty Save";
   empty_save.fingerprint = {true, 400LL, 1LL, 50LL};
+  empty_save.saved_at = {2026, 3, 3, 3, 3, 3};
 
   vsm::SaveIndex previous;
   // Matching fingerprint: this resolved time must survive the rebuild even though the record
@@ -1235,6 +1278,8 @@ void test_build_save_index_carries_times_prunes_and_stamps() {
   const vsm::SaveIndexEntry &empty_entry = built.entries.at("PCSB77777");
   EXPECT_TRUE(empty_entry.time_resolved);
   EXPECT_TRUE(!empty_entry.has_time);
+  // The scan-time clock a no-time record carries must not leak into the stored entry.
+  EXPECT_EQ(vsm::format_save_datetime(empty_entry.saved_at), "0000-00-00T00:00:00");
 
   // Folder changed since the cached mount: the stale time is dropped, not carried.
   vsm::SaveRecord changed = mounted;
@@ -2496,6 +2541,7 @@ int main() {
   test_save_index_roundtrip_covers_all_three_time_states();
   test_save_index_reads_version_one_titles_forward();
   test_save_index_rejects_bad_input_but_keeps_healthy_entries();
+  test_save_index_file_roundtrip_and_size_cap();
   test_build_save_index_carries_times_prunes_and_stamps();
   test_backup_archive_reads_bounded_sdslot_entry_without_restoring();
   test_legacy_zip_metadata_can_be_recovered_without_rewriting_the_archive();

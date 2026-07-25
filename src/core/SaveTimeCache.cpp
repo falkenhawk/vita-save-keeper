@@ -62,16 +62,16 @@ SaveFingerprint compute_save_fingerprint(const std::string &save_path) {
 namespace {
 
 // Temp file then rename, same as the metadata sidecars: a reader never sees a half-written
-// cache, and durability across a power cut is not worth an fsync - the caches rebuild themselves.
+// cache, and durability across a power cut is not worth an fsync - the index rebuilds itself.
 bool write_json_atomic(const std::string &path, const std::string &json, std::string *error) {
   if (json.size() > kMaxSaveIndexSize) {
-    if (error) *error = "cache too large";
+    if (error) *error = "index too large";
     return false;
   }
   const std::string temporary = path + ".tmp";
   FILE *file = std::fopen(temporary.c_str(), "wb");
   if (!file) {
-    if (error) *error = "could not create cache file";
+    if (error) *error = "could not create index file";
     return false;
   }
   bool wrote = std::fwrite(json.data(), 1, json.size(), file) == json.size();
@@ -79,12 +79,12 @@ bool write_json_atomic(const std::string &path, const std::string &json, std::st
   wrote = std::fclose(file) == 0 && wrote;
   if (!wrote) {
     std::remove(temporary.c_str());
-    if (error) *error = "could not write cache file";
+    if (error) *error = "could not write index file";
     return false;
   }
   if (std::rename(temporary.c_str(), path.c_str()) != 0) {
     std::remove(temporary.c_str());
-    if (error) *error = "could not replace cache file";
+    if (error) *error = "could not replace index file";
     return false;
   }
   if (error) error->clear();
