@@ -106,7 +106,7 @@ private:
   const TrackedFolderEntry *applicable_base_entry(const std::string &id) const;
   // Routes one UI change through update_data_folder_override + persistence + re-apply, so an entry
   // matching the shipped base again drops its override and follows future base updates. Stamps
-  // modified and pushes the file to Drive best-effort when connected.
+  // modified; the Drive copy catches up at the next boot/refresh reconcile.
   bool set_entry_data_folders(const std::string &id, const std::string &title,
                               std::vector<TrackedPath> new_paths);
   // Reconciles backup-settings.json with its Drive copy (PSV Saves root). Runs after every
@@ -120,8 +120,9 @@ private:
   // records for configured apps the scan found no savedata folder for, and resolves the time of
   // every entry that ends up with extras. Idempotent, and it *assigns* rather than appends, so a
   // repeat call after an exclude also drops what an earlier call attached. Must run after a scan
-  // populates saves_ and before the sort/rebuild; callers re-sort afterwards.
-  void apply_tracked_folders();
+  // populates saves_ and before the sort/rebuild; callers re-sort afterwards. resolve_times=false
+  // skips the per-entry mtime walks - the picker toggles pass it and settle times once on close.
+  void apply_tracked_folders(bool resolve_times = true);
   // Returns false if the user canceled (Square) mid-read, so the caller can keep the name order.
   bool resolve_all_save_times();
   bool resolve_save_time(SaveRecord *save);

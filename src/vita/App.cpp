@@ -1149,15 +1149,15 @@ bool App::set_entry_data_folders(const std::string &id, const std::string &title
     tracked_config_.modified = previous_modified;
     return false;
   }
-  apply_tracked_folders();
-  // Best-effort: an offline change reaches Drive at the next boot or refresh instead.
-  if (google_connected_ && HttpClient::network_reachable()) {
-    upload_backup_settings();
-  }
+  // Times are NOT re-resolved here: a picker visit toggles several folders, and each resolve is a
+  // full mtime walk of every extras entry. close_directory_browser does it once, behind a busy
+  // frame. The Drive copy catches up at the next boot or refresh - pushing here put two HTTPS
+  // round trips on the render thread and lagged every Square press.
+  apply_tracked_folders(false);
   return true;
 }
 
-void App::apply_tracked_folders() {
+void App::apply_tracked_folders(bool resolve_times) {
   // Attach each config entry's extra folders to the app's own record, matched by id. Doing it by
   // id (rather than by path) means an entry survives its app gaining or losing a savedata folder
   // between launches.
@@ -1190,7 +1190,12 @@ void App::apply_tracked_folders() {
   }
 
   // Times come from the live directories (newest observed file across the savedata folder and every
-  // extra). This happens here, after attaching, not in the scanner, which knows nothing about extras.
+  // extra). This happens here, after attaching, not in the scanner, which knows nothing about
+  // extras. Skipped while the picker is toggling (see set_entry_data_folders); the close pass
+  // resolves once for everything.
+  if (!resolve_times) {
+    return;
+  }
   for (SaveRecord &save : saves_) {
     if (!save.extra_paths.empty()) {
       resolve_data_folder_time(&save);
@@ -3428,9 +3433,6 @@ void App::toggle_entry_skipped() {
     tracked_config_.modified = previous_modified;
     return;
   }
-  if (google_connected_ && HttpClient::network_reachable()) {
-    upload_backup_settings();
-  }
   // Details, when open, stays on this save; flip its footer hint to match the new state.
   slot_details_.entry_skipped = now_skipped;
   // No rebuild: skipping changes what the batch sweep touches, not where the entry sits in the grid.
@@ -3498,9 +3500,16 @@ void App::close_directory_browser() {
   // status afterwards if it has something to say.
   clear_status();
 
-  // Folder changes were applied to saves_ as they happened but the grid was left alone; one
-  // re-sort here covers the whole visit, and it already refocuses the entry (the selection never
-  // moved behind the modal) and refreshes its backup rows.
+  // Folder changes were applied to saves_ as they happened, but their save times and the grid
+  // order were deliberately left alone (each resolve is a full mtime walk - too slow per toggle).
+  // Settle both now, once, behind a busy frame; the re-sort also refocuses the entry (the
+  // selection never moved behind the modal) and refreshes its backup rows.
+  ui_.draw_busy("Updating save times", 0, -1);
+  for (SaveRecord &save : saves_) {
+    if (!save.extra_paths.empty()) {
+      resolve_data_folder_time(&save);
+    }
+  }
   apply_sort_and_rebuild();
 
   const SaveRecord *current = selected_save_record();
@@ -3677,18 +3686,28 @@ void App::start_browser_size_walk() {
 }
 
 void App::refresh_browser_sizing_marks() {
-  // The spinner means "this folder's measurement is under way or lined up" - the active walk's
-  // target and every queued folder alike, so a row enqueued behind a long walk shows its state
-  // immediately instead of sitting on "..." until its turn comes.
+  // The spinner means "this folder's total is on its way": the active walk's target, every queued
+  // folder, and every row INSIDE one of those - the depth-first walk caches each subtree it
+  // unwinds through, so drilling into a folder mid-measurement shows its children spinning and
+  // then filling in as their branches complete.
+  const auto scheduled = [&](const std::string &path) {
+    if (browser_size_walk_.active &&
+        (browser_size_walk_.target == path || path_is_inside(path, browser_size_walk_.target))) {
+      return true;
+    }
+    for (const std::string &queued : browser_size_queue_) {
+      if (queued == path || path_is_inside(path, queued)) {
+        return true;
+      }
+    }
+    return false;
+  };
   for (DirectoryBrowserState::Row &row : directory_browser_.rows) {
     if (row.parent_link || row.size_known) {
       row.sizing = false;
       continue;
     }
-    const std::string path = directory_browser_.current_path + "/" + row.name;
-    row.sizing = (browser_size_walk_.active && browser_size_walk_.target == path) ||
-                 std::find(browser_size_queue_.begin(), browser_size_queue_.end(), path) !=
-                     browser_size_queue_.end();
+    row.sizing = scheduled(directory_browser_.current_path + "/" + row.name);
   }
 }
 

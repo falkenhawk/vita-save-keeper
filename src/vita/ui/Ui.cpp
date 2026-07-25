@@ -117,6 +117,58 @@ void draw_circle_spinner(float cx, float cy, unsigned int frame, unsigned int ba
   }
 }
 
+// A pencil, for the "Data Folders" row: a diagonal body stepping down-left in small squares - at
+// 13px a true diagonal turns to mush, while pixel steps stay crisp - ending in a two-step taper
+// for the tip. right_x is the glyph's right edge, top_y its top.
+void draw_pencil_glyph(int right_x, int top_y, unsigned int color) {
+  const int bx = right_x - 13;
+  vita2d_draw_rectangle(bx + 10, top_y, 3, 3, color);      // eraser end
+  vita2d_draw_rectangle(bx + 8, top_y + 2, 3, 3, color);   // body...
+  vita2d_draw_rectangle(bx + 6, top_y + 4, 3, 3, color);
+  vita2d_draw_rectangle(bx + 4, top_y + 6, 3, 3, color);
+  vita2d_draw_rectangle(bx + 2, top_y + 8, 3, 3, color);
+  vita2d_draw_rectangle(bx + 1, top_y + 10, 2, 2, color);  // tip taper
+  vita2d_draw_rectangle(bx, top_y + 12, 1, 1, color);      // tip
+}
+
+// Checkbox states for the folder picker's marker column.
+enum class FolderMark {
+  Available,  // hollow outline: not included, free to include
+  Included,   // filled + check: part of this entry's backup
+  Covered,    // dim fill, no check: inside an included parent, backed up through it
+  InUse,      // grey fill: another entry's folder
+};
+
+// A 12px checkbox. The check mark is pixel-stepped squares - a smooth diagonal turns to mush at
+// this size - and the box outline is four 1px rects. left_x/top_y are the box's top-left corner.
+void draw_folder_mark(int left_x, int top_y, FolderMark mark) {
+  constexpr int kBox = 12;
+  constexpr unsigned int kCheckColor = RGBA8(8, 13, 21, 255);  // background navy, cuts the fill
+  switch (mark) {
+  case FolderMark::Available:
+    vita2d_draw_rectangle(left_x, top_y, kBox, 1, kColorIdleDot);
+    vita2d_draw_rectangle(left_x, top_y + kBox - 1, kBox, 1, kColorIdleDot);
+    vita2d_draw_rectangle(left_x, top_y + 1, 1, kBox - 2, kColorIdleDot);
+    vita2d_draw_rectangle(left_x + kBox - 1, top_y + 1, 1, kBox - 2, kColorIdleDot);
+    return;
+  case FolderMark::Included:
+    vita2d_draw_rectangle(left_x, top_y, kBox, kBox, kColorSuccess);
+    // Pixel check: short down-stroke, longer up-stroke.
+    vita2d_draw_rectangle(left_x + 2, top_y + 6, 2, 2, kCheckColor);
+    vita2d_draw_rectangle(left_x + 4, top_y + 8, 2, 2, kCheckColor);
+    vita2d_draw_rectangle(left_x + 6, top_y + 6, 2, 2, kCheckColor);
+    vita2d_draw_rectangle(left_x + 8, top_y + 4, 2, 2, kCheckColor);
+    return;
+  case FolderMark::Covered:
+    vita2d_draw_rectangle(left_x, top_y, kBox, kBox,
+                          (kColorSuccess & 0x00FFFFFFu) | 0x8C000000u);
+    return;
+  case FolderMark::InUse:
+    vita2d_draw_rectangle(left_x, top_y, kBox, kBox, kColorIdleDot);
+    return;
+  }
+}
+
 // A "no entry" mark: a ring with a bar across it, drawn as a filled disc punched out by a disc of
 // the plate colour behind it. At this size (radius 5) a diagonal slash turns to mush, so the bar is
 // horizontal - it still reads as "not this one" and stays crisp on the 18px tag plate.
@@ -1328,19 +1380,18 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
         draw_text(fonts_, kSizeRight - right_w, text_y, focused ? kColorText : kColorMuted,
                   kTextSizeSmall, size_text.c_str());
       }
-      // Inclusion marker: a disc in a fixed column ahead of the name, so states line up down the
-      // list instead of trailing ragged after names of every length. Bright green = included here
-      // (directly, or through an included parent - Square explains the difference), grey = another
-      // entry's. No marker means available.
-      if (row.tracked_here || !row.covered_by.empty() || row.tracked_elsewhere) {
-        const unsigned int mark_color = row.tracked_elsewhere
-                                            ? kColorIdleDot
-                                            : (row.tracked_here
-                                                   ? kColorSuccess
-                                                   : (kColorSuccess & 0x00FFFFFFu) | 0x8C000000u);
-        vita2d_draw_fill_circle(static_cast<float>(kListX) + 22.0f,
-                                static_cast<float>(y) + 18.0f, 4.0f, mark_color);
+      // Inclusion marker: a checkbox in a fixed column ahead of the name, so states line up down
+      // the list - and Square literally toggles it. Hollow = available, checked green = included
+      // here, dim green = covered by an included parent (Square explains), grey = another entry's.
+      FolderMark mark = FolderMark::Available;
+      if (row.tracked_here) {
+        mark = FolderMark::Included;
+      } else if (!row.covered_by.empty()) {
+        mark = FolderMark::Covered;
+      } else if (row.tracked_elsewhere) {
+        mark = FolderMark::InUse;
       }
+      draw_folder_mark(kListX + 16, y + 12, mark);
       const unsigned int name_color =
           row.tracked_elsewhere ? kColorIdleDot : (focused ? kColorText : kColorMuted);
       const int name_x = kListX + 34;
@@ -1644,11 +1695,9 @@ void Ui::draw_backup_panel(const UiState &state) {
       max_text_width = 150;
     } else if (row.data_folders) {
       // An action row, not a backup: no presence glyph (there is nothing on the card or in the
-      // Cloud to report), just a right-aligned hint at what the button does. The label itself
+      // Cloud to report), a pencil in its place - the row edits the folder set. The label itself
       // already carries the count.
-      static const char *const kHint = "edit";
-      draw_text(fonts_, 926 - measure_text(kTextSizeTiny, kHint), y + 23,
-                selected ? kColorAccent : kColorIdleDot, kTextSizeTiny, kHint);
+      draw_pencil_glyph(926, y + 11, selected ? kColorAccent : kColorIdleDot);
       max_text_width = 300;
     } else {
       max_text_width = 340;
