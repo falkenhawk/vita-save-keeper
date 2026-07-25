@@ -1915,7 +1915,12 @@ void test_only_last_saved_sort_requires_all_save_times() {
 void test_app_settings_roundtrip_and_unknown_keys() {
   vsm::AppSettings settings;
   settings.sort_mode = vsm::SaveSortMode::LastBackup;
+  // exact match also pins that a false cleaned_empty_backup_folders stays out of the file
   EXPECT_EQ(vsm::serialize_app_settings(settings), "sort=backup\n");
+
+  settings.cleaned_empty_backup_folders = true;
+  EXPECT_EQ(vsm::serialize_app_settings(settings),
+            "sort=backup\ncleaned_empty_backup_folders=1\n");
 
   const vsm::AppSettings parsed =
       vsm::parse_app_settings("future_key=whatever\r\nsort=saved\n");
@@ -1927,6 +1932,14 @@ void test_app_settings_roundtrip_and_unknown_keys() {
 
   const vsm::AppSettings defaults = vsm::parse_app_settings("");
   EXPECT_TRUE(defaults.sort_mode == vsm::SaveSortMode::Name);
+
+  // A settings file written before this key existed must leave the sweep pending, so upgrading
+  // installs clean up once.
+  EXPECT_TRUE(!vsm::parse_app_settings("sort=name\n").cleaned_empty_backup_folders);
+  EXPECT_TRUE(vsm::parse_app_settings("cleaned_empty_backup_folders=1\r\n")
+                  .cleaned_empty_backup_folders);
+  EXPECT_TRUE(!vsm::parse_app_settings("cleaned_empty_backup_folders=0\n")
+                   .cleaned_empty_backup_folders);
 }
 
 void test_auto_backup_suffix_display_and_content_matching() {

@@ -20,6 +20,8 @@ AppSettings parse_app_settings(const std::string &text) {
       const std::string value = line.substr(equals + 1);
       if (key == "sort") {
         settings.sort_mode = save_sort_mode_from_string(value);
+      } else if (key == "cleaned_empty_backup_folders") {
+        settings.cleaned_empty_backup_folders = value == "1";
       }
     }
     start = end + 1;
@@ -28,7 +30,11 @@ AppSettings parse_app_settings(const std::string &text) {
 }
 
 std::string serialize_app_settings(const AppSettings &settings) {
-  return "sort=" + save_sort_mode_to_string(settings.sort_mode) + "\n";
+  std::string text = "sort=" + save_sort_mode_to_string(settings.sort_mode) + "\n";
+  if (settings.cleaned_empty_backup_folders) {
+    text += "cleaned_empty_backup_folders=1\n";
+  }
+  return text;
 }
 
 } // namespace vsm
