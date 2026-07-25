@@ -1033,6 +1033,16 @@ bool App::upload_backup_settings() {
   return true;
 }
 
+void App::sync_backup_settings_if_dirty() {
+  // Local changes ride the next backup upload's network moment - the connection is warm and a
+  // modal is already up - instead of lagging a Square press or waiting for the next boot. With
+  // nothing changed since the last agreement this costs nothing at all; adopting remote-side
+  // changes stays a boot/refresh concern.
+  if (tracked_config_.modified != backup_settings_synced_) {
+    sync_backup_settings();
+  }
+}
+
 void App::sync_backup_settings() {
   if (tracked_config_load_failed_ || !google_connected_) {
     return;
@@ -2718,6 +2728,7 @@ void App::handle_transfer_button() {
   if (!uploaded.ok) {
     return;
   }
+  sync_backup_settings_if_dirty();
   refresh_remote_backups_view();
   // The rebuild may have shifted the rows; keep the selection on the file this action was about.
   focus_backup_row_by_identity(backup_name);
@@ -4039,6 +4050,9 @@ void App::begin_sync_all() {
 
 void App::run_sync_all() {
   sync_all_confirmation_pending_ = false;
+  // Once, ahead of the whole run - never per game - and before the targets are drawn up, so a
+  // freshly adopted skip list already shapes this very sweep.
+  sync_backup_settings_if_dirty();
   const std::vector<std::size_t> targets = batch_targets();
   const std::size_t total = targets.size();
   SyncRunCounts run;

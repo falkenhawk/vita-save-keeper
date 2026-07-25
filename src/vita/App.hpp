@@ -114,6 +114,9 @@ private:
   // the local side loses a two-sided conflict its version is kept as backup-settings.conflict.json
   // (a losing remote is recoverable from Drive's revision history instead).
   void sync_backup_settings();
+  // The reconcile, only when local changes await: rides a backup upload (single or once per batch)
+  // so changes reach Drive at the next natural network moment.
+  void sync_backup_settings_if_dirty();
   // Uploads the local file over the Drive copy (create or update) and records the agreement stamp.
   bool upload_backup_settings();
   // Attaches each config entry's extra data folders to its app's record in saves_, synthesizes
