@@ -1228,8 +1228,8 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
     }
     const char *primary_label = "Backup";
     if (state.data_folders_row) {
-      // Opens the picker; the focused row already reads "Data folders (N)".
-      primary_label = "Open";
+      // Opens the picker for editing the set; the focused row already reads "Data folders (N)".
+      primary_label = "Edit";
     } else if (is_snapshot) {
       primary_label = "Restore";
     }
@@ -1894,11 +1894,11 @@ void Ui::draw_footer(const UiState &state) {
   } else if (!focused_row->has_remote()) {
     hints.push_back({ButtonSymbol::Select, "Upload", nullptr, nullptr});
   }
-  // On the "Data folders" row the press opens the picker; the row already names what it is, so
-  // the hint names the action.
+  // On the "Data folders" row the press opens the picker for editing the set; the row already
+  // names what it is, so the hint names the action.
   const char *primary_label = "Restore";
   if (data_row_focused) {
-    primary_label = "Open";
+    primary_label = "Edit";
   } else if (new_backup_focused) {
     primary_label = "Backup";
   }

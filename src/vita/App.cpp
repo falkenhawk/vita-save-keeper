@@ -21,6 +21,7 @@
 #include <psp2/common_dialog.h>
 #include <psp2/ctrl.h>
 #include <psp2/kernel/modulemgr.h>
+#include <psp2/io/stat.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/system_param.h>
@@ -3455,6 +3456,7 @@ void App::open_directory_browser(bool from_details) {
   }
   abort_browser_size_walk();
   browser_size_cache_.clear();
+  browser_size_queue_.clear();
   directory_browser_ = {};
   directory_browser_.open = true;
   directory_browser_.entry_id = selected->id;
@@ -3469,6 +3471,7 @@ void App::close_directory_browser() {
   const std::string entry_id = directory_browser_.entry_id;
   const bool return_to_details = directory_browser_.return_to_details;
   abort_browser_size_walk();
+  browser_size_queue_.clear();
   directory_browser_.open = false;
   directory_browser_.rows.clear();
   directory_browser_.large_confirm_pending = false;
@@ -3601,8 +3604,7 @@ void App::browser_go_up() {
 void App::schedule_browser_size_resolve() {
   // Debounce until the focused row settles, mirroring the save-time resolve, so scrolling the list
   // does not size every folder it passes. A walk already running is NOT abandoned - its progress
-  // (VitaDB is thousands of stat calls) finishes into the cache, and completion chains to the row
-  // the cursor sits on then.
+  // finishes into the cache; rows the cursor rests on meanwhile join a queue behind it.
   if (directory_browser_.selected >= directory_browser_.rows.size() ||
       directory_browser_.rows[directory_browser_.selected].size_known ||
       directory_browser_.rows[directory_browser_.selected].parent_link) {
@@ -3613,28 +3615,62 @@ void App::schedule_browser_size_resolve() {
 }
 
 void App::start_browser_size_walk() {
+  const auto begin_walk = [&](const std::string &path) {
+    browser_size_walk_ = {};
+    browser_size_walk_.active = true;
+    browser_size_walk_.target = path;
+    browser_size_walk_.stack.push_back({path, nullptr, 0});
+  };
   if (browser_size_walk_.active) {
-    // One walk at a time; when it completes it chains straight to the focused row, so this row is
-    // not forgotten, just queued behind the work already under way.
+    // One walk at a time. The settled row joins the queue instead, measured in hover order once
+    // the current walk finishes.
+    if (directory_browser_.selected < directory_browser_.rows.size()) {
+      const DirectoryBrowserState::Row &row = directory_browser_.rows[directory_browser_.selected];
+      if (!row.size_known && !row.parent_link) {
+        const std::string path = directory_browser_.current_path + "/" + row.name;
+        if (path != browser_size_walk_.target &&
+            std::find(browser_size_queue_.begin(), browser_size_queue_.end(), path) ==
+                browser_size_queue_.end()) {
+          browser_size_queue_.push_back(path);
+        }
+      }
+    }
     return;
   }
-  if (directory_browser_.selected >= directory_browser_.rows.size()) {
-    return;
+  // The focused row goes first; otherwise take the oldest hovered folder still worth measuring.
+  if (directory_browser_.selected < directory_browser_.rows.size()) {
+    DirectoryBrowserState::Row &row = directory_browser_.rows[directory_browser_.selected];
+    if (!row.size_known && !row.parent_link) {
+      begin_walk(directory_browser_.current_path + "/" + row.name);
+      row.sizing = true;
+      return;
+    }
   }
-  DirectoryBrowserState::Row &row = directory_browser_.rows[directory_browser_.selected];
-  if (row.size_known || row.parent_link) {
-    return;
+  while (!browser_size_queue_.empty()) {
+    const std::string path = browser_size_queue_.front();
+    browser_size_queue_.erase(browser_size_queue_.begin());
+    if (browser_size_cache_.find(path) == browser_size_cache_.end()) {
+      begin_walk(path);
+      const std::size_t slash = path.rfind('/');
+      if (path.substr(0, slash) == directory_browser_.current_path) {
+        const std::string name = path.substr(slash + 1);
+        for (DirectoryBrowserState::Row &row : directory_browser_.rows) {
+          if (row.name == name) {
+            row.sizing = true;
+            break;
+          }
+        }
+      }
+      return;
+    }
   }
-  browser_size_walk_ = {};
-  browser_size_walk_.active = true;
-  browser_size_walk_.target = directory_browser_.current_path + "/" + row.name;
-  browser_size_walk_.pending.push_back(browser_size_walk_.target);
-  row.sizing = true;
 }
 
 void App::abort_browser_size_walk() {
-  if (browser_size_walk_.dir) {
-    closedir(browser_size_walk_.dir);
+  for (BrowserSizeWalkFrame &frame : browser_size_walk_.stack) {
+    if (frame.dir) {
+      closedir(frame.dir);
+    }
   }
   browser_size_walk_ = {};
   for (DirectoryBrowserState::Row &row : directory_browser_.rows) {
@@ -3642,69 +3678,92 @@ void App::abort_browser_size_walk() {
   }
 }
 
+// Fills the on-screen row for path when its parent directory is the one being browsed.
+void App::fill_browser_row_size(const std::string &path, std::uint64_t bytes) {
+  const std::size_t slash = path.rfind('/');
+  if (slash == std::string::npos || path.substr(0, slash) != directory_browser_.current_path) {
+    return;
+  }
+  const std::string name = path.substr(slash + 1);
+  for (DirectoryBrowserState::Row &row : directory_browser_.rows) {
+    if (row.name == name) {
+      row.size_bytes = bytes;
+      row.size_known = true;
+      row.sizing = false;
+      break;
+    }
+  }
+}
+
 void App::advance_browser_size_walk() {
   if (!browser_size_walk_.active) {
     return;
   }
-  // One frame's slice, budgeted by TIME, not by step count: a stat on the memory card's FAT stack
-  // can cost a millisecond or more when a directory holds thousands of entries, so a fixed step
-  // count still ate whole frames on trees like VitaDB's. 5 ms leaves most of a 60 fps frame for
-  // input and drawing however slow the card is; the step cap is only a backstop for a clock hiccup.
-  constexpr SceUInt64 kFrameBudgetUs = 5000;
+  // One frame's slice, budgeted by time and checked EVERY step - a single directory operation on
+  // the card's FAT stack can cost more than a millisecond, so even a 16-step check window let a
+  // slice overrun the frame and eat button presses. 3 ms leaves the bulk of a 60 fps frame free;
+  // the step cap is only a backstop for a clock hiccup.
+  //
+  // No stat() at all: the Vita's readdir already returns each entry's SceIoStat in d_stat, which
+  // halves the syscalls and skips the expensive path-based lookup that made big trees crawl.
+  //
+  // The walk is depth-first with one open directory per level. When a directory finishes, its
+  // total (own files + finished children) is cached and added to its parent - so every subfolder's
+  // size falls out of the same walk, deepest branches first, and stepping into a freshly sized
+  // folder finds its children already measured.
+  constexpr SceUInt64 kFrameBudgetUs = 3000;
   constexpr int kMaxStepsPerFrame = 4096;
   const SceUInt64 slice_start = sceKernelGetProcessTimeWide();
   BrowserSizeWalk &walk = browser_size_walk_;
   for (int step = 0; step < kMaxStepsPerFrame; ++step) {
-    if ((step & 15) == 0 && step != 0 &&
-        sceKernelGetProcessTimeWide() - slice_start >= kFrameBudgetUs) {
+    if (step != 0 && sceKernelGetProcessTimeWide() - slice_start >= kFrameBudgetUs) {
       return;
     }
-    if (!walk.dir) {
-      if (walk.pending.empty()) {
-        // Done: remember the total, fill the row in if the walk's directory is the one on screen,
-        // and chain straight to the row the cursor sits on now - so scrolling away mid-walk never
-        // loses the progress, it just queues the next measurement.
-        browser_size_cache_[walk.target] = walk.bytes;
-        const std::size_t slash = walk.target.rfind('/');
-        if (walk.target.substr(0, slash) == directory_browser_.current_path) {
-          const std::string name = walk.target.substr(slash + 1);
-          for (DirectoryBrowserState::Row &row : directory_browser_.rows) {
-            if (row.name == name) {
-              row.size_bytes = walk.bytes;
-              row.size_known = true;
-              break;
-            }
-          }
-        }
-        abort_browser_size_walk();
-        start_browser_size_walk();
-        return;
+    if (walk.stack.empty()) {
+      // Whole target finished; its total was cached by the final pop below. Chain to whatever the
+      // cursor wants next (focused row first, then the hover queue).
+      abort_browser_size_walk();
+      start_browser_size_walk();
+      return;
+    }
+    BrowserSizeWalkFrame &frame = walk.stack.back();
+    if (!frame.dir) {
+      frame.dir = opendir(frame.path.c_str());
+      if (!frame.dir) {
+        // An unreadable directory contributes nothing, same as compute_folder_size's walk.
+        walk.stack.pop_back();
+        continue;
       }
-      walk.dir_path = walk.pending.back();
-      walk.pending.pop_back();
-      // An unreadable subdirectory contributes nothing, same as compute_folder_size's walk.
-      walk.dir = opendir(walk.dir_path.c_str());
       continue;
     }
-    dirent *entry = readdir(walk.dir);
+    dirent *entry = readdir(frame.dir);
     if (!entry) {
-      closedir(walk.dir);
-      walk.dir = nullptr;
+      // Directory done: remember its subtree total and roll it up into the parent.
+      closedir(frame.dir);
+      const std::string finished_path = frame.path;
+      const std::uint64_t finished_bytes = frame.bytes;
+      walk.stack.pop_back();
+      browser_size_cache_[finished_path] = finished_bytes;
+      fill_browser_row_size(finished_path, finished_bytes);
+      if (!walk.stack.empty()) {
+        walk.stack.back().bytes += finished_bytes;
+      }
       continue;
     }
     const std::string name = entry->d_name;
     if (name == "." || name == "..") {
       continue;
     }
-    const std::string child = walk.dir_path + "/" + name;
-    struct stat info {};
-    if (stat(child.c_str(), &info) != 0) {
-      continue;
-    }
-    if (S_ISDIR(info.st_mode)) {
-      walk.pending.push_back(child);
-    } else if (S_ISREG(info.st_mode)) {
-      walk.bytes += static_cast<std::uint64_t>(info.st_size);
+    if (SCE_S_ISDIR(entry->d_stat.st_mode)) {
+      const auto cached = browser_size_cache_.find(frame.path + "/" + name);
+      if (cached != browser_size_cache_.end()) {
+        // Already measured by an earlier walk; reuse instead of descending again.
+        frame.bytes += cached->second;
+      } else {
+        walk.stack.push_back({frame.path + "/" + name, nullptr, 0});
+      }
+    } else if (SCE_S_ISREG(entry->d_stat.st_mode)) {
+      frame.bytes += static_cast<std::uint64_t>(entry->d_stat.st_size);
     }
   }
 }

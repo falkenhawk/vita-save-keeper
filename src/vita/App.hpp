@@ -174,6 +174,7 @@ private:
   void start_browser_size_walk();
   void abort_browser_size_walk();
   void advance_browser_size_walk();
+  void fill_browser_row_size(const std::string &path, std::uint64_t bytes);
   void handle_action_button();
   void create_new_backup();
   // busy_label, when set, names the modal that animates byte progress while the save is hashed
@@ -376,17 +377,23 @@ private:
   // known. Mirrors pending_time_resolve_frames_, so scrolling the list does not size every folder
   // it passes.
   int pending_browser_size_frames_{-1};
-  // State of the incremental size walk: the directory currently being read (held open across
-  // frames), the subdirectories still queued, and the byte total so far.
+  // State of the incremental size walk: a depth-first stack with one open directory per level, so
+  // every SUBdirectory's total is known the moment the walk unwinds through it (deepest branches
+  // first) and lands in the cache - sizing VitaDB once also sizes everything inside it.
+  struct BrowserSizeWalkFrame {
+    std::string path;
+    DIR *dir{};
+    std::uint64_t bytes{};
+  };
   struct BrowserSizeWalk {
     bool active{};
-    std::string target;  // the folder being sized, as current_path + "/" + row name
-    std::uint64_t bytes{};
-    DIR *dir{};
-    std::string dir_path;
-    std::vector<std::string> pending;
+    std::string target;  // the folder whose row is spinning
+    std::vector<BrowserSizeWalkFrame> stack;
   };
   BrowserSizeWalk browser_size_walk_;
+  // Folders the cursor rested on while another walk was running, measured in that order once it
+  // finishes; the focused row always goes first.
+  std::vector<std::string> browser_size_queue_;
   // Sizes measured this visit, keyed by full path, so re-tagging or re-entering a directory never
   // wipes what was already walked. Cleared when the picker opens.
   std::map<std::string, std::uint64_t> browser_size_cache_;
