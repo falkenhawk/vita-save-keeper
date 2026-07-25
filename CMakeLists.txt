@@ -140,6 +140,11 @@ else()
     FILE sce_sys/resources/cloud-drive-only.png sce_sys/resources/cloud-drive-only.png
     FILE sce_sys/resources/cloud-local-only.png sce_sys/resources/cloud-local-only.png
     FILE sce_sys/resources/data-folders.json sce_sys/resources/data-folders.json
+    FILE sce_sys/resources/folder-edit.png sce_sys/resources/folder-edit.png
+    FILE sce_sys/resources/mark-available.png sce_sys/resources/mark-available.png
+    FILE sce_sys/resources/mark-included.png sce_sys/resources/mark-included.png
+    FILE sce_sys/resources/mark-covered.png sce_sys/resources/mark-covered.png
+    FILE sce_sys/resources/mark-inuse.png sce_sys/resources/mark-inuse.png
     FILE ${CMAKE_CURRENT_BINARY_DIR}/src/vita/mount/kernel/save-data-kernel.skprx sce_sys/save-data-kernel.skprx
     FILE ${CMAKE_CURRENT_BINARY_DIR}/src/vita/mount/user/save-data-user.suprx sce_sys/save-data-user.suprx
   )

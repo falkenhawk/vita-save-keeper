@@ -117,9 +117,7 @@ void draw_circle_spinner(float cx, float cy, unsigned int frame, unsigned int ba
   }
 }
 
-// A folder silhouette for the "Data Folders" row: tab over body, all axis-aligned - diagonals turn
-// to mush at this size (a pixel-stepped pencil here read as a smear on hardware). The footer's
-// "Edit" hint carries the verb; the glyph carries the noun. right_x is the right edge, top_y the top.
+// Primitive stand-in for folder-edit.png, used only when the texture fails to load.
 void draw_folder_glyph(int right_x, int top_y, unsigned int color) {
   const int bx = right_x - 14;
   vita2d_draw_rectangle(bx, top_y, 6, 2, color);
@@ -134,9 +132,9 @@ enum class FolderMark {
   InUse,      // grey fill: another entry's folder
 };
 
-// A 14px checkbox with 2px borders - the 12px/1px first cut read as flyspecks on the OLED. The
-// check is pixel-stepped 3px squares; a smooth diagonal turns to mush at this size. left_x/top_y
-// are the box's top-left corner.
+// Primitive stand-in for the PNG marks (mark-*.png), used only when a texture fails to load - the
+// pixel-stepped check reads far worse than the anti-aliased asset, but a wrong-looking mark still
+// beats a missing one.
 void draw_folder_mark(int left_x, int top_y, FolderMark mark) {
   constexpr int kBox = 14;
   constexpr unsigned int kCheckColor = RGBA8(8, 13, 21, 255);  // background navy, cuts the fill
@@ -175,6 +173,7 @@ void draw_no_entry_glyph(float cx, float cy, unsigned int color, unsigned int pl
 }
 
 enum class ButtonSymbol {
+  TriggerLR,  // pill reading "L/R", like the SEL/START pills
   Circle,
   Cross,
   Square,
@@ -503,8 +502,11 @@ int hint_width(const FontSet &fonts, const HintSpec &hint) {
   if (hint.symbol == ButtonSymbol::Label) {
     return width;  // text only, no glyph box
   }
-  if (hint.symbol == ButtonSymbol::Select || hint.symbol == ButtonSymbol::Start) {
-    const char *pill_text = hint.symbol == ButtonSymbol::Start ? "START" : "SEL";
+  if (hint.symbol == ButtonSymbol::Select || hint.symbol == ButtonSymbol::Start ||
+      hint.symbol == ButtonSymbol::TriggerLR) {
+    const char *pill_text = hint.symbol == ButtonSymbol::Start
+                                ? "START"
+                                : (hint.symbol == ButtonSymbol::TriggerLR ? "L/R" : "SEL");
     return text_width(fonts, kTextSizePill, pill_text) + 12 + 8 + width;
   }
   return 22 + width;
@@ -534,8 +536,11 @@ void draw_hint(const FontSet &fonts, int x, const HintSpec &hint) {
   if (hint.symbol == ButtonSymbol::Label) {
     // No glyph: the label text starts at the entry's left edge.
     text_x = x;
-  } else if (hint.symbol == ButtonSymbol::Select || hint.symbol == ButtonSymbol::Start) {
-    const char *pill_text = hint.symbol == ButtonSymbol::Start ? "START" : "SEL";
+  } else if (hint.symbol == ButtonSymbol::Select || hint.symbol == ButtonSymbol::Start ||
+             hint.symbol == ButtonSymbol::TriggerLR) {
+    const char *pill_text = hint.symbol == ButtonSymbol::Start
+                                ? "START"
+                                : (hint.symbol == ButtonSymbol::TriggerLR ? "L/R" : "SEL");
     // Size the pill from the measured text so the label never spills past its edge.
     const int pill_w = text_width(fonts, kTextSizePill, pill_text) + 12;
     // All-even geometry: 12px caps + 4px padding each side = 20px box, centred 8/8 in the
@@ -733,6 +738,11 @@ bool Ui::initialize() {
   cloud_synced_tex_ = vita2d_load_PNG_file("app0:sce_sys/resources/cloud-synced.png");
   cloud_drive_only_tex_ = vita2d_load_PNG_file("app0:sce_sys/resources/cloud-drive-only.png");
   cloud_local_only_tex_ = vita2d_load_PNG_file("app0:sce_sys/resources/cloud-local-only.png");
+  folder_edit_tex_ = vita2d_load_PNG_file("app0:sce_sys/resources/folder-edit.png");
+  mark_available_tex_ = vita2d_load_PNG_file("app0:sce_sys/resources/mark-available.png");
+  mark_included_tex_ = vita2d_load_PNG_file("app0:sce_sys/resources/mark-included.png");
+  mark_covered_tex_ = vita2d_load_PNG_file("app0:sce_sys/resources/mark-covered.png");
+  mark_inuse_tex_ = vita2d_load_PNG_file("app0:sce_sys/resources/mark-inuse.png");
 
   return any_font || fonts_.fallback != nullptr;
 }
@@ -745,6 +755,14 @@ void Ui::shutdown() {
   if (cloud_drive_only_tex_) {
     vita2d_free_texture(cloud_drive_only_tex_);
     cloud_drive_only_tex_ = nullptr;
+  }
+  for (vita2d_texture **texture :
+       {&folder_edit_tex_, &mark_available_tex_, &mark_included_tex_, &mark_covered_tex_,
+        &mark_inuse_tex_}) {
+    if (*texture) {
+      vita2d_free_texture(*texture);
+      *texture = nullptr;
+    }
   }
   if (cloud_local_only_tex_) {
     vita2d_free_texture(cloud_local_only_tex_);
@@ -1387,10 +1405,30 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
       } else if (row.tracked_elsewhere) {
         mark = FolderMark::InUse;
       }
-      draw_folder_mark(kListX + 16, y + 11, mark);
+      vita2d_texture *mark_texture = nullptr;
+      switch (mark) {
+      case FolderMark::Available:
+        mark_texture = mark_available_tex_;
+        break;
+      case FolderMark::Included:
+        mark_texture = mark_included_tex_;
+        break;
+      case FolderMark::Covered:
+        mark_texture = mark_covered_tex_;
+        break;
+      case FolderMark::InUse:
+        mark_texture = mark_inuse_tex_;
+        break;
+      }
+      if (mark_texture) {
+        vita2d_draw_texture(mark_texture, static_cast<float>(kListX + 16),
+                            static_cast<float>(y) + 10.0f);
+      } else {
+        draw_folder_mark(kListX + 16, y + 11, mark);
+      }
       const unsigned int name_color =
           row.tracked_elsewhere ? kColorIdleDot : (focused ? kColorText : kColorMuted);
-      const int name_x = kListX + 34;
+      const int name_x = kListX + 40;
       const int name_max = kSizeRight - right_w - 16 - name_x;
       const std::string name = fit_text(kTextSizeSmall, row.name, std::max(40, name_max));
       draw_text(fonts_, name_x, text_y, name_color, kTextSizeSmall, name.c_str());
@@ -1417,11 +1455,16 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
   const char *const close_label = state.return_to_details ? "Back" : "Close";
   std::vector<HintSpec> hints;
   if (state.included_count > 0) {
-    hints.push_back({ButtonSymbol::Label, "L/R  Included", nullptr, nullptr});
+    hints.push_back({ButtonSymbol::TriggerLR, "Jump to Included", nullptr, nullptr});
   }
-  // Circle backs out from anywhere - climbing is the ".." row's job - and Triangle closes too but
-  // stays unhinted, mirroring the unhinted Triangle that opens the picker from the overview row.
-  hints.push_back({cancel, close_label, nullptr, nullptr});
+  // Circle climbs one level at a time while strictly inside the folder the picker opened at, and
+  // closes once back there - going higher than the start is the ".." row's job. Triangle closes
+  // from anywhere, unhinted, mirroring the unhinted Triangle that opens the picker.
+  const bool inside_start =
+      state.current_path.size() > state.start_path.size() &&
+      state.current_path.compare(0, state.start_path.size(), state.start_path) == 0 &&
+      state.current_path[state.start_path.size()] == '/';
+  hints.push_back({cancel, inside_start ? "Up" : close_label, nullptr, nullptr});
   // Square toggles whether the folder is part of this entry's backup. Nothing on disk is created or
   // deleted by it, so the words are about inclusion, not about adding or removing folders. A folder
   // that is covered (a parent is included), in use by another entry, or the ".." link offers none.
@@ -1692,7 +1735,13 @@ void Ui::draw_backup_panel(const UiState &state) {
       // An action row, not a backup: no presence glyph (there is nothing on the card or in the
       // Cloud to report), a pencil in its place - the row edits the folder set. The label itself
       // already carries the count.
-      draw_folder_glyph(926, y + 12, selected ? kColorAccent : kColorIdleDot);
+      if (folder_edit_tex_) {
+        // The asset is white; the tint carries the selection color, like the primitive did.
+        vita2d_draw_texture_tint(folder_edit_tex_, 906.0f, static_cast<float>(y) + 11.0f,
+                                 selected ? kColorAccent : kColorIdleDot);
+      } else {
+        draw_folder_glyph(926, y + 12, selected ? kColorAccent : kColorIdleDot);
+      }
       max_text_width = 300;
     } else {
       max_text_width = 340;

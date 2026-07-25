@@ -78,9 +78,11 @@ struct DirectoryBrowserState {
   // re-sort or refresh cannot retarget an in-flight pick.
   std::string entry_id;
   std::string entry_name;
-  // Opens at the best guess for this entry (see App::browser_start_path); the cancel button climbs
-  // back up and closes at "ux0:data".
+  // Opens at the best guess for this entry (see App::browser_start_path). start_path remembers it:
+  // Circle climbs one level at a time while strictly inside it and closes once back at (or
+  // outside) it - going higher than the start is the ".." row's job.
   std::string current_path;
+  std::string start_path;
   struct Row {
     std::string name;
     // The ".." row shown below the root: Cross goes up a level. Carries no size and no state.
@@ -275,6 +277,12 @@ private:
   std::size_t title_top_row_{};
   std::size_t backup_top_row_{};
   std::size_t browser_top_row_{};
+  // Picker glyphs, loaded with the cloud set; primitive fallbacks cover a failed load.
+  vita2d_texture *folder_edit_tex_{};
+  vita2d_texture *mark_available_tex_{};
+  vita2d_texture *mark_included_tex_{};
+  vita2d_texture *mark_covered_tex_{};
+  vita2d_texture *mark_inuse_tex_{};
   // Marquee state for the focused backup row: which row is scrolling and how many frames it has
   // been focused, so the scroll restarts from the left whenever the selection moves.
   std::size_t marquee_entry_{};

@@ -3493,6 +3493,7 @@ void App::open_directory_browser(bool from_details) {
   directory_browser_.entry_id = selected->id;
   directory_browser_.entry_name = selected->display_name;
   directory_browser_.current_path = browser_start_path(*selected);
+  directory_browser_.start_path = directory_browser_.current_path;
   directory_browser_.return_to_details = from_details;
   reload_browser_rows();
   clear_status();
@@ -3623,6 +3624,7 @@ void App::reload_browser_rows(bool keep_selection) {
 }
 
 void App::browser_jump_included(int delta) {
+  clear_status();
   // L/R hop across the entry's included folders wherever they live, changing directory when the
   // next one is elsewhere. From an unincluded row, R starts at the first and L at the last.
   const SaveRecord *record = nullptr;
@@ -3672,6 +3674,7 @@ void App::browser_jump_included(int delta) {
 }
 
 void App::browser_go_up() {
+  clear_status();
   // Names never contain a separator, so the last '/' is always the parent boundary; callers only
   // reach this strictly below ux0:data. The cursor lands on the folder just left, so climbing to
   // pick a sibling does not start the hunt over from the top.
@@ -3888,7 +3891,7 @@ void App::browser_toggle_selected() {
     return;
   }
   if (!row.covered_by.empty()) {
-    set_status(StatusKind::Info, "Already included with " + row.covered_by + ".");
+    set_status(StatusKind::Info, "Already included with \"" + row.covered_by + "\".");
     return;
   }
   const std::string full_path = browser.current_path + "/" + row.name;
@@ -4417,8 +4420,16 @@ int App::run() {
     sceCtrlPeekBufferPositive(0, &pad, 1);
     // Buttons recovered from a frame that a queued save-time read stalled are replayed here, so a
     // tap made during that read still moves the selection instead of vanishing with the frame.
-    const unsigned int buttons = buttons_with_left_analog(pad) | deferred_buttons_;
+    unsigned int buttons = buttons_with_left_analog(pad) | deferred_buttons_;
     deferred_buttons_ = 0;
+    if (directory_browser_.open) {
+      // In the picker the right stick mirrors the left - there is no backup list for it to drive.
+      if (pad.ry < kAnalogCenter - kAnalogDeadZone) {
+        buttons |= SCE_CTRL_UP;
+      } else if (pad.ry > kAnalogCenter + kAnalogDeadZone) {
+        buttons |= SCE_CTRL_DOWN;
+      }
+    }
     // A finished background read is applied here, before any mode branches, so it lands whether
     // the user is on the grid, in the details screen, or mid-prompt.
     complete_async_read(false);
@@ -4607,15 +4618,22 @@ int App::run() {
         if (browser.rows[browser.selected].parent_link) {
           browser_go_up();
         } else {
+          clear_status();
           browser.current_path += "/" + browser.rows[browser.selected].name;
           reload_browser_rows();
         }
         rows_changed = true;
       }
       if (!rows_changed && (pressed & cancel_button) != 0) {
-        // Circle backs out of the picker from anywhere, like everywhere else in the app; climbing
-        // is what the ".." row is for.
-        close_directory_browser();
+        // Circle climbs one level at a time while strictly inside the folder the picker opened at
+        // and closes once back there (or anywhere outside it, reachable via ".."). Higher than the
+        // start is the ".." row's job.
+        if (path_is_inside(browser.current_path, browser.start_path)) {
+          browser_go_up();
+          rows_changed = true;
+        } else {
+          close_directory_browser();
+        }
       }
       if (directory_browser_.open && (pressed & SCE_CTRL_TRIANGLE) != 0) {
         close_directory_browser();
