@@ -11,6 +11,8 @@ All notable changes to Save Keeper are documented here. The format follows
   empty one behind, and folders left empty by earlier versions are cleared out on the next launch
 - checking, backing up, restoring, and inspecting a large save now fill a real progress bar
   instead of freezing the busy modal until the work is done
+- the batch percent no longer flashes 100% before and after each upload, and it now also fills
+  while a larger backup is being created
 
 ## [1.1.1] - 2026-07-25
 

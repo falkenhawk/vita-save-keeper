@@ -86,7 +86,8 @@ private:
   void handle_action_button();
   void create_new_backup();
   // busy_label, when set, names the modal that animates byte progress while the save is hashed
-  // and zipped; nullptr keeps the operation silent (the batch draws its own modal instead).
+  // and zipped; during a batch the title is owned by the batch context and only the byte
+  // progress shows. nullptr keeps the operation fully silent.
   LocalSnapshotResult create_local_snapshot(const SaveRecord &save, const std::string &suffix,
                                             const char *busy_label, bool force_new = false);
   void handle_restore();

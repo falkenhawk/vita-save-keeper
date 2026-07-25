@@ -2659,7 +2659,10 @@ void App::run_sync_all() {
     if (plan.create_backup) {
       ui_.set_batch_progress("Backing up", save.display_name, i, total, enter_is_cross_);
       ui_.draw_busy("", 0, -1);
-      const LocalSnapshotResult result = create_local_snapshot(save, "", nullptr);
+      // The label is ignored while the batch title owns the modal; passing it anyway feeds the
+      // zip's byte progress into the corner percent, which stays hidden for fast small saves
+      // because endpoint reports are suppressed.
+      const LocalSnapshotResult result = create_local_snapshot(save, "", "Backing up");
       if (!result.ok) {
         // The planned upload was this archive; there is nothing to send for this game.
         ++run.failed;

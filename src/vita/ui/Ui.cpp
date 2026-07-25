@@ -1743,9 +1743,10 @@ void Ui::draw_busy(const std::string &label, long long done, long long total,
 
   // The title and the bar track overall games progress in a batch. The in-flight transfer
   // percent rides on the title line next to "Uploading ..." - it belongs to that one file - and
-  // only while bytes are actually moving. Backups report no byte progress, so nothing per-file
-  // shows while zipping, which is why a fast per-game backup no longer flashes a stray 100%.
-  const bool batch_transfer = batch_active_ && total > 0;
+  // only strictly mid-transfer. Endpoints are suppressed on purpose: a one-shot small request
+  // (the upload session init, a companion JSON) or a just-finished file would only ever flash
+  // 100%, and a fast per-game backup would flash 0%, telling the user nothing.
+  const bool batch_transfer = batch_active_ && total > 0 && done > 0 && done < total;
   char transfer_pct[16] = {0};
   int title_max_w = kBoxW - 48;
   if (batch_transfer) {

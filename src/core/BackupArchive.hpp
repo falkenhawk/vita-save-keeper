@@ -19,9 +19,8 @@ struct BackupRequest {
   std::string name_suffix;
   // Exact collision-safe basename allocated by the caller. Empty retains timestamp/suffix naming.
   std::string archive_name;
-  // Optional: called with (bytes written, total bytes) as the archive is written, throttled, so a
-  // caller can animate a progress bar for a large save. Empty by default (the batch leaves it
-  // unset, so only the single "Creating backup" modal fills).
+  // Optional: called with (bytes read, total bytes) across the archive's hash and write passes as
+  // one continuous stream, throttled, so a caller can animate a progress bar for a large save.
   std::function<void(std::uint64_t done, std::uint64_t total)> progress;
 };
 
