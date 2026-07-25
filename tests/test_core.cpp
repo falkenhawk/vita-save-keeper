@@ -385,7 +385,6 @@ void test_sdslot_parser_reads_noncontiguous_slots_and_selects_newest() {
   const vsm::SaveMetadata metadata = vsm::parse_sdslot_data(data);
 
   EXPECT_TRUE(metadata.source == vsm::SaveTimeSource::VitaSlot);
-  EXPECT_TRUE(!metadata.approximate);
   EXPECT_EQ(metadata.slots.size(), static_cast<std::size_t>(2));
   EXPECT_EQ(static_cast<std::size_t>(metadata.slots[0].id), static_cast<std::size_t>(2));
   EXPECT_EQ(static_cast<std::size_t>(metadata.slots[1].id), static_cast<std::size_t>(9));
@@ -473,7 +472,6 @@ void test_save_metadata_resolver_uses_recursive_files_then_backup_clock() {
   const vsm::SaveMetadata filesystem =
       vsm::resolve_save_metadata((base / "save").string(), {2001, 2, 3, 4, 5, 6});
   EXPECT_TRUE(filesystem.source == vsm::SaveTimeSource::Filesystem);
-  EXPECT_TRUE(filesystem.approximate);
   EXPECT_EQ(static_cast<std::size_t>(vsm::save_datetime_to_local_epoch(filesystem.saved_at)),
             static_cast<std::size_t>(newest));
 
@@ -481,7 +479,6 @@ void test_save_metadata_resolver_uses_recursive_files_then_backup_clock() {
   const vsm::SaveMetadata clock =
       vsm::resolve_save_metadata((base / "empty").string(), {2001, 2, 3, 4, 5, 6});
   EXPECT_TRUE(clock.source == vsm::SaveTimeSource::BackupClock);
-  EXPECT_TRUE(clock.approximate);
   EXPECT_EQ(vsm::format_save_datetime(clock.saved_at), "2001-02-03T04:05:06");
 
   std::filesystem::remove_all(base);
@@ -509,7 +506,6 @@ void test_save_metadata_json_round_trips_and_ignores_unknown_fields() {
   vsm::SaveMetadata metadata;
   metadata.saved_at = {2026, 7, 12, 1, 44, 7};
   metadata.source = vsm::SaveTimeSource::VitaSlot;
-  metadata.approximate = false;
   metadata.slots.push_back(
       {2, {2026, 7, 12, 1, 44, 7}, "WipEout \"2048\"", "Profile\\data",
        "Campaign\nmedals: 91"});
@@ -517,13 +513,15 @@ void test_save_metadata_json_round_trips_and_ignores_unknown_fields() {
   std::string json =
       vsm::serialize_save_metadata_json("2026-07-12 01-44-07", metadata);
   EXPECT_TRUE(json.find("\"version\":2") != std::string::npos);
+  // the approximate field is no longer written (it always mirrored source); the legacy fixtures
+  // elsewhere prove older files still carrying it parse as an ignored member.
+  EXPECT_TRUE(json.find("approximate") == std::string::npos);
   json.insert(json.size() - 1, ",\"future\":{\"nested\":[true,null,3]}");
   const vsm::SaveMetadataJsonResult parsed = vsm::parse_save_metadata_json(json);
 
   EXPECT_TRUE(parsed.ok);
   EXPECT_EQ(parsed.archive_identity, "2026-07-12 01-44-07");
   EXPECT_TRUE(parsed.metadata.source == vsm::SaveTimeSource::VitaSlot);
-  EXPECT_TRUE(!parsed.metadata.approximate);
   EXPECT_EQ(vsm::format_save_datetime(parsed.metadata.saved_at), "2026-07-12T01:44:07");
   EXPECT_EQ(parsed.metadata.slots.size(), static_cast<std::size_t>(1));
   EXPECT_EQ(parsed.metadata.slots[0].title, "WipEout \"2048\"");
@@ -626,7 +624,6 @@ void test_save_metadata_json_file_write_is_atomic_and_bounded() {
   vsm::SaveMetadata first;
   first.saved_at = {2026, 7, 12, 1, 44, 7};
   first.source = vsm::SaveTimeSource::Filesystem;
-  first.approximate = true;
   std::string error;
   EXPECT_TRUE(vsm::write_save_metadata_json_atomic(path.string(), "snapshot", first, &error));
 

@@ -370,7 +370,6 @@ SaveMetadata parse_sdslot_data(const std::vector<unsigned char> &data) {
 
   if (!result.slots.empty()) {
     result.source = SaveTimeSource::VitaSlot;
-    result.approximate = false;
     result.saved_at = result.slots.front().modified_at;
     for (const SaveSlotMetadata &slot : result.slots) {
       if (datetime_less(result.saved_at, slot.modified_at)) {
@@ -414,11 +413,9 @@ SaveMetadata resolve_save_metadata(const std::string &save_path,
   if (found) {
     result.saved_at = datetime_from_time(newest);
     result.source = SaveTimeSource::Filesystem;
-    result.approximate = true;
   } else {
     result.saved_at = backup_clock;
     result.source = SaveTimeSource::BackupClock;
-    result.approximate = true;
   }
   return result;
 }
@@ -457,7 +454,6 @@ std::string serialize_save_metadata_json(const std::string &identity,
   root["archiveIdentity"] = picojson::value(identity);
   root["savedAt"] = picojson::value(format_save_datetime(metadata.saved_at));
   root["source"] = picojson::value(source_text(metadata.source));
-  root["approximate"] = picojson::value(metadata.approximate);
 
   picojson::array slots;
   slots.reserve(metadata.slots.size());
@@ -492,7 +488,6 @@ SaveMetadataJsonResult parse_save_metadata_json(const std::string &json) {
   const picojson::value *version = json_member(root, "version");
   const picojson::value *saved_at = json_member(root, "savedAt");
   const picojson::value *source = json_member(root, "source");
-  const picojson::value *approximate = json_member(root, "approximate");
   const picojson::value *slots = json_member(root, "slots");
   const double version_number = version && version->is<double>() ? version->get<double>() : 0.0;
   const bool version_supported = std::floor(version_number) == version_number &&
@@ -501,7 +496,7 @@ SaveMetadataJsonResult parse_save_metadata_json(const std::string &json) {
   if (!version || !version->is<double>() || !version_supported ||
       !json_string(root, "archiveIdentity", 255, &result.archive_identity) ||
       result.archive_identity.empty() || !saved_at || !saved_at->is<std::string>() ||
-      !source || !source->is<std::string>() || !approximate || !approximate->is<bool>() ||
+      !source || !source->is<std::string>() ||
       !slots || !slots->is<picojson::array>()) {
     result.error = "metadata fields missing or unsupported";
     return result;
@@ -523,7 +518,6 @@ SaveMetadataJsonResult parse_save_metadata_json(const std::string &json) {
     result.error = "metadata source is unsupported";
     return result;
   }
-  result.metadata.approximate = approximate->get<bool>();
 
   const picojson::array &slot_values = slots->get<picojson::array>();
   if (slot_values.size() > kMaxSaveSlots) {

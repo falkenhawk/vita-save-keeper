@@ -32,7 +32,6 @@ struct SaveSlotMetadata {
 struct SaveMetadata {
   SaveDateTime saved_at;
   SaveTimeSource source{SaveTimeSource::BackupClock};
-  bool approximate{true};
   std::vector<SaveSlotMetadata> slots;
 };
 
@@ -51,6 +50,7 @@ struct SaveMetadataJsonResult {
 
 // Sidecars are written at kSaveMetadataJsonVersion; every version from the minimum up to it is
 // still read (version 1 is migrated to correct its UTC handling, see parse_save_metadata_json).
+// The redundant approximate member is no longer written and is ignored when older files carry it.
 constexpr int kMinSaveMetadataJsonVersion = 1;
 constexpr int kSaveMetadataJsonVersion = 2;
 
