@@ -58,7 +58,13 @@ constexpr const char *kSettingsPath = "ux0:data/save-keeper/settings.txt";
 constexpr const char *kSaveIndexPath = "ux0:data/save-keeper/save-titles.json";
 // The retired times half of the old two-file layout, removed at every boot.
 constexpr const char *kLegacySaveTimesPath = "ux0:data/save-keeper/save-times.json";
-constexpr const char *kTrackedFoldersPath = "ux0:data/save-keeper/tracked-folders.json";
+constexpr const char *kDataFoldersPath = "ux0:data/save-keeper/data-folders.json";
+// The old name this file shipped under in pre-release test builds. Read when the new name is
+// absent, deleted after the first successful write of the new one.
+constexpr const char *kLegacyDataFoldersPath = "ux0:data/save-keeper/tracked-folders.json";
+// Known folder sets shipped inside the VPK (RetroArch first). Same schema as the user file; the
+// user's data-folders.json overrides it per entry id.
+constexpr const char *kBaseDataFoldersPath = "app0:sce_sys/resources/data-folders.json";
 // The homebrew data convention root the folder browser is confined to. Distinct from kDataRoot
 // above, which is this app's own config directory inside it.
 constexpr const char *kUserDataRoot = "ux0:data";
@@ -894,32 +900,61 @@ void App::rebuild_save_index(long long app_db_mtime, long long app_db_size) {
   flush_save_index();
 }
 
-void App::load_tracked_folders() {
-  FILE *file = std::fopen(kTrackedFoldersPath, "rb");
+namespace {
+
+// Bounded whole-file read; false when missing, unreadable, or over the cap.
+bool read_bounded_file(const char *path, std::string *text) {
+  FILE *file = std::fopen(path, "rb");
   if (!file) {
-    // No config file yet; an empty tracked set is the normal cold-start state, and a later save
-    // may still create the file.
-    return;
+    return false;
   }
-  std::string text;
+  text->clear();
   char buffer[4096];
   std::size_t read = 0;
   bool oversized = false;
   while ((read = std::fread(buffer, 1, sizeof(buffer), file)) > 0) {
-    text.append(buffer, read);
-    if (text.size() > kMaxTrackedFoldersJsonSize) {
+    text->append(buffer, read);
+    if (text->size() > kMaxTrackedFoldersJsonSize) {
       oversized = true;
       break;
     }
   }
   const bool read_error = std::ferror(file) != 0;
   std::fclose(file);
+  return !oversized && !read_error;
+}
 
-  if (oversized || read_error) {
-    // Present but unreadable or implausibly large. Treat it like a failed parse so a later save
-    // never truncates a config we could not read whole.
-    tracked_config_load_failed_ = true;
-    return;
+} // namespace
+
+void App::load_tracked_folders() {
+  // The base file ships in the VPK, so a parse failure here is a build defect, not user data;
+  // an empty base just means no built-in folder sets this run.
+  std::string text;
+  if (read_bounded_file(kBaseDataFoldersPath, &text)) {
+    TrackedFoldersParseResult parsed = parse_tracked_folders_json(text);
+    if (parsed.ok) {
+      base_config_ = std::move(parsed.config);
+    }
+  }
+
+  // User file: the new name wins; the pre-release name is read as a fallback and cleaned up after
+  // the first successful write of the new one (save_data_folders_config).
+  const bool have_new = read_bounded_file(kDataFoldersPath, &text);
+  if (!have_new) {
+    struct stat info {};
+    const bool new_exists = stat(kDataFoldersPath, &info) == 0;
+    if (new_exists) {
+      // Present but unreadable or implausibly large. Treat it like a failed parse so a later save
+      // never truncates a config we could not read whole.
+      tracked_config_load_failed_ = true;
+      return;
+    }
+    if (!read_bounded_file(kLegacyDataFoldersPath, &text)) {
+      const bool legacy_exists = stat(kLegacyDataFoldersPath, &info) == 0;
+      // Neither file: the normal cold start. A present-but-unreadable legacy file disables writes.
+      tracked_config_load_failed_ = legacy_exists;
+      return;
+    }
   }
   const TrackedFoldersParseResult parsed = parse_tracked_folders_json(text);
   if (!parsed.ok) {
@@ -930,13 +965,64 @@ void App::load_tracked_folders() {
   tracked_config_ = std::move(parsed.config);
 }
 
+bool App::save_data_folders_config() {
+  std::string write_error;
+  if (!write_tracked_folders_json_atomic(kDataFoldersPath, tracked_config_, &write_error)) {
+    set_status(StatusKind::Error, "Could not save data-folders.json.");
+    return false;
+  }
+  // The new file is now the truth on disk, so the pre-release one has nothing left to say.
+  std::remove(kLegacyDataFoldersPath);
+  return true;
+}
+
+const TrackedFolderEntry *App::applicable_base_entry(const std::string &id) const {
+  for (const TrackedFolderEntry &entry : base_config_.entries) {
+    if (entry.id != id) {
+      continue;
+    }
+    for (const TrackedPath &path : entry.paths) {
+      if (path_is_directory(path.path)) {
+        return &entry;
+      }
+    }
+    return nullptr;  // shipped entry, but none of its folders exist here
+  }
+  return nullptr;
+}
+
+bool App::set_entry_data_folders(const std::string &id, const std::string &title,
+                                 std::vector<TrackedPath> new_paths) {
+  if (tracked_config_load_failed_) {
+    // The config could not be read whole this run, so writing it back would truncate it; refuse.
+    set_status(StatusKind::Info, "Cannot update data-folders.json - fix or delete it first.");
+    return false;
+  }
+  const TrackedFolderEntry *base = applicable_base_entry(id);
+  // The write is atomic, so a failure leaves the file untouched; restoring the snapshot keeps the
+  // in-memory config matching what is still on disk.
+  const std::vector<TrackedFolderEntry> snapshot = tracked_config_.entries;
+  update_data_folder_override(&tracked_config_, id, title, new_paths,
+                              base ? &base->paths : nullptr);
+  if (!save_data_folders_config()) {
+    tracked_config_.entries = snapshot;
+    return false;
+  }
+  apply_tracked_folders();
+  return true;
+}
+
 void App::apply_tracked_folders() {
   // Attach each config entry's extra folders to the app's own record, matched by id. Doing it by
   // id (rather than by path) means an entry survives its app gaining or losing a savedata folder
   // between launches.
+  // The composite view: base entries (existence-gated) overlaid by the user's file.
+  TrackedFoldersConfig effective;
+  effective.entries =
+      effective_data_folder_entries(base_config_, tracked_config_, path_is_directory);
   std::unordered_map<std::string, const TrackedFolderEntry *> configured;
-  configured.reserve(tracked_config_.entries.size());
-  for (const TrackedFolderEntry &entry : tracked_config_.entries) {
+  configured.reserve(effective.entries.size());
+  for (const TrackedFolderEntry &entry : effective.entries) {
     configured.emplace(entry.id, &entry);
   }
 
@@ -953,7 +1039,7 @@ void App::apply_tracked_folders() {
   // An app that keeps everything in ux0:data has no savedata folder for the scan to find, so its
   // row is synthesized from the config here. The app.db pass gives it its real title and icon.
   for (SaveRecord &record : build_orphan_app_records(
-           tracked_config_,
+           effective,
            [&](const std::string &id) { return known_ids.count(id) != 0; })) {
     saves_.push_back(std::move(record));
   }
@@ -3156,7 +3242,7 @@ void App::toggle_entry_skipped() {
     // The config could not be read whole this run, so writing it back would truncate whatever is
     // on disk; refuse the toggle and leave both the file and the in-memory set untouched.
     set_status(StatusKind::Info,
-               "Cannot update tracked-folders.json - fix or delete it first.");
+               "Cannot update data-folders.json - fix or delete it first.");
     return;
   }
   const std::string id = selected->id;
@@ -3167,16 +3253,14 @@ void App::toggle_entry_skipped() {
   } else {
     tracked_config_.skipped_ids.erase(id);
   }
-  std::string write_error;
-  if (!write_tracked_folders_json_atomic(kTrackedFoldersPath, tracked_config_, &write_error)) {
-    // The write is atomic, so a failure here means tracked-folders.json on disk was never touched;
-    // undoing the flip keeps the in-memory set matching what is still there.
+  if (!save_data_folders_config()) {
+    // The write is atomic, so a failure means the file on disk was never touched; undoing the flip
+    // keeps the in-memory set matching what is still there.
     if (now_skipped) {
       tracked_config_.skipped_ids.erase(id);
     } else {
       tracked_config_.skipped_ids.insert(id);
     }
-    set_status(StatusKind::Error, "Could not save tracked-folders.json.");
     return;
   }
   // Details, when open, stays on this save; flip its footer hint to match the new state.
@@ -3546,129 +3630,79 @@ void App::browser_toggle_selected() {
                                      ") - press Square again to include it anyway.");
     return;
   }
-  if (tracked_config_load_failed_) {
-    // The config could not be read whole this run, so writing it back would truncate it; refuse.
-    set_status(StatusKind::Info,
-               "Cannot update tracked-folders.json - fix or delete it first.");
-    return;
-  }
   const std::string entry_id = browser.entry_id;
-  const std::string entry_name = browser.entry_name;
   if (entry_id.empty()) {
-    // The browser is always opened from an entry; without one there is nothing to attach to.
+    // The browser is always opened from an entry; without one there is nothing to include into.
     set_status(StatusKind::Info, "No entry to include this folder in.");
     return;
   }
-  const std::string name = row.name;
 
-  // Find this app's config entry, or start one. Ids are the app's own save id, so there is no
-  // allocator and nothing to collide with - one entry per app, however many folders it gathers.
-  std::size_t entry_index = tracked_config_.entries.size();
-  for (std::size_t i = 0; i < tracked_config_.entries.size(); ++i) {
-    if (tracked_config_.entries[i].id == entry_id) {
-      entry_index = i;
+  // Current folders come from the record - that is the effective set, base and overrides applied.
+  // An entry whose row vanished mid-visit (an orphan whose last folder was excluded) has none.
+  std::vector<TrackedPath> new_paths;
+  std::set<std::string> taken_prefixes;
+  for (std::size_t i = 0; i < saves_.size(); ++i) {
+    if (saves_[i].id == entry_id) {
+      new_paths = saves_[i].extra_paths;
       break;
     }
   }
-  const bool creating = entry_index == tracked_config_.entries.size();
-  std::set<std::string> taken_prefixes;
-  if (!creating) {
-    for (const TrackedPath &path : tracked_config_.entries[entry_index].paths) {
-      taken_prefixes.insert(path.prefix);
-    }
+  for (const TrackedPath &path : new_paths) {
+    taken_prefixes.insert(path.prefix);
   }
   // Allocated once, here, and stored: renaming the folder later must never repoint an existing
   // backup's restore mapping. make_extra_prefix also keeps "savedata" reserved for the entry's own
-  // save folder.
-  const TrackedPath added{make_extra_prefix(name, taken_prefixes), full_path};
-  if (creating) {
-    TrackedFolderEntry entry;
-    entry.id = entry_id;
-    entry.title = entry_name;
-    entry.paths.push_back(added);
-    tracked_config_.entries.push_back(std::move(entry));
-  } else {
-    tracked_config_.entries[entry_index].paths.push_back(added);
-  }
-  std::string write_error;
-  if (!write_tracked_folders_json_atomic(kTrackedFoldersPath, tracked_config_, &write_error)) {
-    // Atomic write means the file on disk was never touched; undo so memory matches it.
-    if (creating) {
-      tracked_config_.entries.pop_back();
-    } else {
-      tracked_config_.entries[entry_index].paths.pop_back();
-    }
-    set_status(StatusKind::Error, "Could not save tracked-folders.json.");
+  // save folder. Re-including a base folder by hand regenerates the same prefix, which is what
+  // lets the result compare equal to the base and drop the override.
+  new_paths.push_back({make_extra_prefix(row.name, taken_prefixes), full_path});
+  if (!set_entry_data_folders(entry_id, browser.entry_name, std::move(new_paths))) {
     return;
   }
-  // Re-attach from the config and re-tag the rows, but stay put: picking several folders for one
-  // app is the common case (RetroArch's savefiles and savestates), and bouncing back to the grid
-  // after each one made that a chore. The grid is re-sorted once, on close. No status line - the
-  // row's own tag flipping to "included" is the confirmation.
-  apply_tracked_folders();
+  // Stay put: picking several folders for one app is the common case (RetroArch's savefiles and
+  // savestates), and bouncing back to the grid after each one made that a chore. The grid is
+  // re-sorted once, on close. No status line - the row's tag flipping is the confirmation.
   reload_browser_rows(true);
   clear_status();
 }
 
 void App::browser_exclude_selected(const std::string &full_path) {
-  if (tracked_config_load_failed_) {
-    set_status(StatusKind::Info,
-               "Cannot update tracked-folders.json - fix or delete it first.");
-    return;
-  }
-  std::size_t entry_index = tracked_config_.entries.size();
-  for (std::size_t i = 0; i < tracked_config_.entries.size(); ++i) {
-    if (tracked_config_.entries[i].id == directory_browser_.entry_id) {
-      entry_index = i;
+  const std::string entry_id = directory_browser_.entry_id;
+  // Current folders come from the record - the effective set, base and overrides applied - so a
+  // base-provided folder excludes the same way a hand-picked one does.
+  std::vector<TrackedPath> new_paths;
+  const SaveRecord *entry_record = nullptr;
+  for (std::size_t i = 0; i < saves_.size(); ++i) {
+    if (saves_[i].id == entry_id) {
+      entry_record = &saves_[i];
+      new_paths = saves_[i].extra_paths;
       break;
     }
   }
-  if (entry_index == tracked_config_.entries.size()) {
+  const std::size_t before = new_paths.size();
+  for (std::size_t i = 0; i < new_paths.size(); ++i) {
+    if (new_paths[i].path == full_path) {
+      new_paths.erase(new_paths.begin() + static_cast<long>(i));
+      break;
+    }
+  }
+  if (!entry_record || new_paths.size() == before) {
     set_status(StatusKind::Info, "Not one of this entry's folders.");
     return;
   }
   // An entry whose row exists only because of its folders (an app with no savedata) loses that row
   // with its last folder - which would strand any backups it still has, so that exclude is refused
-  // until they are deleted. The selection cannot move behind the picker, so the selected record and
-  // its backup rows are this entry's.
-  const SaveRecord *entry_record = selected_save_record();
-  const bool row_is_config_only = entry_record && entry_record->path.empty();
-  const bool last_folder = tracked_config_.entries[entry_index].paths.size() == 1;
-  if (last_folder && row_is_config_only && backup_count() != 0) {
+  // until they are deleted. The selection cannot move behind the picker, so backup_count() is this
+  // entry's.
+  const bool row_is_config_only = entry_record->path.empty();
+  if (new_paths.empty() && row_is_config_only && backup_count() != 0) {
     set_status(StatusKind::Info,
                "Delete this entry's backups before excluding its last folder.");
     return;
   }
-  // Keep a copy to restore on a failed write, since the config is only truly changed once the file
-  // on disk is.
-  const TrackedFolderEntry previous = tracked_config_.entries[entry_index];
-  std::vector<TrackedPath> &paths = tracked_config_.entries[entry_index].paths;
-  for (std::size_t i = 0; i < paths.size(); ++i) {
-    if (paths[i].path == full_path) {
-      paths.erase(paths.begin() + static_cast<long>(i));
-      break;
-    }
-  }
-  // An entry with no folders left is not a thing the config can express (parsing drops it), so the
-  // whole entry goes. For an app with its own savedata that just returns it to an ordinary row.
-  const bool dropping_entry = paths.empty();
-  if (dropping_entry) {
-    tracked_config_.entries.erase(tracked_config_.entries.begin() +
-                                  static_cast<long>(entry_index));
-  }
-  std::string write_error;
-  if (!write_tracked_folders_json_atomic(kTrackedFoldersPath, tracked_config_, &write_error)) {
-    // The write is atomic, so the file on disk is untouched; put the entry back as it was.
-    if (dropping_entry) {
-      tracked_config_.entries.insert(
-          tracked_config_.entries.begin() + static_cast<long>(entry_index), previous);
-    } else {
-      tracked_config_.entries[entry_index] = previous;
-    }
-    set_status(StatusKind::Error, "Could not save tracked-folders.json.");
+  const bool dropping_entry = new_paths.empty();
+  if (!set_entry_data_folders(entry_id, directory_browser_.entry_name, std::move(new_paths))) {
     return;
   }
-  apply_tracked_folders();
   if (dropping_entry && row_is_config_only) {
     // Nothing but the config was holding this row up (guarded above: it has no backups), and
     // apply_tracked_folders only assigns extras - it never removes a record - so the ghost row
@@ -3676,7 +3710,7 @@ void App::browser_exclude_selected(const std::string &full_path) {
     // recreates the entry and the row. visible_saves_ is rebuilt at once so it holds no stale
     // index into the shrunk saves_.
     for (std::size_t i = 0; i < saves_.size(); ++i) {
-      if (saves_[i].id == directory_browser_.entry_id) {
+      if (saves_[i].id == entry_id) {
         saves_.erase(saves_.begin() + static_cast<long>(i));
         break;
       }
@@ -4038,7 +4072,7 @@ int App::run() {
   // the message actually visible.
   if (tracked_config_load_failed_) {
     set_status(StatusKind::Info,
-               "Data folders config unreadable - fix or delete tracked-folders.json");
+               "Data folders config unreadable - fix or delete data-folders.json");
   }
 
   bool running = true;

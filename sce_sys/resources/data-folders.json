@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "RETROVITA",
+      "title": "RetroArch",
+      "paths": [
+        { "prefix": "savefiles", "path": "ux0:data/retroarch/savefiles" },
+        { "prefix": "savestates", "path": "ux0:data/retroarch/savestates" }
+      ]
+    }
+  ]
+}

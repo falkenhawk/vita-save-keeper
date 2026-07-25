@@ -2423,13 +2423,80 @@ void test_tracked_folders_json_roundtrip_and_rejects_bad_input() {
 
   EXPECT_TRUE(!vsm::parse_tracked_folders_json("not json").ok);
   EXPECT_TRUE(!vsm::parse_tracked_folders_json("[]").ok);
-  // entries missing a path are dropped, not fatal; unknown fields are ignored
+  // An empty paths array is kept - it is the tombstone that suppresses a base entry - while a
+  // malformed path inside a non-empty array is dropped alone. Unknown fields are ignored.
   const vsm::TrackedFoldersParseResult partial = vsm::parse_tracked_folders_json(
       R"({"version":1,"future":true,"entries":[{"id":"APPX","title":"X","paths":[]},)"
       R"({"id":"APPY","title":"Y","paths":[{"prefix":"","path":"ux0:data/y"}]}],"skipped":[]})");
   EXPECT_TRUE(partial.ok);
-  EXPECT_EQ(partial.config.entries.size(), static_cast<std::size_t>(1));
-  EXPECT_EQ(partial.config.entries[0].id, "APPY");
+  EXPECT_EQ(partial.config.entries.size(), static_cast<std::size_t>(2));
+  EXPECT_EQ(partial.config.entries[0].id, "APPX");
+  EXPECT_TRUE(partial.config.entries[0].paths.empty());
+  EXPECT_EQ(partial.config.entries[1].id, "APPY");
+}
+
+void test_effective_entries_overlay_base_with_user_overrides() {
+  vsm::TrackedFoldersConfig base;
+  base.entries.push_back({"RETROVITA", "RetroArch",
+                          {{"savefiles", "ux0:data/retroarch/savefiles"},
+                           {"savestates", "ux0:data/retroarch/savestates"}}});
+  base.entries.push_back({"GHOSTAPP0", "Ghost", {{"", "ux0:data/ghost"}}});
+
+  vsm::TrackedFoldersConfig user;
+  user.entries.push_back({"VITADBDLD", "", {{"VitaDB", "ux0:data/VitaDB"}}});
+
+  // Base entries apply only while one of their folders exists; user entries are ungated.
+  const auto exists = [](const std::string &path) {
+    return path.rfind("ux0:data/retroarch", 0) == 0;
+  };
+  auto effective = vsm::effective_data_folder_entries(base, user, exists);
+  EXPECT_EQ(effective.size(), static_cast<std::size_t>(2));
+  EXPECT_EQ(effective[0].id, "RETROVITA");
+  EXPECT_EQ(effective[1].id, "VITADBDLD");
+
+  // A user override replaces the base entry wholesale; a tombstone suppresses it.
+  user.entries.push_back({"RETROVITA", "RetroArch", {{"savefiles", "ux0:data/retroarch/savefiles"}}});
+  effective = vsm::effective_data_folder_entries(base, user, exists);
+  EXPECT_EQ(effective.size(), static_cast<std::size_t>(2));
+  EXPECT_EQ(effective[1].id, "RETROVITA");
+  EXPECT_EQ(effective[1].paths.size(), static_cast<std::size_t>(1));
+
+  user.entries.back().paths.clear();
+  effective = vsm::effective_data_folder_entries(base, user, exists);
+  EXPECT_EQ(effective.size(), static_cast<std::size_t>(1));
+  EXPECT_EQ(effective[0].id, "VITADBDLD");
+}
+
+void test_update_override_snaps_back_to_base_when_equal() {
+  const std::vector<vsm::TrackedPath> base_paths = {
+      {"savefiles", "ux0:data/retroarch/savefiles"},
+      {"savestates", "ux0:data/retroarch/savestates"},
+  };
+  vsm::TrackedFoldersConfig user;
+
+  // Excluding one base folder stores an override; excluding both stores a tombstone.
+  vsm::update_data_folder_override(&user, "RETROVITA", "RetroArch",
+                                   {{"savefiles", "ux0:data/retroarch/savefiles"}}, &base_paths);
+  EXPECT_EQ(user.entries.size(), static_cast<std::size_t>(1));
+  EXPECT_EQ(user.entries[0].paths.size(), static_cast<std::size_t>(1));
+  vsm::update_data_folder_override(&user, "RETROVITA", "RetroArch", {}, &base_paths);
+  EXPECT_EQ(user.entries.size(), static_cast<std::size_t>(1));
+  EXPECT_TRUE(user.entries[0].paths.empty());
+
+  // Re-including both folders matches the base again - order-insensitive - so the override goes,
+  // and a future version's updated base entry applies as shipped.
+  vsm::update_data_folder_override(&user, "RETROVITA", "RetroArch",
+                                   {{"savestates", "ux0:data/retroarch/savestates"},
+                                    {"savefiles", "ux0:data/retroarch/savefiles"}},
+                                   &base_paths);
+  EXPECT_TRUE(user.entries.empty());
+
+  // Without a base, empty paths mean plain removal, and non-empty ones a plain entry.
+  vsm::update_data_folder_override(&user, "VITADBDLD", "", {{"VitaDB", "ux0:data/VitaDB"}},
+                                   nullptr);
+  EXPECT_EQ(user.entries.size(), static_cast<std::size_t>(1));
+  vsm::update_data_folder_override(&user, "VITADBDLD", "", {}, nullptr);
+  EXPECT_TRUE(user.entries.empty());
 }
 
 void test_tracked_folders_json_reads_legacy_hidden_as_skipped() {
@@ -3202,6 +3269,8 @@ int main() {
   test_app_settings_roundtrip_and_unknown_keys();
   test_tracked_folders_json_roundtrip_and_rejects_bad_input();
   test_tracked_folders_json_reads_legacy_hidden_as_skipped();
+  test_effective_entries_overlay_base_with_user_overrides();
+  test_update_override_snaps_back_to_base_when_equal();
   test_extra_prefix_allocation_normalizes_and_reserves_savedata();
   test_tracked_folders_json_skips_invalid_and_duplicate_entries();
   test_tracked_folders_json_atomic_write_roundtrip();

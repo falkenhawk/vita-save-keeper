@@ -6,6 +6,8 @@
 
 #include <picojson.h>
 
+#include <algorithm>
+
 #include <cctype>
 #include <cstddef>
 #include <cstdio>
@@ -45,9 +47,9 @@ bool parse_path(const picojson::value &value, TrackedPath *path) {
   return true;
 }
 
-// false for a non-object value, a missing/empty/unsafe id, a missing/non-array paths field, or
-// when every path in the entry failed to parse - callers skip the entry rather than fail the
-// whole document.
+// false for a non-object value, a missing/empty/unsafe id, or a missing/non-array paths field -
+// callers skip the entry rather than fail the whole document. Individual malformed paths are
+// dropped; the entry survives with the rest.
 bool parse_entry(const picojson::value &value, TrackedFolderEntry *entry) {
   if (!value.is<picojson::object>()) {
     return false;
@@ -79,7 +81,9 @@ bool parse_entry(const picojson::value &value, TrackedFolderEntry *entry) {
       entry->paths.push_back(std::move(path));
     }
   }
-  return !entry->paths.empty();
+  // An entry that keeps no paths is still valid: in the user file it is the tombstone that
+  // suppresses the base entry with the same id.
+  return true;
 }
 
 void read_id_array(const picojson::object &root, const char *field, std::set<std::string> *ids) {
@@ -338,6 +342,86 @@ SaveMetadata resolve_tracked_metadata(const std::vector<std::string> &paths,
     }
   }
   return newest;
+}
+
+bool tracked_paths_equal(const std::vector<TrackedPath> &a, const std::vector<TrackedPath> &b) {
+  if (a.size() != b.size()) {
+    return false;
+  }
+  // Sets are tiny (a handful of folders per app), so a quadratic scan beats sorting copies.
+  std::vector<bool> used(b.size(), false);
+  for (const TrackedPath &left : a) {
+    bool found = false;
+    for (std::size_t i = 0; i < b.size(); ++i) {
+      if (!used[i] && b[i].prefix == left.prefix && b[i].path == left.path) {
+        used[i] = true;
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::vector<TrackedFolderEntry>
+effective_data_folder_entries(const TrackedFoldersConfig &base, const TrackedFoldersConfig &user,
+                              const std::function<bool(const std::string &)> &directory_exists) {
+  std::vector<TrackedFolderEntry> effective;
+  std::set<std::string> user_ids;
+  for (const TrackedFolderEntry &entry : user.entries) {
+    user_ids.insert(entry.id);
+  }
+  for (const TrackedFolderEntry &entry : base.entries) {
+    if (user_ids.count(entry.id) != 0) {
+      continue;  // overridden (or tombstoned) below
+    }
+    bool any_exists = false;
+    for (const TrackedPath &path : entry.paths) {
+      if (directory_exists && directory_exists(path.path)) {
+        any_exists = true;
+        break;
+      }
+    }
+    if (any_exists) {
+      effective.push_back(entry);
+    }
+  }
+  for (const TrackedFolderEntry &entry : user.entries) {
+    if (!entry.paths.empty()) {
+      effective.push_back(entry);
+    }
+  }
+  return effective;
+}
+
+void update_data_folder_override(TrackedFoldersConfig *user, const std::string &id,
+                                 const std::string &title,
+                                 const std::vector<TrackedPath> &new_paths,
+                                 const std::vector<TrackedPath> *base_paths) {
+  auto &entries = user->entries;
+  const auto found =
+      std::find_if(entries.begin(), entries.end(),
+                   [&](const TrackedFolderEntry &entry) { return entry.id == id; });
+  const bool matches_base = base_paths && tracked_paths_equal(new_paths, *base_paths);
+  const bool remove_entry = matches_base || (new_paths.empty() && !base_paths);
+  if (remove_entry) {
+    // Fall back to the base (or to nothing): with no override stored, a future version's updated
+    // base entry applies as shipped.
+    if (found != entries.end()) {
+      entries.erase(found);
+    }
+    return;
+  }
+  // Store the override - possibly the empty tombstone that suppresses an applicable base entry.
+  if (found != entries.end()) {
+    found->title = title;
+    found->paths = new_paths;
+  } else {
+    entries.push_back({id, title, new_paths});
+  }
 }
 
 std::vector<SaveRecord>

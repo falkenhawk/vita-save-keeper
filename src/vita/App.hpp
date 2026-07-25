@@ -99,6 +99,15 @@ private:
   // unparseable file sets tracked_config_load_failed_ and leaves the config empty, so it is never
   // overwritten later.
   void load_tracked_folders();
+  // Writes the user config to data-folders.json (atomic) and removes the pre-release file name on
+  // success. False (with a status set) on failure.
+  bool save_data_folders_config();
+  // The base entry for id, or null when there is none or none of its folders exist here.
+  const TrackedFolderEntry *applicable_base_entry(const std::string &id) const;
+  // Routes one UI change through update_data_folder_override + persistence + re-apply, so an entry
+  // matching the shipped base again drops its override and follows future base updates.
+  bool set_entry_data_folders(const std::string &id, const std::string &title,
+                              std::vector<TrackedPath> new_paths);
   // Attaches each config entry's extra data folders to its app's record in saves_, synthesizes
   // records for configured apps the scan found no savedata folder for, and resolves the time of
   // every entry that ends up with extras. Idempotent, and it *assigns* rather than appends, so a
@@ -335,6 +344,9 @@ private:
   // Extra data folders per homebrew entry plus the batch-skip list, loaded once at startup and
   // applied to saves_ after each scan.
   TrackedFoldersConfig tracked_config_;
+  // Folder sets shipped in the VPK (app0:), overlaid by tracked_config_ per entry id. Never
+  // written; a new app version updates it wholesale.
+  TrackedFoldersConfig base_config_;
   // Set when tracked-folders.json was present but could not be read or parsed. While set, the
   // config must never be written back, so a truncated or corrupt file is never overwritten; every
   // write path checks this flag before saving.

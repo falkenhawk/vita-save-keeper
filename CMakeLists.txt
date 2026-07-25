@@ -139,6 +139,7 @@ else()
     FILE sce_sys/resources/cloud-synced.png sce_sys/resources/cloud-synced.png
     FILE sce_sys/resources/cloud-drive-only.png sce_sys/resources/cloud-drive-only.png
     FILE sce_sys/resources/cloud-local-only.png sce_sys/resources/cloud-local-only.png
+    FILE sce_sys/resources/data-folders.json sce_sys/resources/data-folders.json
     FILE ${CMAKE_CURRENT_BINARY_DIR}/src/vita/mount/kernel/save-data-kernel.skprx sce_sys/save-data-kernel.skprx
     FILE ${CMAKE_CURRENT_BINARY_DIR}/src/vita/mount/user/save-data-user.suprx sce_sys/save-data-user.suprx
   )

@@ -44,10 +44,13 @@ struct TrackedFoldersParseResult {
   TrackedFoldersConfig config;
 };
 
-// tracked-folders.json: {"version":1,"entries":[{id,title,paths:[{prefix,path}]}],"skipped":[ids]}.
-// Unknown fields are ignored so older builds can read files written by newer ones. "hidden" is
-// accepted as a read-only alias for "skipped", so a config written by the earlier draft of this
-// feature keeps its exclusions instead of silently resetting them.
+// data-folders.json: {"version":1,"entries":[{id,title,paths:[{prefix,path}]}],"skipped":[ids]}.
+// The same schema serves both the base file shipped inside the VPK (known folder sets, RetroArch
+// first) and the user's file, which overrides it per entry id. An entry with an EMPTY paths array
+// is a tombstone: in the user file it suppresses the base entry with that id. Unknown fields are
+// ignored so older builds can read files written by newer ones. "hidden" is accepted as a
+// read-only alias for "skipped", so a config written by the earlier draft of this feature keeps
+// its exclusions instead of silently resetting them.
 TrackedFoldersParseResult parse_tracked_folders_json(const std::string &text);
 std::string serialize_tracked_folders_json(const TrackedFoldersConfig &config);
 // Temp file then rename, same as the metadata sidecars (see SaveTimeCache.cpp's write_json_atomic):
@@ -99,6 +102,29 @@ bool tracked_targets_are_safe(const std::vector<TrackedPath> &targets);
 // path's backup-clock result, same as a fresh empty savedata folder would.
 SaveMetadata resolve_tracked_metadata(const std::vector<std::string> &paths,
                                       const SaveDateTime &backup_clock);
+
+// Order-insensitive equality of two folder sets (prefix+path pairs). Order carries no meaning in
+// an archive or a restore, so it must not keep a user override alive.
+bool tracked_paths_equal(const std::vector<TrackedPath> &a, const std::vector<TrackedPath> &b);
+
+// The folder sets that actually apply: the base file's entries overlaid by the user's. A base
+// entry only applies while at least one of its folders exists (so an uninstalled RetroArch never
+// grows a dead row); a user entry with the same id replaces it wholesale, ungated (the user chose
+// those folders and needs to see them to exclude them); a user tombstone (empty paths) suppresses
+// it. Entries that end up with no paths are dropped from the result.
+std::vector<TrackedFolderEntry>
+effective_data_folder_entries(const TrackedFoldersConfig &base, const TrackedFoldersConfig &user,
+                              const std::function<bool(const std::string &)> &directory_exists);
+
+// Applies one UI change to the USER config so the base stays authoritative wherever possible:
+// new_paths equal to the applicable base entry (base_paths, null when none applies) removes the
+// user override entirely - the entry falls back to the base, including whatever a future version
+// ships for it. An empty new_paths writes a tombstone over a base entry, or just removes a purely
+// user entry. Anything else is stored as the override.
+void update_data_folder_override(TrackedFoldersConfig *user, const std::string &id,
+                                 const std::string &title,
+                                 const std::vector<TrackedPath> &new_paths,
+                                 const std::vector<TrackedPath> *base_paths);
 
 // Records for config entries that no savedata scan produced - apps that keep everything in
 // ux0:data and so have no savedata folder to be found by. is_scanned_id reports whether the scan
