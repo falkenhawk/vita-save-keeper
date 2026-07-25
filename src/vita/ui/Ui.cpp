@@ -1221,13 +1221,17 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
       } else if (!state.snapshot_in_cloud) {
         hints.push_back({ButtonSymbol::Select, "Upload"});
       }
-    } else if (state.entry_is_homebrew) {
-      // The live row of a homebrew entry toggles whether the batch sweep includes it, and L opens
-      // the picker for folding extra ux0:data folders into its backups.
+    } else if (state.entry_is_homebrew && !state.data_folders_row) {
+      // The live row of a homebrew entry toggles whether the batch sweep includes it.
       hints.push_back({ButtonSymbol::Square, state.entry_skipped ? "Include" : "Skip"});
-      hints.push_back({ButtonSymbol::Label, "L  Add folder"});
     }
-    hints.push_back({primary, is_snapshot ? "Restore" : "Backup"});
+    const char *primary_label = "Backup";
+    if (state.data_folders_row) {
+      primary_label = "Data folders";
+    } else if (is_snapshot) {
+      primary_label = "Restore";
+    }
+    hints.push_back({primary, primary_label});
     hints.push_back({cancel, "Back"});
   }
   const int hints_left =
@@ -1618,6 +1622,14 @@ void Ui::draw_backup_panel(const UiState &state) {
                   kTextSizeTiny, kUnknown);
       }
       max_text_width = 150;
+    } else if (row.data_folders) {
+      // An action row, not a backup: no presence glyph (there is nothing on the card or in the
+      // Cloud to report), just a right-aligned hint at what the button does. The label itself
+      // already carries the count.
+      static const char *const kHint = "edit";
+      draw_text(fonts_, 926 - measure_text(kTextSizeTiny, kHint), y + 23,
+                selected ? kColorAccent : kColorIdleDot, kTextSizeTiny, kHint);
+      max_text_width = 300;
     } else {
       max_text_width = 340;
       // The row wash is nearly transparent, so the pane behind it is what the cut-out must
@@ -1820,9 +1832,14 @@ void Ui::draw_footer(const UiState &state) {
   const std::string sort_label =
       std::string("Sort: ") + save_sort_mode_label(state.sort_mode);
   const BackupRow *focused_row = nullptr;
-  if (state.backup_rows && state.selected_backup > 0 &&
-      state.selected_backup < state.backup_rows->size()) {
-    focused_row = &(*state.backup_rows)[state.selected_backup];
+  bool data_row_focused = false;
+  if (state.backup_rows && state.selected_backup < state.backup_rows->size()) {
+    const BackupRow &row = (*state.backup_rows)[state.selected_backup];
+    data_row_focused = row.data_folders;
+    // Sentinels are not snapshots, so none of the per-snapshot hints below apply to them.
+    if (!row.is_sentinel()) {
+      focused_row = &row;
+    }
   }
   std::vector<HintSpec> hints;
   hints.reserve(5);
@@ -1834,7 +1851,8 @@ void Ui::draw_footer(const UiState &state) {
   // refresh hold once a connection exists.
   hints.push_back({ButtonSymbol::Triangle, "Details", nullptr,
                    state.google_connected ? "(hold: Refresh)" : nullptr});
-  hints.push_back({ButtonSymbol::Start, "Delete", nullptr, nullptr});
+  hints.push_back({ButtonSymbol::Start, data_row_focused ? "Remove folders" : "Delete", nullptr,
+                   nullptr});
   // Select moves the focused snapshot across: Upload from a card-only row, Download to the card
   // from a Drive-only row. A synced row has no tap action left, so the slot disappears rather
   // than advertise a no-op; on the New Backup entry it names the hold gesture instead, with the
@@ -1846,7 +1864,13 @@ void Ui::draw_footer(const UiState &state) {
   } else if (!focused_row->has_remote()) {
     hints.push_back({ButtonSymbol::Select, "Upload", nullptr, nullptr});
   }
-  hints.push_back({confirm, state.selected_backup == 0 ? "Backup" : "Restore", nullptr, nullptr});
+  const char *primary_label = "Restore";
+  if (data_row_focused) {
+    primary_label = "Data folders";
+  } else if (state.selected_backup == 0) {
+    primary_label = "Backup";
+  }
+  hints.push_back({confirm, primary_label, nullptr, nullptr});
   draw_hints_right_aligned(fonts_, hints.data(), static_cast<int>(hints.size()));
 }
 

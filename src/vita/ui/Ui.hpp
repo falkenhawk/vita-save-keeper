@@ -59,6 +59,9 @@ struct SlotDetailsState {
   // the batch-skip toggle only for homebrew entries and label it by the current state.
   bool entry_is_homebrew{};
   bool entry_skipped{};
+  // True when details was opened with the "Data folders" row focused. The screen still shows the
+  // live save (that row is not a snapshot), but the footer offers the picker instead of a backup.
+  bool data_folders_row{};
   // The entry's extra ux0:data folders (SaveRecord.extra_paths, path only). A data folder has no
   // sdslot metadata, so when this is non-empty the renderer lists these alongside the slot table
   // rather than falling back to "no readable slot metadata". Empty for every entry with none.

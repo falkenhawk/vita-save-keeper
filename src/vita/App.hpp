@@ -177,6 +177,10 @@ private:
   void rebuild_backup_rows();
   std::size_t backup_count() const;
   const BackupRow *selected_backup_row() const;
+  // True when the focused row is the homebrew entry's "Data folders" action row. It is a sentinel,
+  // so selected_backup_row() reports it as no row at all; this is how the action button tells the
+  // two "no row" cases apart.
+  bool data_folders_row_focused() const;
   std::string selected_backup_name() const;
   void focus_backup_row_by_identity(const std::string &backup_name);
   std::string remote_file_id_for(const std::string &remote_name) const;

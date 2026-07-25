@@ -1220,7 +1220,7 @@ void App::refresh_local_backups() {
 
   local_backups_ = scan_local_backup_names(kBackupRoot, save->id);
   rebuild_backup_rows();
-  if (selected_backup_ > backup_count()) {
+  if (selected_backup_ >= backup_rows_.size()) {
     selected_backup_ = 0;
   }
 }
@@ -1278,8 +1278,8 @@ void App::move_selected_category(int delta) {
 
 void App::move_selected_backup(int delta) {
   const std::size_t previous = selected_backup_;
-  // Menu size is the backups plus the "New Backup" entry at index 0.
-  selected_backup_ = move_selection(selected_backup_, backup_count() + 1, delta);
+  // Every row is selectable, sentinels included - the menu size is simply how many rows there are.
+  selected_backup_ = move_selection(selected_backup_, backup_rows_.size(), delta);
   if (selected_backup_ != previous) {
     details_open_pending_ = false;
     cancel_restore_confirmation();
@@ -1390,20 +1390,25 @@ void App::handle_delete_button() {
     set_status(StatusKind::Info, "No save selected.");
     return;
   }
-  // Start on an entry that has extra data folders detaches them, removing the config entry only -
-  // existing backups are never auto-dropped. An entry with its own savedata folder simply loses its
-  // extras and keeps its row. An entry that exists *because* of those folders (an app with no
-  // savedata folder) loses its row with them, so detaching is refused while it still has backups:
-  // there would be no row left to reach them from.
+  // Start on the "Data folders" row removes them all, dropping the config entry only - existing
+  // backups are never auto-dropped. Scoped to that row so Start on a backup row still deletes that
+  // backup. An entry with its own savedata folder simply loses its extras and keeps its row. An
+  // entry that exists *because* of those folders (an app with no savedata folder) loses its row
+  // with them, so removal is refused while it still has backups: there would be no row left to
+  // reach them from.
   const bool has_extras = !selected->extra_paths.empty();
   const bool row_is_config_only = selected->path.empty();
-  if (has_extras && row_is_config_only && backup_count() != 0) {
+  if (data_folders_row_focused() && !has_extras) {
+    set_status(StatusKind::Info, "No data folders to remove.");
+    return;
+  }
+  if (data_folders_row_focused() && row_is_config_only && backup_count() != 0) {
     set_status(StatusKind::Info,
                status_with_name("Delete the backups of ", selected->display_name,
                                 " before removing its folders."));
     return;
   }
-  if (has_extras) {
+  if (data_folders_row_focused()) {
     const std::string name = selected->display_name;
     if (!stop_tracking_confirmation_pending_) {
       restore_confirmation_pending_ = false;
@@ -1604,8 +1609,8 @@ void App::perform_scoped_delete(bool delete_local, bool delete_remote) {
   // The folder is worth nothing without backups in it. Unconditional because a Cloud-only delete
   // also drops the stale local companion, and the call does nothing while anything remains.
   remove_local_backup_folder_if_empty(kBackupRoot, selected->id);
-  if (selected_backup_ > backup_count()) {
-    selected_backup_ = backup_count();
+  if (selected_backup_ >= backup_rows_.size()) {
+    selected_backup_ = backup_rows_.empty() ? 0 : backup_rows_.size() - 1;
   }
 
   if (local_failed) {
@@ -1629,13 +1634,19 @@ void App::handle_action_button() {
     run_sync_all();
     return;
   }
+  // The "Data folders" row is an action, not a backup: opening the picker is what it does.
+  if (data_folders_row_focused()) {
+    open_directory_browser(false);
+    return;
+  }
   const SaveRecord *selected = selected_save_record();
   if (!selected) {
     set_status(StatusKind::Info, "No save selected.");
     return;
   }
   // One context-sensitive action button: the "New Backup" entry creates a snapshot, a backup
-  // entry restores it (with a second press to confirm).
+  // entry restores it (with a second press to confirm). The "Data folders" row was handled at the
+  // top of this function.
   if (selected_backup_ == 0) {
     create_new_backup();
     return;
@@ -2292,7 +2303,7 @@ void App::refresh_remote_backups_view() {
     }
   }
   rebuild_backup_rows();
-  if (selected_backup_ > backup_count()) {
+  if (selected_backup_ >= backup_rows_.size()) {
     selected_backup_ = 0;
   }
 }
@@ -2308,18 +2319,39 @@ std::vector<std::string> App::remote_backup_names() const {
 
 void App::rebuild_backup_rows() {
   backup_rows_ = build_backup_rows(remote_backup_names(), local_backups_);
+  // A homebrew entry gets a "Data folders" row right under "New Backup". Putting the picker in the
+  // list rather than on a button means it is visible without knowing it exists, and it costs no
+  // footer space - the grid's footer has none left.
+  const SaveRecord *save = selected_save_record();
+  if (save && classify_save(*save) == SaveCategory::Homebrew && !backup_rows_.empty()) {
+    backup_rows_.insert(backup_rows_.begin() + 1,
+                        BackupRow::data_folders_row(save->extra_paths.size()));
+  }
 }
 
 std::size_t App::backup_count() const {
-  // Snapshot rows only; the "New Backup" sentinel at index 0 is not a backup.
-  return backup_rows_.empty() ? 0 : backup_rows_.size() - 1;
+  // Snapshot rows only. "New Backup" and "Data folders" stand for actions, not backups, so a count
+  // taken by subtracting a fixed number of leading rows would drift as sentinels come and go.
+  std::size_t count = 0;
+  for (const BackupRow &row : backup_rows_) {
+    if (!row.is_sentinel()) {
+      ++count;
+    }
+  }
+  return count;
 }
 
 const BackupRow *App::selected_backup_row() const {
-  if (selected_backup_ == 0 || selected_backup_ >= backup_rows_.size()) {
+  // Sentinels read as "no row", which is what makes every backup action - restore, delete, label,
+  // transfer - refuse them without each having to know they exist.
+  if (selected_backup_ >= backup_rows_.size() || backup_rows_[selected_backup_].is_sentinel()) {
     return nullptr;
   }
   return &backup_rows_[selected_backup_];
+}
+
+bool App::data_folders_row_focused() const {
+  return selected_backup_ < backup_rows_.size() && backup_rows_[selected_backup_].data_folders;
 }
 
 std::string App::selected_backup_name() const {
@@ -2332,6 +2364,9 @@ std::string App::selected_backup_name() const {
 void App::focus_backup_row_by_identity(const std::string &backup_name) {
   const std::string identity = backup_identity(backup_name);
   for (std::size_t i = 1; i < backup_rows_.size(); ++i) {
+    if (backup_rows_[i].is_sentinel()) {
+      continue;
+    }
     if (backup_identity(backup_rows_[i].primary_name()) == identity) {
       selected_backup_ = i;
       return;
@@ -2803,6 +2838,7 @@ void App::open_save_details() {
   // track the save, not the snapshot row, so both details paths set them.
   slot_details_.entry_is_homebrew = classify_save(save) == SaveCategory::Homebrew;
   slot_details_.entry_skipped = tracked_config_.skipped_ids.count(save.id) != 0;
+  slot_details_.data_folders_row = data_folders_row_focused();
   // Shared by both branches below (the live row and a snapshot describe the same entry), so the
   // details screen can list the extra folders regardless of which one is inspected. Left empty by
   // the reset above for every entry that has none.
@@ -3308,6 +3344,14 @@ void App::close_directory_browser() {
   schedule_selected_save_time_resolve();
   refresh_local_backups();
   refresh_remote_backups_view();
+  // Land back on the row the picker was opened from, with its folder count now updated, rather
+  // than kicking the focus up to "New Backup".
+  for (std::size_t i = 0; i < backup_rows_.size(); ++i) {
+    if (backup_rows_[i].data_folders) {
+      selected_backup_ = i;
+      break;
+    }
+  }
 
   // Back to where the browser was opened from. Reopening details rather than just re-flagging it
   // rebuilds its folder list and sizes, so the changes just made are what shows. If the entry no
@@ -3972,6 +4016,16 @@ int App::run() {
         sceKernelDelayThread(kFrameDelayUs);
         continue;
       }
+      // On the "Data folders" row the context action opens the picker. Details has to close first -
+      // both the draw and input paths check it before the browser, so leaving it open would hide
+      // the browser behind it - and closing the picker reopens details from where it left off.
+      if ((pressed & backup_button) != 0 && data_folders_row_focused()) {
+        slot_details_.open = false;
+        open_directory_browser(true);
+        previous_buttons = buttons;
+        sceKernelDelayThread(kFrameDelayUs);
+        continue;
+      }
       // The context action: back up the live save, or restore the inspected snapshot (second
       // press confirms, prompted in this screen's status line).
       if ((pressed & backup_button) != 0) {
@@ -3994,17 +4048,6 @@ int App::run() {
         sceKernelDelayThread(kFrameDelayUs);
         continue;
       }
-      // L opens the data-folder picker for a homebrew entry, folding extra ux0:data folders into
-      // this entry's own backups. Nothing else in details uses the triggers.
-      if ((pressed & SCE_CTRL_LTRIGGER) != 0 && slot_details_.entry_is_homebrew) {
-        // Details must close while the browser is up: the draw and input paths both check details
-        // first, so leaving it open would hide the browser behind it.
-        slot_details_.open = false;
-        open_directory_browser(true);
-        previous_buttons = buttons;
-        sceKernelDelayThread(kFrameDelayUs);
-        continue;
-      }
       // Square edits the focused snapshot's label directly - the sort tap has no meaning here, so
       // no hold needed. Reopen afterwards so the header shows the new name (metadata is cached by
       // then). On the live "New Backup" row a homebrew entry toggles its batch skip instead.
@@ -4012,7 +4055,9 @@ int App::run() {
         if (selected_backup_row()) {
           begin_label_edit();
           open_save_details();
-        } else if (slot_details_.entry_is_homebrew) {
+        } else if (slot_details_.entry_is_homebrew && !slot_details_.data_folders_row) {
+          // Gated on the row so the button matches the footer, which drops the Skip hint once the
+          // "Data folders" row is what is focused.
           toggle_entry_skipped();
         }
         previous_buttons = buttons;

@@ -12,9 +12,21 @@ BackupRow BackupRow::new_backup_row() {
   return row;
 }
 
+BackupRow BackupRow::data_folders_row(std::size_t count) {
+  BackupRow row;
+  row.data_folders = true;
+  row.data_folder_count = count;
+  return row;
+}
+
 std::string BackupRow::display_name() const {
   if (new_backup) {
     return "New Backup";
+  }
+  if (data_folders) {
+    return data_folder_count == 0
+               ? std::string("Data folders")
+               : "Data folders (" + std::to_string(data_folder_count) + ")";
   }
   // Only the display is transformed (no ".zip", the " auto" marker shown as an [AUTO] prefix) -
   // the stored file name is never mutated. Cloud presence is drawn as a pill by the UI instead
