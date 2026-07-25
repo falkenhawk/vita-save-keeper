@@ -544,7 +544,9 @@ void test_save_metadata_json_records_tracked_targets_when_present() {
   const std::string json =
       vsm::serialize_save_metadata_json("2026-07-23 09-15-00", metadata);
   EXPECT_TRUE(json.find("\"version\":2") != std::string::npos);
-  EXPECT_TRUE(json.find("\"tracked_targets\"") != std::string::npos);
+  // Written under the user-facing name; "tracked_targets" below is read-only compatibility.
+  EXPECT_TRUE(json.find("\"data_folders\"") != std::string::npos);
+  EXPECT_TRUE(json.find("\"tracked_targets\"") == std::string::npos);
 
   const vsm::SaveMetadataJsonResult parsed = vsm::parse_save_metadata_json(json);
   EXPECT_TRUE(parsed.ok);
@@ -562,7 +564,7 @@ void test_save_metadata_json_records_tracked_targets_when_present() {
   // (tested above) remains the authoritative gate before any such target is used to restore a save.
   const std::string lenient =
       R"({"version":2,"archiveIdentity":"id","savedAt":"2026-07-23T09:15:00",)"
-      R"("source":"filesystem","approximate":true,"slots":[],"tracked_targets":[)"
+      R"("source":"filesystem","approximate":true,"slots":[],"data_folders":[)"
       R"({"prefix":"a"},{"prefix":"","path":""},{"path":"ux0:data/keep"},)"
       R"({"path":"ux0:data/\u0000evil"}]})";
   const vsm::SaveMetadataJsonResult lenient_parsed = vsm::parse_save_metadata_json(lenient);
@@ -570,6 +572,16 @@ void test_save_metadata_json_records_tracked_targets_when_present() {
   EXPECT_EQ(lenient_parsed.metadata.tracked_targets.size(), static_cast<std::size_t>(1));
   EXPECT_EQ(lenient_parsed.metadata.tracked_targets[0].path, "ux0:data/keep");
   EXPECT_EQ(lenient_parsed.metadata.tracked_targets[0].prefix, "");
+
+  // Pre-release test builds wrote the same field as "tracked_targets"; it still reads.
+  const std::string legacy =
+      R"({"version":2,"archiveIdentity":"id","savedAt":"2026-07-23T09:15:00",)"
+      R"("source":"filesystem","approximate":true,"slots":[],"tracked_targets":[)"
+      R"({"prefix":"savefiles","path":"ux0:data/retroarch/savefiles"}]})";
+  const vsm::SaveMetadataJsonResult legacy_parsed = vsm::parse_save_metadata_json(legacy);
+  EXPECT_TRUE(legacy_parsed.ok);
+  EXPECT_EQ(legacy_parsed.metadata.tracked_targets.size(), static_cast<std::size_t>(1));
+  EXPECT_EQ(legacy_parsed.metadata.tracked_targets[0].prefix, "savefiles");
 }
 
 void test_save_metadata_json_omits_tracked_targets_for_regular_saves() {

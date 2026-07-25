@@ -484,9 +484,10 @@ std::string serialize_save_metadata_json(const std::string &identity,
   }
   root["slots"] = picojson::value(std::move(slots));
 
-  // Optional, tracked-folder backups only. Stays at schema version 2: the field is added only when
-  // non-empty, so a regular save's sidecar is byte-identical to what earlier builds wrote, and older
-  // builds ignore the unknown key, so both read directions stay compatible.
+  // Optional, present only for backups that bundle data folders. Stays at schema version 2: the
+  // field is added only when non-empty, so a regular save's sidecar is byte-identical to what
+  // earlier builds wrote, and older builds ignore the unknown key, so both read directions stay
+  // compatible. (The key matches the feature's user-facing name; the C++ member keeps its old one.)
   if (!metadata.tracked_targets.empty()) {
     picojson::array targets;
     targets.reserve(metadata.tracked_targets.size());
@@ -496,7 +497,7 @@ std::string serialize_save_metadata_json(const std::string &identity,
       item["path"] = picojson::value(target.path);
       targets.emplace_back(std::move(item));
     }
-    root["tracked_targets"] = picojson::value(std::move(targets));
+    root["data_folders"] = picojson::value(std::move(targets));
   }
   return picojson::value(std::move(root)).serialize();
 }
@@ -575,11 +576,15 @@ SaveMetadataJsonResult parse_save_metadata_json(const std::string &json) {
     }
   }
 
-  // Optional: present only in tracked-folder sidecars. Missing leaves the vector empty, so every
-  // pre-field sidecar still parses. Entries missing/empty "path", with non-string fields, or with a
-  // control character (see contains_control_character) anywhere in "path" are skipped, matching the
-  // lenient parsing of tracked-folders.json (parse_path in TrackedFolders.cpp).
-  const picojson::value *targets = json_member(root, "tracked_targets");
+  // Optional: present only for backups that bundle data folders. Missing leaves the vector empty,
+  // so every pre-field sidecar still parses. "tracked_targets" is the same field under the name the
+  // pre-release test builds wrote - read, never written. Entries missing/empty "path", with
+  // non-string fields, or with a control character (see contains_control_character) anywhere in
+  // "path" are skipped, matching the lenient parsing of tracked-folders.json.
+  const picojson::value *targets = json_member(root, "data_folders");
+  if (!targets) {
+    targets = json_member(root, "tracked_targets");
+  }
   if (targets && targets->is<picojson::array>()) {
     for (const picojson::value &target_value : targets->get<picojson::array>()) {
       if (!target_value.is<picojson::object>()) {
