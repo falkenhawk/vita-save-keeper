@@ -9,6 +9,7 @@
 #include <psp2/common_dialog.h>
 #include <psp2/ctrl.h>
 #include <psp2/ime_dialog.h>
+#include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 #include <algorithm>
 #include <cctype>
@@ -1723,6 +1724,12 @@ void Ui::draw_google_setup_prompt(const UiState &state) {
 
 void Ui::draw_busy(const std::string &label, long long done, long long total,
                    const char *context_above, const char *cancel_hint) {
+  // Long work runs with nobody touching a button, so the console would auto-suspend part way
+  // through a transfer. Every such operation pumps this modal from its progress callback, which
+  // makes this the single place that covers all of them - and only them, since ordinary browsing
+  // draws through draw() and leaves the idle timer alone. A tick rather than a lock, so an
+  // operation that fails or is cancelled cannot leave suspension disabled behind it.
+  sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND);
   ++frame_counter_;
   vita2d_start_drawing();
   vita2d_clear_screen();
