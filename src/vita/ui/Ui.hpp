@@ -55,7 +55,7 @@ struct SlotDetailsState {
   // corner. Both false for the live save, which is not a snapshot.
   bool snapshot_on_card{};
   bool snapshot_in_cloud{};
-  // True when details was opened with the "Data folders" row focused. The screen still shows the
+  // True when details was opened with the "Save Folders" row focused. The screen still shows the
   // live save (that row is not a snapshot), but the footer offers the picker instead of a backup.
   bool data_folders_row{};
   // The entry's extra ux0:data folders. For the live save these are the entry's current folders

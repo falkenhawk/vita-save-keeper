@@ -1185,7 +1185,7 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
     // always fits on screen, so this never scrolls (details_max_scroll returns 0 then).
     // On the same baselines as the summary card across the gutter: label with LAST SAVE TIME
     // (98), first row with the date value under it (124), so the two panes share one grid.
-    draw_text(fonts_, kRightX, 98, kColorMuted, kTextSizeTiny, "DATA FOLDERS");
+    draw_text(fonts_, kRightX, 98, kColorMuted, kTextSizeTiny, "SAVE FOLDERS");
     for (std::size_t i = 0; i < state.extra_paths.size() && i < 14; ++i) {
       const SlotDetailsState::DetailsFolder &folder = state.extra_paths[i];
       const int y = 124 + static_cast<int>(i) * 24;
@@ -1305,7 +1305,7 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
     }
     const char *primary_label = "Backup";
     if (state.data_folders_row) {
-      // Opens the picker for editing the set; the focused row already reads "Data folders (N)".
+      // Opens the picker for editing the set; the focused row already reads "Save Folders (N)".
       primary_label = "Edit";
     } else if (is_snapshot) {
       primary_label = "Restore";
@@ -1346,8 +1346,8 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
   const int path_w = measure_text(kTextSizeSmall, path.c_str());
   const std::string heading =
       state.entry_name.empty()
-          ? std::string("Data Folders")
-          : fit_text(kTextSizeTitle, "Data Folders: " + state.entry_name, 942 - 18 - path_w - 24);
+          ? std::string("Save Folders")
+          : fit_text(kTextSizeTitle, "Save Folders: " + state.entry_name, 942 - 18 - path_w - 24);
   draw_text(fonts_, 18, 34, kColorText, kTextSizeTitle, heading.c_str());
   draw_text(fonts_, 942 - path_w, 32, kColorMuted, kTextSizeSmall, path.c_str());
 
@@ -1728,24 +1728,27 @@ void Ui::draw_backup_panel(const UiState &state) {
       // moment after the selection settles; a circle spinner stands in until then, instead of
       // flashing a misleading "unknown". A resolved save with no trustworthy time reads "unknown".
       const unsigned int time_color = selected ? kColorAccent : kColorIdleDot;
+      // Everything in this trailing column shares one right ink edge, x=933, matching the cloud
+      // and folder glyphs on the rows around it - the pen positions below overshoot by the last
+      // glyph's right bearing, measured on a hardware capture.
       if (save->save_time_requires_mount) {
         static const char *const kPrefix = "Last save:";
-        draw_text(fonts_, 902 - measure_text(kTextSizeTiny, kPrefix), y + 23, time_color,
+        draw_text(fonts_, 911 - measure_text(kTextSizeTiny, kPrefix), y + 23, time_color,
                   kTextSizeTiny, kPrefix);
-        draw_circle_spinner(916.0f, static_cast<float>(y) + 17.0f, frame_counter_, time_color);
+        draw_circle_spinner(925.0f, static_cast<float>(y) + 17.0f, frame_counter_, time_color);
       } else if (save->save_time_known) {
         // The label stays plain text, but the date runs through the tabular renderer so its
         // date/time separator carries the same tightened gap as the detail screen. Both are
-        // right-aligned to end at 926: the date first, then the label butted against its left.
+        // right-aligned: the date first, then the label butted against its left.
         const std::string date = format_save_datetime_spaced(save->saved_at);
         const int date_w = datetime_tabular_width(fonts_, kTextSizeTiny, date);
         static const char *const kPrefix = "Last save: ";
-        draw_text(fonts_, 926 - date_w - measure_text(kTextSizeTiny, kPrefix), y + 23, time_color,
+        draw_text(fonts_, 934 - date_w - measure_text(kTextSizeTiny, kPrefix), y + 23, time_color,
                   kTextSizeTiny, kPrefix);
-        draw_datetime_tabular(fonts_, 926, y + 23, time_color, kTextSizeTiny, date);
+        draw_datetime_tabular(fonts_, 934, y + 23, time_color, kTextSizeTiny, date);
       } else {
         static const char *const kUnknown = "Last save: unknown";
-        draw_text(fonts_, 926 - measure_text(kTextSizeTiny, kUnknown), y + 23, time_color,
+        draw_text(fonts_, 934 - measure_text(kTextSizeTiny, kUnknown), y + 23, time_color,
                   kTextSizeTiny, kUnknown);
       }
       max_text_width = 150;
@@ -1755,10 +1758,12 @@ void Ui::draw_backup_panel(const UiState &state) {
       // already carries the count.
       if (folder_edit_tex_) {
         // The asset is white; the tint carries the selection color, like the primitive did.
-        vita2d_draw_texture_tint(folder_edit_tex_, 906.0f, static_cast<float>(y) + 11.0f,
+        // x lines the 20px icon's right edge up with the cloud glyph's ink (ends at 933) so the
+        // two read as one right-anchored column - measured on a hardware capture.
+        vita2d_draw_texture_tint(folder_edit_tex_, 914.0f, static_cast<float>(y) + 11.0f,
                                  selected ? kColorAccent : kColorIdleDot);
       } else {
-        draw_folder_glyph(926, y + 12, selected ? kColorAccent : kColorIdleDot);
+        draw_folder_glyph(934, y + 12, selected ? kColorAccent : kColorIdleDot);
       }
       max_text_width = 300;
     } else {
@@ -2002,7 +2007,7 @@ void Ui::draw_footer(const UiState &state) {
   hints.push_back({ButtonSymbol::Square, sort_label.c_str(), nullptr,
                    focused_row ? "(hold: Label)" : nullptr});
   // The connect cue lives in the header next to "not connected"; the footer only notes the
-  // refresh hold once a connection exists. The "Data folders" row has no details of its own, so
+  // refresh hold once a connection exists. The "Save Folders" row has no details of its own, so
   // Triangle is not offered there; Start only appears on a real snapshot - "New Backup" and the
   // sentinels have nothing to delete, and advertising a dead press is worse than a shorter footer.
   if (!data_row_focused) {
@@ -2026,7 +2031,7 @@ void Ui::draw_footer(const UiState &state) {
   } else if (!focused_row->has_remote()) {
     hints.push_back({ButtonSymbol::Select, "Upload", nullptr, nullptr});
   }
-  // On the "Data folders" row the press opens the picker for editing the set; the row already
+  // On the "Save Folders" row the press opens the picker for editing the set; the row already
   // names what it is, so the hint names the action.
   const char *primary_label = "Restore";
   if (data_row_focused) {

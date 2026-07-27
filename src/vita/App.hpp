@@ -214,13 +214,13 @@ private:
   void rebuild_backup_rows();
   std::size_t backup_count() const;
   const BackupRow *selected_backup_row() const;
-  // True when the focused row is the homebrew entry's "Data folders" action row. It is a sentinel,
+  // True when the focused row is the homebrew entry's "Save Folders" action row. It is a sentinel,
   // so selected_backup_row() reports it as no row at all; this is how the action button tells the
   // two "no row" cases apart.
   bool data_folders_row_focused() const;
   bool new_backup_row_focused() const;
   // Index of the "New Backup" row - the default focus whenever the backup list resets. Not 0 on
-  // homebrew entries, where the "Data folders" row sits above it.
+  // homebrew entries, where the "Save Folders" row sits above it.
   std::size_t default_backup_row() const;
   std::string selected_backup_name() const;
   void focus_backup_row_by_identity(const std::string &backup_name);

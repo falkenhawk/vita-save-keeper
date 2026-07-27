@@ -1464,7 +1464,7 @@ void App::move_selected_save(int delta) {
     cancel_delete_confirmation();
     cancel_duplicate_backup_confirmation();
     // A different save means a different backup list; focus its "New Backup" entry - picked after
-    // the refreshes below rebuild the rows, since a homebrew entry seats "Data folders" above it.
+    // the refreshes below rebuild the rows, since a homebrew entry seats "Save Folders" above it.
     queue_selected_save_time_read();
     refresh_local_backups();
     refresh_remote_backups_view();
@@ -1617,7 +1617,7 @@ void App::handle_delete_button() {
     set_status(StatusKind::Info, "No save selected.");
     return;
   }
-  // Start deletes the focused backup and nothing else. The "Data folders" row has no Start action:
+  // Start deletes the focused backup and nothing else. The "Save Folders" row has no Start action:
   // folders are added and removed inside the picker itself, which is the only place that shows which
   // ones an entry actually has.
   if (data_folders_row_focused()) {
@@ -1783,7 +1783,7 @@ void App::handle_action_button() {
     }
     return;
   }
-  // The "Data folders" row is an action, not a backup: opening the picker is what it does.
+  // The "Save Folders" row is an action, not a backup: opening the picker is what it does.
   if (data_folders_row_focused()) {
     open_directory_browser(false);
     return;
@@ -2468,7 +2468,7 @@ std::vector<std::string> App::remote_backup_names() const {
 
 void App::rebuild_backup_rows() {
   backup_rows_ = build_backup_rows(remote_backup_names(), local_backups_);
-  // A homebrew entry gets a "Data folders" row right above "New Backup". Putting the picker in the
+  // A homebrew entry gets a "Save Folders" row right above "New Backup". Putting the picker in the
   // list rather than on a button means it is visible without knowing it exists, and it costs no
   // footer space - the grid's footer has none left. Default focus still lands on "New Backup"
   // (default_backup_row), so switching titles keeps its familiar landing spot.
@@ -2494,7 +2494,7 @@ bool App::new_backup_row_focused() const {
 }
 
 std::size_t App::backup_count() const {
-  // Snapshot rows only. "New Backup" and "Data folders" stand for actions, not backups, so a count
+  // Snapshot rows only. "New Backup" and "Save Folders" stand for actions, not backups, so a count
   // taken by subtracting a fixed number of leading rows would drift as sentinels come and go.
   std::size_t count = 0;
   for (const BackupRow &row : backup_rows_) {
@@ -2967,7 +2967,7 @@ void App::repair_remote_backup_metadata(const SaveRecord &save, const BackupRow 
 }
 
 void App::request_save_details() {
-  // The "Data folders" row has no details of its own - Triangle opens the picker instead, an
+  // The "Save Folders" row has no details of its own - Triangle opens the picker instead, an
   // unhinted shortcut that mirrors Triangle silently closing it from inside.
   if (data_folders_row_focused()) {
     open_directory_browser(false);
@@ -3481,7 +3481,7 @@ void App::open_directory_browser(bool from_details) {
     return;
   }
   if (classify_save(*selected) != SaveCategory::Homebrew) {
-    set_status(StatusKind::Info, "Data folders are for homebrew entries.");
+    set_status(StatusKind::Info, "Save folders are for homebrew entries.");
     return;
   }
   abort_browser_size_walk();
@@ -3525,7 +3525,7 @@ void App::close_directory_browser() {
 
   const SaveRecord *current = selected_save_record();
   if (current && current->id == entry_id) {
-    // Land back on the "Data folders" row the picker was opened from, with its folder count now
+    // Land back on the "Save Folders" row the picker was opened from, with its folder count now
     // updated, rather than kicking the focus up to "New Backup" - and when the visit started in
     // Save Details, reopen it, which rebuilds its folder list and sizes to show the changes.
     for (std::size_t i = 0; i < backup_rows_.size(); ++i) {
@@ -4551,7 +4551,7 @@ int App::run() {
         sceKernelDelayThread(kFrameDelayUs);
         continue;
       }
-      // On the "Data folders" row the context action opens the picker. Details has to close first -
+      // On the "Save Folders" row the context action opens the picker. Details has to close first -
       // both the draw and input paths check it before the browser, so leaving it open would hide
       // the browser behind it - and closing the picker reopens details from where it left off.
       if ((pressed & backup_button) != 0 && data_folders_row_focused()) {
