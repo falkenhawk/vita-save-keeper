@@ -35,14 +35,26 @@ SyncItemPlan plan_sync_item(const SyncItemInput &input) {
   return plan;
 }
 
-std::string sync_all_confirm_message(std::size_t games, const std::string &tab_label,
-                                     bool drive_connected) {
+std::string sync_all_confirm_message(std::size_t selected, std::size_t total,
+                                     const std::string &tab_label, bool drive_connected) {
+  // Confirming with nothing checked is refused, so this state is a statement, not a question.
+  if (selected == 0) {
+    return "Nothing selected to backup";
+  }
   const std::string saves_noun =
-      std::to_string(games) + " " + tab_label + (games == 1 ? " save" : " saves");
+      std::to_string(selected) + " " + tab_label + (selected == 1 ? " save" : " saves");
   // Without Drive the run only writes to the card. The header already shows the connection
   // state, but a dropped "& upload" is easy to miss; "locally" says it outright.
   const std::string action = drive_connected ? "Backup & upload " : "Backup ";
-  const std::string scope = games == 1 ? saves_noun : "all " + saves_noun;
+  std::string scope = saves_noun;
+  if (selected < total) {
+    // "N of M": the sweep takes exactly the checked ones. The noun keeps the tab label so the
+    // count reads against the right group even with the grid behind a busy frame.
+    scope = std::to_string(selected) + " of " + std::to_string(total) + " " + tab_label +
+            " saves";
+  } else if (selected > 1) {
+    scope = "all " + saves_noun;
+  }
   return action + scope + (drive_connected ? "?" : " locally?");
 }
 

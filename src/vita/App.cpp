@@ -91,6 +91,9 @@ constexpr int kAnalogCenter = 128;
 constexpr int kAnalogDeadZone = 48;
 constexpr int kRepeatInitialDelayFrames = 18;
 constexpr int kRepeatIntervalFrames = 5;
+// Settle delay before the folder picker starts sizing the hovered row, so scrolling the list does
+// not measure every folder the cursor merely passes.
+constexpr int kBrowserSizeDelayFrames = 10;
 constexpr unsigned int kRepeatableButtons = SCE_CTRL_LEFT | SCE_CTRL_RIGHT | SCE_CTRL_UP |
                                             SCE_CTRL_DOWN | SCE_CTRL_LTRIGGER |
                                             SCE_CTRL_RTRIGGER;
@@ -1415,9 +1418,9 @@ std::size_t App::category_count(SaveCategory category) const {
 
 void App::rebuild_visible_saves() {
   visible_saves_.clear();
-  // One pass, grid order untouched. Skipped entries are only left out of the batch sweep, not
-  // reordered or removed: moving them around was the old "hidden" behaviour and it never matched
-  // what the label promised.
+  // One pass, grid order untouched. Saves checked out of the batch sweep keep their place and
+  // their tile: reordering them was the old "hidden" behaviour and it never matched what the
+  // label promised.
   for (std::size_t i = 0; i < saves_.size(); ++i) {
     if (classify_save(saves_[i]) == category_) {
       visible_saves_.push_back(i);
@@ -1426,20 +1429,6 @@ void App::rebuild_visible_saves() {
   if (selected_save_ >= visible_saves_.size()) {
     selected_save_ = 0;
   }
-}
-
-std::vector<std::size_t> App::batch_targets() const {
-  // The tab's entries minus the ones marked to skip. Skipping exists for homebrew settings noise -
-  // utility configs like VitaShell's or AutoPlugin's that would otherwise be re-zipped and
-  // re-uploaded on every sweep - so it filters the batch and nothing else.
-  std::vector<std::size_t> targets;
-  targets.reserve(visible_saves_.size());
-  for (const std::size_t index : visible_saves_) {
-    if (tracked_config_.skipped_ids.count(saves_[index].id) == 0) {
-      targets.push_back(index);
-    }
-  }
-  return targets;
 }
 
 const SaveRecord *App::selected_save_record() const {
@@ -1473,16 +1462,19 @@ void App::move_selected_save(int delta) {
   if (selected_save_ != previous) {
     cancel_restore_confirmation();
     cancel_delete_confirmation();
-    cancel_sync_all_confirmation();
     cancel_duplicate_backup_confirmation();
     // A different save means a different backup list; focus its "New Backup" entry - picked after
     // the refreshes below rebuild the rows, since a homebrew entry seats "Data folders" above it.
-    // Any status message described the previous save, so it goes too.
     queue_selected_save_time_read();
     refresh_local_backups();
     refresh_remote_backups_view();
     selected_backup_ = default_backup_row();
-    clear_status();
+    // Browsing IS the batch window's point - moving must not close it, and the status line is
+    // showing its live count, not a stale per-save message. Outside the window the old message
+    // described the previous save, so it goes.
+    if (!sync_all_confirmation_pending_) {
+      clear_status();
+    }
   }
 }
 
@@ -1516,6 +1508,11 @@ void App::move_selected_category(int delta) {
 }
 
 void App::move_selected_backup(int delta) {
+  // The batch window hides the backup list behind its panel; scrolling a list that is not on
+  // screen would only shuffle state (and cancel the window) blind.
+  if (sync_all_confirmation_pending_) {
+    return;
+  }
   const std::size_t previous = selected_backup_;
   // Every row is selectable, sentinels included - the menu size is simply how many rows there are.
   selected_backup_ = move_selection(selected_backup_, backup_rows_.size(), delta);
@@ -1780,7 +1777,10 @@ void App::perform_scoped_delete(bool delete_local, bool delete_remote) {
 
 void App::handle_action_button() {
   if (sync_all_confirmation_pending_) {
-    run_sync_all();
+    // An empty selection has nothing to run; the status line already reads as the nudge.
+    if (batch_selected_count() > 0) {
+      run_sync_all();
+    }
     return;
   }
   // The "Data folders" row is an action, not a backup: opening the picker is what it does.
@@ -3004,10 +3004,6 @@ void App::open_save_details() {
   // fetch. A details open that reads a cached companion is instant and must not flash a modal.
   slot_details_ = {};
   slot_details_.game_title = save.display_name;
-  // Describe the inspected save so the live-row footer can offer the homebrew skip toggle; these
-  // track the save, not the snapshot row, so both details paths set them.
-  slot_details_.entry_is_homebrew = classify_save(save) == SaveCategory::Homebrew;
-  slot_details_.entry_skipped = tracked_config_.skipped_ids.count(save.id) != 0;
   slot_details_.data_folders_row = data_folders_row_focused();
   // Shared by both branches below (the live row and a snapshot describe the same entry), so the
   // details screen can list the extra folders regardless of which one is inspected. Left empty by
@@ -3411,48 +3407,6 @@ void App::begin_label_edit() {
                  : status_with_name("Labeled ", display_backup_name(new_name), "."));
 }
 
-void App::toggle_entry_skipped() {
-  const SaveRecord *selected = selected_save_record();
-  if (!selected) {
-    return;
-  }
-  if (tracked_config_load_failed_) {
-    // The config could not be read whole this run, so writing it back would truncate whatever is
-    // on disk; refuse the toggle and leave both the file and the in-memory set untouched.
-    set_status(StatusKind::Info,
-               "Cannot update backup-settings.json - fix or delete it first.");
-    return;
-  }
-  const std::string id = selected->id;
-  const std::string name = selected->display_name;
-  const bool now_skipped = tracked_config_.skipped_ids.count(id) == 0;
-  const long long previous_modified = tracked_config_.modified;
-  if (now_skipped) {
-    tracked_config_.skipped_ids.insert(id);
-  } else {
-    tracked_config_.skipped_ids.erase(id);
-  }
-  tracked_config_.modified = static_cast<long long>(std::time(nullptr));
-  if (!save_data_folders_config()) {
-    // The write is atomic, so a failure means the file on disk was never touched; undoing the flip
-    // keeps the in-memory set matching what is still there.
-    if (now_skipped) {
-      tracked_config_.skipped_ids.erase(id);
-    } else {
-      tracked_config_.skipped_ids.insert(id);
-    }
-    tracked_config_.modified = previous_modified;
-    return;
-  }
-  // Details, when open, stays on this save; flip its footer hint to match the new state.
-  slot_details_.entry_skipped = now_skipped;
-  // No rebuild: skipping changes what the batch sweep touches, not where the entry sits in the grid.
-  set_status(StatusKind::Info,
-             now_skipped
-                 ? status_with_name("Skipping ", name, " in Back up all.")
-                 : status_with_name("Including ", name, " in Back up all again."));
-}
-
 std::string App::browser_start_path(const SaveRecord &save) const {
   // app.db carries no ux0:data path for an app - verified against the device, where "ux0:data"
   // appears nowhere in it - so where to open is necessarily a guess. Best evidence first.
@@ -3692,16 +3646,16 @@ void App::browser_go_up() {
 }
 
 void App::schedule_browser_size_resolve() {
-  // Debounce until the focused row settles, mirroring the save-time resolve, so scrolling the list
-  // does not size every folder it passes. A walk already running is NOT abandoned - its progress
-  // finishes into the cache; rows the cursor rests on meanwhile join a queue behind it.
+  // Debounce until the focused row settles, so scrolling the list does not size every folder it
+  // passes. A walk already running is NOT abandoned - its progress finishes into the cache; rows
+  // the cursor rests on meanwhile join a queue behind it.
   if (directory_browser_.selected >= directory_browser_.rows.size() ||
       directory_browser_.rows[directory_browser_.selected].size_known ||
       directory_browser_.rows[directory_browser_.selected].parent_link) {
     pending_browser_size_frames_ = -1;
     return;
   }
-  pending_browser_size_frames_ = kSaveTimeResolveDelayFrames;
+  pending_browser_size_frames_ = kBrowserSizeDelayFrames;
 }
 
 void App::start_browser_size_walk() {
@@ -4042,6 +3996,9 @@ void App::browser_exclude_selected(const std::string &full_path) {
 void App::cancel_sync_all_confirmation() {
   if (sync_all_confirmation_pending_) {
     sync_all_confirmation_pending_ = false;
+    // The window's checkbox edits are transient; backing out forgets them without touching the
+    // remembered skip list.
+    batch_deselected_.clear();
     set_status(StatusKind::Info, "Backup & upload canceled.");
   }
 }
@@ -4079,11 +4036,6 @@ void App::begin_sync_all() {
     set_status(StatusKind::Info, "No saves in this tab.");
     return;
   }
-  const std::size_t target_count = batch_targets().size();
-  if (target_count == 0) {
-    set_status(StatusKind::Info, "Every entry in this tab is set to skip.");
-    return;
-  }
   // A sign-in without internet cannot upload; the confirmation says so and the run only backs up.
   const bool drive_online = google_connected_ && HttpClient::network_reachable();
   // Accurate duplicate skipping needs the Drive index; a stored sign-in whose startup sync
@@ -4092,21 +4044,89 @@ void App::begin_sync_all() {
     sync_drive_index();
   }
 
+  // Seed the window's checkboxes from the remembered skip list - only this tab's ids, so the
+  // window edits exactly what it shows. An all-skipped tab still opens (with nothing checked)
+  // because the window is now also where skips are undone.
+  batch_deselected_.clear();
+  for (const std::size_t index : visible_saves_) {
+    if (tracked_config_.skipped_ids.count(saves_[index].id) != 0) {
+      batch_deselected_.insert(saves_[index].id);
+    }
+  }
+
   // Confirmation is instant: per-game work (signature check, zip, upload) is decided and done
   // during the run itself, so nothing is read twice and there is no scan phase to wait through.
   sync_all_confirmation_pending_ = true;
   sync_all_will_upload_ = drive_online;
+  update_sync_all_confirm_status();
+}
+
+std::size_t App::batch_selected_count() const {
+  // batch_deselected_ only ever holds visible ids, and nothing rebuilds visible_saves_ while the
+  // window is open (tab switch, sort, and refresh are all suppressed), so plain subtraction holds.
+  return visible_saves_.size() - batch_deselected_.size();
+}
+
+void App::update_sync_all_confirm_status() {
   set_status(StatusKind::Info,
-             sync_all_confirm_message(target_count, save_category_label(category_),
-                                      drive_online));
+             sync_all_confirm_message(batch_selected_count(), visible_saves_.size(),
+                                      save_category_label(category_), sync_all_will_upload_));
+}
+
+void App::batch_toggle_focused() {
+  if (selected_save_ >= visible_saves_.size()) {
+    return;
+  }
+  const std::string &id = saves_[visible_saves_[selected_save_]].id;
+  if (batch_deselected_.erase(id) == 0) {
+    batch_deselected_.insert(id);
+  }
+  update_sync_all_confirm_status();
+}
+
+void App::batch_toggle_all() {
+  // A held R flips the whole tab: everything checked empties the grid, anything less fills it.
+  if (batch_deselected_.empty()) {
+    for (const std::size_t index : visible_saves_) {
+      batch_deselected_.insert(saves_[index].id);
+    }
+  } else {
+    batch_deselected_.clear();
+  }
+  update_sync_all_confirm_status();
 }
 
 void App::run_sync_all() {
   sync_all_confirmation_pending_ = false;
-  // Once, ahead of the whole run - never per game - and before the targets are drawn up, so a
-  // freshly adopted skip list already shapes this very sweep.
+  // Fold the window's picks into the remembered skip list - only this tab's ids, so other tabs'
+  // skips survive untouched. In-memory always; the file write follows the standing rule of never
+  // writing over a config that could not be read whole.
+  bool picks_changed = false;
+  for (const std::size_t index : visible_saves_) {
+    const std::string &id = saves_[index].id;
+    if (batch_deselected_.count(id) != 0) {
+      picks_changed |= tracked_config_.skipped_ids.insert(id).second;
+    } else {
+      picks_changed |= tracked_config_.skipped_ids.erase(id) != 0;
+    }
+  }
+  if (picks_changed && !tracked_config_load_failed_) {
+    tracked_config_.modified = static_cast<long long>(std::time(nullptr));
+    save_data_folders_config();
+  }
+  // Once, ahead of the whole run - never per game - so the picks just folded in ride this very
+  // push (and a newer remote copy can still be adopted for later sweeps).
   sync_backup_settings_if_dirty();
-  const std::vector<std::size_t> targets = batch_targets();
+  // Targets come from the window's own checkboxes, not from skipped_ids: if the sync above just
+  // adopted a newer remote skip list, the sweep must still match exactly what the grid showed.
+  std::vector<std::size_t> targets;
+  targets.reserve(visible_saves_.size());
+  for (const std::size_t index : visible_saves_) {
+    if (batch_deselected_.count(saves_[index].id) == 0) {
+      targets.push_back(index);
+    }
+  }
+  batch_deselected_.clear();
   const std::size_t total = targets.size();
   SyncRunCounts run;
   std::size_t metadata_warnings = 0;
@@ -4408,6 +4428,10 @@ int App::run() {
   bool square_hold_consumed = false;
   int triangle_hold_frames = 0;
   bool triangle_hold_consumed = false;
+  // L held inside the batch window flips the whole tab's checkboxes, with the same one-second
+  // trigger as the other hold gestures. (R toggles individually, on the press edge - no counter.)
+  int batch_l_hold_frames = 0;
+  bool batch_l_hold_consumed = false;
   int network_poll_delay_frames = 0;
   while (running) {
     if (network_poll_delay_frames <= 0) {
@@ -4516,15 +4540,11 @@ int App::run() {
       }
       // Square edits the focused snapshot's label directly - the sort tap has no meaning here, so
       // no hold needed. Reopen afterwards so the header shows the new name (metadata is cached by
-      // then). On the live "New Backup" row a homebrew entry toggles its batch skip instead.
+      // then).
       if ((pressed & SCE_CTRL_SQUARE) != 0) {
         if (selected_backup_row()) {
           begin_label_edit();
           open_save_details();
-        } else if (slot_details_.entry_is_homebrew && !slot_details_.data_folders_row) {
-          // Gated on the row so the button matches the footer, which drops the Skip hint once the
-          // "Data folders" row is what is focused.
-          toggle_entry_skipped();
         }
         previous_buttons = buttons;
         sceKernelDelayThread(kFrameDelayUs);
@@ -4698,11 +4718,32 @@ int App::run() {
     if ((pressed & SCE_CTRL_DOWN) != 0) {
       move_selected_save(kSaveGridColumns);
     }
-    if ((pressed & SCE_CTRL_LTRIGGER) != 0) {
-      move_selected_category(-1);
-    }
-    if ((pressed & SCE_CTRL_RTRIGGER) != 0) {
-      move_selected_category(1);
+    // Inside the batch window the shoulder buttons belong to the checkboxes, so both drop their
+    // tab-switch meaning (a tab switch would tear the window down sideways): R flips the focused
+    // save on the press edge, holding L a full second flips the whole tab.
+    if (!sync_all_confirmation_pending_) {
+      if ((pressed & SCE_CTRL_LTRIGGER) != 0) {
+        move_selected_category(-1);
+      }
+      if ((pressed & SCE_CTRL_RTRIGGER) != 0) {
+        move_selected_category(1);
+      }
+      batch_l_hold_frames = 0;
+      batch_l_hold_consumed = false;
+    } else {
+      if ((pressed & SCE_CTRL_RTRIGGER) != 0) {
+        batch_toggle_focused();
+      }
+      if ((buttons & SCE_CTRL_LTRIGGER) != 0) {
+        ++batch_l_hold_frames;
+        if (!batch_l_hold_consumed && batch_l_hold_frames >= kSelectHoldTriggerFrames) {
+          batch_l_hold_consumed = true;
+          batch_toggle_all();
+        }
+      } else {
+        batch_l_hold_frames = 0;
+        batch_l_hold_consumed = false;
+      }
     }
 
     // The right stick browses the backup list with the same edge-plus-repeat feel as the buttons.
@@ -4735,81 +4776,104 @@ int App::run() {
       cancel_duplicate_backup_confirmation();
       cancel_google_auth();
     }
-    // Triangle mirrors the other tap/hold gestures: a tap opens save details, while a deliberate
-    // hold performs the Google action. Delete scope and an active sign-in keep their immediate
-    // Triangle actions because waiting for release would make those modal controls feel broken.
-    if ((buttons & SCE_CTRL_TRIANGLE) != 0) {
-      if ((pressed & SCE_CTRL_TRIANGLE) != 0 && delete_scope_prompt_pending_) {
-        delete_scope_prompt_pending_ = false;
-        perform_scoped_delete(false, true);
-        triangle_hold_consumed = true;
-      } else if ((pressed & SCE_CTRL_TRIANGLE) != 0 && google_auth_pending_) {
-        handle_google_button();
-        triangle_hold_consumed = true;
-      } else if (!delete_scope_prompt_pending_) {
-        ++triangle_hold_frames;
-        if (resolve_tap_hold_action(triangle_hold_frames, false, triangle_hold_consumed,
-                                    kSelectHoldTapFrames, kSelectHoldTriggerFrames) ==
-            TapHoldAction::Hold) {
-          triangle_hold_consumed = true;
-          handle_google_button();
-        }
-      }
-    } else {
-      if (resolve_tap_hold_action(triangle_hold_frames, true, triangle_hold_consumed,
-                                  kSelectHoldTapFrames, kSelectHoldTriggerFrames) ==
-          TapHoldAction::Tap) {
-        request_save_details();
-      }
+    if (sync_all_confirmation_pending_) {
+      // The window is modal for everything but browsing, the shoulder buttons, confirm and
+      // cancel: details, transfers, deletes, sorting and the label editor act on rows its panel
+      // covers.
+      // Counters pin at zero so a button held into or across the window cannot fire as it
+      // closes; Select keeps its consumed flag while held, so the hold that opened the
+      // window cannot immediately reopen it after the run.
       triangle_hold_frames = 0;
       triangle_hold_consumed = false;
-    }
-    // Select: a tap (release within the tap window) transfers the focused backup (upload or
-    // download, whichever side is missing); a one-second hold starts the tab-wide batch. Releasing
-    // after the gauge appears but before the trigger is a back-out and does nothing.
-    if ((buttons & SCE_CTRL_SELECT) != 0) {
-      ++select_hold_frames;
-      if (!select_hold_consumed && select_hold_frames >= kSelectHoldTriggerFrames) {
-        select_hold_consumed = true;
-        begin_sync_all();
-      }
-    } else {
-      if (select_hold_frames > 0 && !select_hold_consumed &&
-          select_hold_frames < kSelectHoldTapFrames) {
-        handle_transfer_button();
-      }
-      select_hold_frames = 0;
-      select_hold_consumed = false;
-    }
-    if ((pressed & SCE_CTRL_START) != 0) {
-      handle_delete_button();
-    }
-    // Square mirrors the Select tap/hold split: a tap keeps its sort meaning, a one-second hold
-    // opens the label editor for the focused backup. While the delete-scope prompt is open the
-    // press means "card only" instead, and the spent press must not sort on release.
-    if ((buttons & SCE_CTRL_SQUARE) != 0) {
-      if ((pressed & SCE_CTRL_SQUARE) != 0 && delete_scope_prompt_pending_) {
-        delete_scope_prompt_pending_ = false;
-        perform_scoped_delete(true, false);
-        square_hold_consumed = true;
-      } else if (!delete_scope_prompt_pending_) {
-        // Only grow the label-edit hold when no scope prompt is up; a Square held across the
-        // Start press that opened the prompt must not silently graduate into a label edit.
-        ++square_hold_frames;
-        if (!square_hold_consumed && square_hold_frames >= kSelectHoldTriggerFrames) {
-          square_hold_consumed = true;
-          begin_label_edit();
-        }
-      }
-    } else {
-      // Same tap window as Select: a quick tap sorts; releasing after the gauge appears is a
-      // back-out and must not change the sort.
-      if (square_hold_frames > 0 && !square_hold_consumed &&
-          square_hold_frames < kSelectHoldTapFrames) {
-        cycle_sort_mode();
-      }
       square_hold_frames = 0;
       square_hold_consumed = false;
+      select_hold_frames = 0;
+      if ((pressed & SCE_CTRL_SELECT) != 0) {
+        // A fresh Select press confirms, as an unlabeled twin of the confirm button - the finger
+        // that held Select to open the window is already there. Consumed, so the press cannot
+        // count toward re-arming the batch gesture as the window closes.
+        select_hold_consumed = true;
+        handle_action_button();
+      } else if ((buttons & SCE_CTRL_SELECT) == 0) {
+        select_hold_consumed = false;
+      }
+    } else {
+      // Triangle mirrors the other tap/hold gestures: a tap opens save details, while a deliberate
+      // hold performs the Google action. Delete scope and an active sign-in keep their immediate
+      // Triangle actions because waiting for release would make those modal controls feel broken.
+      if ((buttons & SCE_CTRL_TRIANGLE) != 0) {
+        if ((pressed & SCE_CTRL_TRIANGLE) != 0 && delete_scope_prompt_pending_) {
+          delete_scope_prompt_pending_ = false;
+          perform_scoped_delete(false, true);
+          triangle_hold_consumed = true;
+        } else if ((pressed & SCE_CTRL_TRIANGLE) != 0 && google_auth_pending_) {
+          handle_google_button();
+          triangle_hold_consumed = true;
+        } else if (!delete_scope_prompt_pending_) {
+          ++triangle_hold_frames;
+          if (resolve_tap_hold_action(triangle_hold_frames, false, triangle_hold_consumed,
+                                      kSelectHoldTapFrames, kSelectHoldTriggerFrames) ==
+              TapHoldAction::Hold) {
+            triangle_hold_consumed = true;
+            handle_google_button();
+          }
+        }
+      } else {
+        if (resolve_tap_hold_action(triangle_hold_frames, true, triangle_hold_consumed,
+                                    kSelectHoldTapFrames, kSelectHoldTriggerFrames) ==
+            TapHoldAction::Tap) {
+          request_save_details();
+        }
+        triangle_hold_frames = 0;
+        triangle_hold_consumed = false;
+      }
+      // Select: a tap (release within the tap window) transfers the focused backup (upload or
+      // download, whichever side is missing); a one-second hold starts the tab-wide batch. Releasing
+      // after the gauge appears but before the trigger is a back-out and does nothing.
+      if ((buttons & SCE_CTRL_SELECT) != 0) {
+        ++select_hold_frames;
+        if (!select_hold_consumed && select_hold_frames >= kSelectHoldTriggerFrames) {
+          select_hold_consumed = true;
+          begin_sync_all();
+        }
+      } else {
+        if (select_hold_frames > 0 && !select_hold_consumed &&
+            select_hold_frames < kSelectHoldTapFrames) {
+          handle_transfer_button();
+        }
+        select_hold_frames = 0;
+        select_hold_consumed = false;
+      }
+      if ((pressed & SCE_CTRL_START) != 0) {
+        handle_delete_button();
+      }
+      // Square mirrors the Select tap/hold split: a tap keeps its sort meaning, a one-second hold
+      // opens the label editor for the focused backup. While the delete-scope prompt is open the
+      // press means "card only" instead, and the spent press must not sort on release.
+      if ((buttons & SCE_CTRL_SQUARE) != 0) {
+        if ((pressed & SCE_CTRL_SQUARE) != 0 && delete_scope_prompt_pending_) {
+          delete_scope_prompt_pending_ = false;
+          perform_scoped_delete(true, false);
+          square_hold_consumed = true;
+        } else if (!delete_scope_prompt_pending_) {
+          // Only grow the label-edit hold when no scope prompt is up; a Square held across the
+          // Start press that opened the prompt must not silently graduate into a label edit.
+          ++square_hold_frames;
+          if (!square_hold_consumed && square_hold_frames >= kSelectHoldTriggerFrames) {
+            square_hold_consumed = true;
+            begin_label_edit();
+          }
+        }
+      } else {
+        // Same tap window as Select: a quick tap sorts; releasing after the gauge appears is a
+        // back-out and must not change the sort.
+        if (square_hold_frames > 0 && !square_hold_consumed &&
+            square_hold_frames < kSelectHoldTapFrames) {
+          cycle_sort_mode();
+        }
+        square_hold_frames = 0;
+        square_hold_consumed = false;
+      }
     }
 
     // Queued save times feed the mount worker from here. Submitting costs the frame nothing, so
@@ -4842,7 +4906,9 @@ int App::run() {
     UiState ui_state;
     ui_state.saves = &saves_;
     ui_state.visible_saves = &visible_saves_;
-    ui_state.skipped_ids = &tracked_config_.skipped_ids;
+    ui_state.batch_deselected = &batch_deselected_;
+    ui_state.batch_selected_count = batch_selected_count();
+    ui_state.batch_total_count = visible_saves_.size();
     ui_state.active_category = category_;
     ui_state.sort_mode = sort_mode_;
     for (int i = 0; i < kSaveCategoryCount; ++i) {
@@ -4896,6 +4962,11 @@ int App::run() {
       ui_state.status_message = google_connected_
                                     ? "Keep holding to refresh Google Drive"
                                     : "Keep holding to connect Google Drive";
+      ui_state.status_kind = StatusKind::Info;
+    } else if (!batch_l_hold_consumed && batch_l_hold_frames >= kSelectHoldTapFrames) {
+      ui_state.hold_gauge_fraction = gauge_fraction(batch_l_hold_frames);
+      ui_state.status_message = batch_deselected_.empty() ? "Keep holding to unselect all"
+                                                          : "Keep holding to select all";
       ui_state.status_kind = StatusKind::Info;
     }
     ui_.draw(ui_state);

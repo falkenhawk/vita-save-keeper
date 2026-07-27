@@ -20,6 +20,7 @@
 #include <dirent.h>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -94,7 +95,6 @@ private:
   // reorders saves_ and after attaching a folder; callers call rebuild_visible_saves() first.
   void refocus_selection_by_id(const std::string &id);
   // The current tab's entries minus those marked to skip - what the hold-Select batch runs over.
-  std::vector<std::size_t> batch_targets() const;
   // Reads tracked-folders.json once at startup (bounded, capped). A present-but-unreadable or
   // unparseable file sets tracked_config_load_failed_ and leaves the config empty, so it is never
   // overwritten later.
@@ -228,11 +228,6 @@ private:
   long long remote_size_for(const std::string &remote_name) const;
   void perform_scoped_delete(bool delete_local, bool delete_remote);
   void begin_label_edit();
-  // Flips the focused save's id in tracked_config_.skipped_ids and persists the config, leaving
-  // the entry exactly where it sits in the grid - skipping only removes it from the hold-Select
-  // batch. Refuses to write while tracked_config_load_failed_ is set, so an unreadable file is
-  // never truncated.
-  void toggle_entry_skipped();
   bool rename_remote_backup(const SaveRecord &save, const std::string &remote_name,
                             const std::string &new_name);
   void handle_transfer_button();
@@ -260,6 +255,14 @@ private:
   void begin_sync_all();
   void run_sync_all();
   void cancel_sync_all_confirmation();
+  // The confirmation window doubles as a picker: checkboxes appear on the grid tiles, the d-pad
+  // browses, R checks the focused save in or out, and a held L flips everything at once. Choices
+  // are transient until the run confirms, when this tab's picks fold into skipped_ids - so cancel
+  // discards them, and other tabs' skips are never touched.
+  std::size_t batch_selected_count() const;
+  void update_sync_all_confirm_status();
+  void batch_toggle_focused();
+  void batch_toggle_all();
   void cancel_duplicate_backup_confirmation();
   bool poll_batch_cancel();
   void set_status(StatusKind kind, std::string message);
@@ -306,6 +309,9 @@ private:
   // Baked when the batch confirmation opens, so the footer hint matches the prompt text even if
   // the network state changes while the prompt is up.
   bool sync_all_will_upload_{};
+  // Ids of this tab's entries checked OUT of the pending sweep, seeded from skipped_ids when the
+  // window opens and only ever holding visible ids. Discarded on cancel; folded back on confirm.
+  std::set<std::string> batch_deselected_;
   // Set while run_sync_all is executing; the HTTP cancel check polls the pad only then, so a
   // held cancel button can abort an in-flight upload without affecting single-file transfers.
   bool batch_running_{};
@@ -382,8 +388,7 @@ private:
   // The data-folder picker, another separate input/rendering mode (open gates its branch).
   DirectoryBrowserState directory_browser_;
   // Countdown (frames) until the browser starts sizing the focused row; -1 when idle or already
-  // known. Mirrors pending_time_resolve_frames_, so scrolling the list does not size every folder
-  // it passes.
+  // known. Debounces the walk so scrolling the list does not size every folder it passes.
   int pending_browser_size_frames_{-1};
   // State of the incremental size walk: a depth-first stack with one open directory per level, so
   // every SUBdirectory's total is known the moment the walk unwinds through it (deepest branches

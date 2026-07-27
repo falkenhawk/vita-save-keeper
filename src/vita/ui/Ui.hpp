@@ -55,10 +55,6 @@ struct SlotDetailsState {
   // corner. Both false for the live save, which is not a snapshot.
   bool snapshot_on_card{};
   bool snapshot_in_cloud{};
-  // Describe the inspected save itself (not the snapshot row), so the live row's footer can offer
-  // the batch-skip toggle only for homebrew entries and label it by the current state.
-  bool entry_is_homebrew{};
-  bool entry_skipped{};
   // True when details was opened with the "Data folders" row focused. The screen still shows the
   // live save (that row is not a snapshot), but the footer offers the picker instead of a backup.
   bool data_folders_row{};
@@ -124,9 +120,12 @@ struct UiState {
   const std::vector<SaveRecord> *saves{};
   // Indices into saves for the active category tab; selected_save indexes this list.
   const std::vector<std::size_t> *visible_saves{};
-  // Save ids left out of the hold-Select batch; their grid tiles carry a small "skip" tag. Grid
-  // order is unaffected - skipping changes what the sweep touches, nothing else.
-  const std::set<std::string> *skipped_ids{};
+  // Read only while the batch confirmation window is open: ids checked out of the pending sweep
+  // (their tiles draw a hollow box) plus the counts the footer's hint labels follow. Grid order
+  // is unaffected - the checkboxes change what the sweep takes, nothing else.
+  const std::set<std::string> *batch_deselected{};
+  std::size_t batch_selected_count{};
+  std::size_t batch_total_count{};
   SaveCategory active_category{SaveCategory::VitaGame};
   SaveSortMode sort_mode{SaveSortMode::Name};
   std::array<std::size_t, kSaveCategoryCount> category_counts{};

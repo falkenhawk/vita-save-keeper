@@ -32,8 +32,10 @@ SyncItemPlan plan_sync_item(const SyncItemInput &input);
 
 // Confirmation prompt for the batch; shown instantly on the hold gesture. Per-game work is
 // decided during the run itself, so there is no scan phase to sit through before confirming.
-std::string sync_all_confirm_message(std::size_t games, const std::string &tab_label,
-                                     bool drive_connected);
+// The window lets R check saves in and out, so the prompt carries the live count: "all N" when
+// everything is in, "N of M" once something is unchecked, and a nudge when nothing is.
+std::string sync_all_confirm_message(std::size_t selected, std::size_t total,
+                                     const std::string &tab_label, bool drive_connected);
 
 struct SyncRunCounts {
   std::size_t backed_up{};

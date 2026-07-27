@@ -163,17 +163,10 @@ void draw_folder_mark(int left_x, int top_y, FolderMark mark) {
   }
 }
 
-// A "no entry" mark: a ring with a bar across it, drawn as a filled disc punched out by a disc of
-// the plate colour behind it. At this size (radius 5) a diagonal slash turns to mush, so the bar is
-// horizontal - it still reads as "not this one" and stays crisp on the 18px tag plate.
-void draw_no_entry_glyph(float cx, float cy, unsigned int color, unsigned int plate_color) {
-  vita2d_draw_fill_circle(cx, cy, 5.0f, color);
-  vita2d_draw_fill_circle(cx, cy, 3.2f, plate_color);
-  vita2d_draw_rectangle(cx - 3.6f, cy - 1.0f, 7.2f, 2.0f, color);
-}
-
 enum class ButtonSymbol {
   TriggerLR,  // pill reading "L/R", like the SEL/START pills
+  TriggerL,   // single-shoulder pills, for when L and R mean different things
+  TriggerR,
   Circle,
   Cross,
   Square,
@@ -491,6 +484,24 @@ struct HintSpec {
   const char *dim_suffix;
 };
 
+// Symbols that render as a text pill (SEL/START/shoulder buttons) instead of a shape glyph.
+const char *pill_text_for(ButtonSymbol symbol) {
+  switch (symbol) {
+  case ButtonSymbol::Select:
+    return "SEL";
+  case ButtonSymbol::Start:
+    return "START";
+  case ButtonSymbol::TriggerLR:
+    return "L/R";
+  case ButtonSymbol::TriggerL:
+    return "L";
+  case ButtonSymbol::TriggerR:
+    return "R";
+  default:
+    return nullptr;
+  }
+}
+
 int hint_width(const FontSet &fonts, const HintSpec &hint) {
   int width = hint.label ? text_width(fonts, kTextSizeSmall, hint.label) : 0;
   if (hint.dim_prefix) {
@@ -502,11 +513,7 @@ int hint_width(const FontSet &fonts, const HintSpec &hint) {
   if (hint.symbol == ButtonSymbol::Label) {
     return width;  // text only, no glyph box
   }
-  if (hint.symbol == ButtonSymbol::Select || hint.symbol == ButtonSymbol::Start ||
-      hint.symbol == ButtonSymbol::TriggerLR) {
-    const char *pill_text = hint.symbol == ButtonSymbol::Start
-                                ? "START"
-                                : (hint.symbol == ButtonSymbol::TriggerLR ? "L/R" : "SEL");
+  if (const char *pill_text = pill_text_for(hint.symbol)) {
     return text_width(fonts, kTextSizePill, pill_text) + 12 + 8 + width;
   }
   return 22 + width;
@@ -533,14 +540,11 @@ void draw_dim_note(const FontSet &fonts, int x, int baseline, const char *text) 
 
 void draw_hint(const FontSet &fonts, int x, const HintSpec &hint) {
   int text_x = x + 22;
+  const char *pill_text = pill_text_for(hint.symbol);
   if (hint.symbol == ButtonSymbol::Label) {
     // No glyph: the label text starts at the entry's left edge.
     text_x = x;
-  } else if (hint.symbol == ButtonSymbol::Select || hint.symbol == ButtonSymbol::Start ||
-             hint.symbol == ButtonSymbol::TriggerLR) {
-    const char *pill_text = hint.symbol == ButtonSymbol::Start
-                                ? "START"
-                                : (hint.symbol == ButtonSymbol::TriggerLR ? "L/R" : "SEL");
+  } else if (pill_text) {
     // Size the pill from the measured text so the label never spills past its edge.
     const int pill_w = text_width(fonts, kTextSizePill, pill_text) + 12;
     // All-even geometry: 12px caps + 4px padding each side = 20px box, centred 8/8 in the
@@ -1272,11 +1276,13 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
   // up the live save or restores the inspected snapshot.
   const bool is_snapshot = state.snapshot_on_card || state.snapshot_in_cloud;
   std::vector<HintSpec> hints;
+  // One footer order everywhere: the primary action anchors the right edge, cancel/back sits
+  // immediately left of it, and auxiliary actions go further left.
   if (confirmation_pending) {
     // A pending prompt owns the footer: only the two buttons that answer it are offered.
+    hints.push_back({cancel, "Cancel"});
     hints.push_back({primary, restore_confirmation_pending ? "Confirm restore"
                                                            : "Confirm backup"});
-    hints.push_back({cancel, "Cancel"});
   } else {
     if (details_max_scroll(state) > 0) {
       hints.push_back({ButtonSymbol::Label, "R-stick  Scroll"});
@@ -1288,9 +1294,6 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
       } else if (!state.snapshot_in_cloud) {
         hints.push_back({ButtonSymbol::Select, "Upload"});
       }
-    } else if (state.entry_is_homebrew && !state.data_folders_row) {
-      // The live row of a homebrew entry toggles whether the batch sweep includes it.
-      hints.push_back({ButtonSymbol::Square, state.entry_skipped ? "Include" : "Skip"});
     }
     const char *primary_label = "Backup";
     if (state.data_folders_row) {
@@ -1299,8 +1302,8 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
     } else if (is_snapshot) {
       primary_label = "Restore";
     }
-    hints.push_back({primary, primary_label});
     hints.push_back({cancel, "Back"});
+    hints.push_back({primary, primary_label});
   }
   const int hints_left =
       draw_hints_right_aligned(fonts_, hints.data(), static_cast<int>(hints.size()));
@@ -1457,14 +1460,6 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
   if (state.included_count > 0) {
     hints.push_back({ButtonSymbol::TriggerLR, "Jump to Included", nullptr, nullptr});
   }
-  // Circle climbs one level at a time while strictly inside the folder the picker opened at, and
-  // closes once back there - going higher than the start is the ".." row's job. Triangle closes
-  // from anywhere, unhinted, mirroring the unhinted Triangle that opens the picker.
-  const bool inside_start =
-      state.current_path.size() > state.start_path.size() &&
-      state.current_path.compare(0, state.start_path.size(), state.start_path) == 0 &&
-      state.current_path[state.start_path.size()] == '/';
-  hints.push_back({cancel, inside_start ? "Up" : close_label, nullptr, nullptr});
   // Square toggles whether the folder is part of this entry's backup. Nothing on disk is created or
   // deleted by it, so the words are about inclusion, not about adding or removing folders. A folder
   // that is covered (a parent is included), in use by another entry, or the ".." link offers none.
@@ -1474,6 +1469,15 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
         {ButtonSymbol::Square, focused_row->tracked_here ? "Exclude" : "Include", nullptr,
          nullptr});
   }
+  // Circle climbs one level at a time while strictly inside the folder the picker opened at, and
+  // closes once back there - going higher than the start is the ".." row's job. Triangle closes
+  // from anywhere, unhinted, mirroring the unhinted Triangle that opens the picker. Same order as
+  // every footer: cancel/back beside the right-edge primary, auxiliaries further left.
+  const bool inside_start =
+      state.current_path.size() > state.start_path.size() &&
+      state.current_path.compare(0, state.start_path.size(), state.start_path) == 0 &&
+      state.current_path[state.start_path.size()] == '/';
+  hints.push_back({cancel, inside_start ? "Up" : close_label, nullptr, nullptr});
   if (focused_row) {
     hints.push_back({primary, focused_row->parent_link ? "Up" : "Open", nullptr, nullptr});
   }
@@ -1613,19 +1617,25 @@ void Ui::draw_title_grid(const UiState &state) {
                               is_selected);
       }
 
-      // A skipped entry keeps its place and its icon - it is still backed up on demand, it just
-      // sits out the batch sweep - so it gets a corner tag and no dimming overlay. Marking it any
-      // heavier would read as "excluded", which is what the old "hidden" state got wrong.
-      if (state.skipped_ids && state.skipped_ids->count(save.id) != 0) {
+      // While the batch confirmation window is open every tile carries a checkbox - the sweep
+      // takes exactly the checked ones. Same marks as the folder picker, on a dark corner plate
+      // so they stay legible over icon art. Outside the window tiles stay clean; remembered
+      // skips only surface as unchecked boxes the next time the window opens.
+      if (state.sync_all_confirmation_pending) {
         constexpr unsigned int kPlate = RGBA8(5, 10, 18, 210);
-        const char *tag = "skip";
-        const int tag_w = measure_text(kTextSizeTiny, tag);
-        const int plate_y = y + kTileSize - 18;
-        // Glyph then label: 6 left inset, a 12-wide glyph cell, 4 of air, the word, 6 right inset.
-        vita2d_draw_rectangle(x, plate_y, 6 + 12 + 4 + tag_w + 6, 18, kPlate);
-        draw_no_entry_glyph(static_cast<float>(x) + 12.0f, static_cast<float>(plate_y) + 9.0f,
-                            kColorMuted, kPlate);
-        draw_text(fonts_, x + 22, y + kTileSize - 5, kColorMuted, kTextSizeTiny, tag);
+        constexpr int kPlateSize = 24;
+        const bool included =
+            !state.batch_deselected || state.batch_deselected->count(save.id) == 0;
+        const int plate_y = y + kTileSize - kPlateSize;
+        vita2d_draw_rectangle(x, plate_y, kPlateSize, kPlateSize, kPlate);
+        vita2d_texture *mark_texture = included ? mark_included_tex_ : mark_available_tex_;
+        if (mark_texture) {
+          vita2d_draw_texture(mark_texture, static_cast<float>(x) + 4.0f,
+                              static_cast<float>(plate_y) + 4.0f);
+        } else {
+          draw_folder_mark(x + 4, plate_y + 5,
+                           included ? FolderMark::Included : FolderMark::Available);
+        }
       }
     }
   }
@@ -1800,7 +1810,9 @@ void Ui::draw_backup_panel(const UiState &state) {
     vita2d_draw_line(720, 438, 726, 432, kColorMuted);
   }
 
-  if (all_rows.size() > 1) {
+  // The right stick is inert while the batch window is open, and its corner doubles as the
+  // window's note row - so the pictogram yields.
+  if (all_rows.size() > 1 && !state.sync_all_confirmation_pending) {
     draw_rstick_hint(934, 470);
   }
 
@@ -1876,6 +1888,13 @@ void Ui::draw_status_line(const UiState &state) {
       break;
     }
   }
+  // The batch window keeps the full backup list on screen, so the one fact the checkboxes cannot
+  // show - picks are remembered - takes a small extra row above the question, in the corner the
+  // idle R-stick pictogram vacates.
+  if (state.sync_all_confirmation_pending) {
+    draw_text(fonts_, 532, 454, kColorIdleDot, kTextSizeTiny,
+              "Choices are remembered for later sweeps.");
+  }
   // Baseline chosen so the text centers on the R-stick pictogram (cy = 470) next to it.
   draw_text(fonts_, 532, 476, color, kTextSizeSmall, status.c_str());
 
@@ -1930,10 +1949,22 @@ void Ui::draw_footer(const UiState &state) {
     return;
   }
   if (state.sync_all_confirmation_pending) {
-    const HintSpec hints[] = {{cancel, "Cancel"},
-                              {confirm, state.sync_all_will_upload ? "Confirm Backup & Upload All"
-                                                                   : "Confirm Backup All"}};
-    draw_hints_right_aligned(fonts_, hints, 2);
+    // R always flips the focused tile, so its label can stay a plain "Toggle"; L is a tab-wide
+    // hold whose label follows the state it would produce.
+    const bool all_selected = state.batch_selected_count == state.batch_total_count;
+    std::vector<HintSpec> hints;
+    hints.reserve(4);
+    hints.push_back({ButtonSymbol::TriggerL, all_selected ? "Unselect All" : "Select All",
+                     "(hold)", nullptr});
+    hints.push_back({ButtonSymbol::TriggerR, "Toggle"});
+    hints.push_back({cancel, "Cancel"});
+    // With nothing selected there is nothing to confirm; dropping the hint matches the refusal.
+    // (Select also confirms, unlabeled - the finger that opened the window is already on it.)
+    if (state.batch_selected_count > 0) {
+      hints.push_back({confirm, state.sync_all_will_upload ? "Confirm Backup & Upload"
+                                                           : "Confirm Backup"});
+    }
+    draw_hints_right_aligned(fonts_, hints.data(), static_cast<int>(hints.size()));
     return;
   }
   if (state.duplicate_backup_confirmation_pending) {

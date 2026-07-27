@@ -535,7 +535,6 @@ void test_save_metadata_json_records_tracked_targets_when_present() {
   vsm::SaveMetadata metadata;
   metadata.saved_at = {2026, 7, 23, 9, 15, 0};
   metadata.source = vsm::SaveTimeSource::Filesystem;
-  metadata.approximate = true;
   metadata.tracked_targets = {
       {"savefiles", "ux0:data/retroarch/savefiles"},
       {"savestates", "ux0:data/retroarch/savestates"},
@@ -544,7 +543,7 @@ void test_save_metadata_json_records_tracked_targets_when_present() {
   const std::string json =
       vsm::serialize_save_metadata_json("2026-07-23 09-15-00", metadata);
   EXPECT_TRUE(json.find("\"version\":2") != std::string::npos);
-  // Written under the user-facing name; "tracked_targets" below is read-only compatibility.
+  // Written and read only under the user-facing name; the struct member keeps its internal name.
   EXPECT_TRUE(json.find("\"data_folders\"") != std::string::npos);
   EXPECT_TRUE(json.find("\"tracked_targets\"") == std::string::npos);
 
@@ -580,7 +579,6 @@ void test_save_metadata_json_omits_tracked_targets_for_regular_saves() {
   vsm::SaveMetadata metadata;
   metadata.saved_at = {2026, 7, 12, 1, 44, 7};
   metadata.source = vsm::SaveTimeSource::VitaSlot;
-  metadata.approximate = false;
   metadata.slots.push_back({0, {2026, 7, 12, 1, 44, 7}, "T", "S", "D"});
 
   const std::string json =
@@ -3120,16 +3118,24 @@ void test_sync_plan_decides_backup_and_upload_per_game() {
 }
 
 void test_sync_all_confirm_message_states_scope() {
-  EXPECT_EQ(vsm::sync_all_confirm_message(73, "Vita", true),
+  EXPECT_EQ(vsm::sync_all_confirm_message(73, 73, "Vita", true),
             "Backup & upload all 73 Vita saves?");
   // Without Drive the dropped "& upload" alone is easy to miss; "locally" states outright that
   // nothing will reach the Cloud.
-  EXPECT_EQ(vsm::sync_all_confirm_message(4, "PSP", false),
+  EXPECT_EQ(vsm::sync_all_confirm_message(4, 4, "PSP", false),
             "Backup all 4 PSP saves locally?");
-  EXPECT_EQ(vsm::sync_all_confirm_message(1, "Homebrew", true),
+  EXPECT_EQ(vsm::sync_all_confirm_message(1, 1, "Homebrew", true),
             "Backup & upload 1 Homebrew save?");
-  EXPECT_EQ(vsm::sync_all_confirm_message(1, "Homebrew", false),
+  EXPECT_EQ(vsm::sync_all_confirm_message(1, 1, "Homebrew", false),
             "Backup 1 Homebrew save locally?");
+  // A partial selection reads "N of M" so it is obvious the sweep takes exactly the checked ones.
+  EXPECT_EQ(vsm::sync_all_confirm_message(3, 12, "Homebrew", true),
+            "Backup & upload 3 of 12 Homebrew saves?");
+  EXPECT_EQ(vsm::sync_all_confirm_message(1, 5, "Vita", false),
+            "Backup 1 of 5 Vita saves locally?");
+  // Nothing checked: confirm is refused, so the line states it instead of asking.
+  EXPECT_EQ(vsm::sync_all_confirm_message(0, 9, "PSP", true),
+            "Nothing selected to backup");
 }
 
 void test_sync_run_summary_reports_results_and_cancellation() {
