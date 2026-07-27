@@ -78,13 +78,9 @@ constexpr unsigned int kRepeatableButtons = SCE_CTRL_LEFT | SCE_CTRL_RIGHT | SCE
 // leaving room to abort a hold.
 constexpr int kSelectHoldTriggerFrames = 60;
 constexpr int kSelectHoldTapFrames = 24;
-// Frames the pad must stay idle before a queued save time is read (~400 ms at 60 fps). A read
-// blocks the frame it runs on, so the gap has to outlast the pauses between rapid presses:
-// anything shorter lets a burst of navigation start a read that the next press then waits on.
-constexpr int kSaveTimeReadIdleFrames = 24;
-// Frames of idle before the index itself is written (~1 s). Deliberately longer than a read's
-// gap: the write is worth much less than a read, so it waits for a pause deep enough that it is
-// unlikely to be interrupted, rather than stacking onto the read that emptied the queue.
+// Frames of idle before the index is written (~1 s). Reads run on the mount worker and cost the
+// main thread nothing, but the write still blocks a frame, so it waits for a pause deep enough
+// that it is unlikely to be interrupted.
 constexpr int kSaveIndexWriteIdleFrames = 60;
 // Work that blocks a frame is bracketed by these two. The main loop peeks a single instantaneous
 // pad sample per frame, so a button pressed and released inside the stall is never observed at
@@ -123,9 +119,13 @@ BackupTimestamp backup_timestamp_from(const SaveDateTime &value) {
   return {value.year, value.month, value.day, value.hour, value.minute, value.second};
 }
 
-SaveMetadata resolve_live_save_metadata(const std::string &save_path,
-                                        const SaveDateTime &backup_clock, bool allow_pfs_mount,
-                                        bool bridge_available) {
+// The one function that mounts. Called from the mount worker thread only (or inline when the
+// worker failed to start): every mount and unmount staying on a single thread is the structural
+// guard against the AppMgr mount-slot leak that killed the earlier mixed-thread attempt. Main
+// thread code goes through App::resolve_live_save_metadata, which hands the work over.
+SaveMetadata resolve_live_metadata_on_mount_thread(const std::string &save_path,
+                                                   const SaveDateTime &backup_clock,
+                                                   bool allow_pfs_mount, bool bridge_available) {
   // PSP and other plain save folders must never be handed to AppMgr's PFS mount routine: mounting
   // a plain folder creates sce_pfs bookkeeping in the user's save. If PFS metadata is absent, its
   // ordinary file times are already the authoritative information we need.
@@ -550,6 +550,146 @@ std::map<std::string, std::string> App::newest_backup_by_folder() const {
   return newest;
 }
 
+void App::start_mount_worker() {
+  mount_worker_wake_ = sceKernelCreateSema("save_keeper_mount_wake", 0, 0, 2, nullptr);
+  if (mount_worker_wake_ < 0) {
+    mount_worker_wake_ = -1;
+    return;
+  }
+  mount_worker_thread_ = sceKernelCreateThread("save_keeper_mount", &App::mount_worker_entry,
+                                               0x10000100, 0x20000, 0, 0, nullptr);
+  if (mount_worker_thread_ < 0) {
+    sceKernelDeleteSema(mount_worker_wake_);
+    mount_worker_wake_ = -1;
+    mount_worker_thread_ = -1;
+    return;
+  }
+  App *self = this;
+  sceKernelStartThread(mount_worker_thread_, sizeof(self), &self);
+}
+
+void App::stop_mount_worker() {
+  if (mount_worker_thread_ < 0) {
+    return;
+  }
+  mount_worker_stop_.store(true);
+  sceKernelSignalSema(mount_worker_wake_, 1);
+  sceKernelWaitThreadEnd(mount_worker_thread_, nullptr, nullptr);
+  sceKernelDeleteThread(mount_worker_thread_);
+  sceKernelDeleteSema(mount_worker_wake_);
+  mount_worker_thread_ = -1;
+  mount_worker_wake_ = -1;
+}
+
+int App::mount_worker_entry(unsigned int, void *argp) {
+  App *app = *static_cast<App **>(argp);
+  for (;;) {
+    sceKernelWaitSema(app->mount_worker_wake_, 1, nullptr);
+    if (app->mount_worker_stop_.load()) {
+      return 0;
+    }
+    if (app->mount_work_state_.load() != 1) {
+      continue;
+    }
+    MountWork &work = app->mount_work_;
+    work.metadata = resolve_live_metadata_on_mount_thread(
+        work.save_path, work.backup_clock, work.allow_pfs_mount, app->mount_bridge_ready_);
+    if (work.want_fingerprint) {
+      // After the unmount, so bookkeeping the mount touched is part of the stored state and the
+      // next scan sees an unchanged folder. Blocking here is free - this is not the main thread.
+      work.fingerprint = compute_save_fingerprint(work.save_path);
+    }
+    app->mount_work_state_.store(2);
+  }
+}
+
+SaveMetadata App::resolve_live_save_metadata(const std::string &save_path,
+                                             const SaveDateTime &backup_clock,
+                                             bool allow_pfs_mount, bool bridge_available) {
+  if (mount_worker_thread_ < 0) {
+    // Worker never started: degrade to the old inline resolve. Still single-threaded - nothing
+    // else can be mounting.
+    return resolve_live_metadata_on_mount_thread(save_path, backup_clock, allow_pfs_mount,
+                                                 bridge_available);
+  }
+  // A queued read may be in flight; land and apply it first so this request gets the slot.
+  complete_async_read(true);
+  mount_work_.save_path = save_path;
+  mount_work_.backup_clock = backup_clock;
+  mount_work_.allow_pfs_mount = allow_pfs_mount;
+  mount_work_.want_fingerprint = false;
+  mount_work_.async = false;
+  mount_work_.discard = false;
+  mount_work_state_.store(1);
+  sceKernelSignalSema(mount_worker_wake_, 1);
+  while (mount_work_state_.load() != 2) {
+    sceKernelDelayThread(1000);
+  }
+  const SaveMetadata metadata = mount_work_.metadata;
+  mount_work_state_.store(0);
+  return metadata;
+}
+
+void App::submit_async_save_time_read(const SaveRecord &save) {
+  mount_work_.save_path = save.path;
+  mount_work_.backup_clock = {};
+  mount_work_.allow_pfs_mount = true;
+  mount_work_.want_fingerprint = true;
+  mount_work_.async = true;
+  mount_work_.discard = false;
+  mount_work_.async_save_id = save.id;
+  mount_work_state_.store(1);
+  sceKernelSignalSema(mount_worker_wake_, 1);
+}
+
+void App::complete_async_read(bool wait) {
+  if (!mount_work_.async) {
+    return;
+  }
+  if (mount_work_state_.load() != 2) {
+    if (!wait) {
+      return;
+    }
+    while (mount_work_state_.load() != 2) {
+      sceKernelDelayThread(1000);
+    }
+  }
+  mount_work_.async = false;
+  if (!mount_work_.discard) {
+    for (SaveRecord &record : saves_) {
+      if (record.id != mount_work_.async_save_id) {
+        continue;
+      }
+      // A batch or a demand read may have resolved it while this was in flight; the stale result
+      // must not overwrite the fresher one.
+      if (!record.save_time_requires_mount) {
+        break;
+      }
+      const bool resolved = apply_mounted_save_time(&record, mount_work_.metadata);
+      // Same caching rule as the blocking path: skip when the bridge is down, that failure can
+      // heal without the folder changing and those saves must retry next launch.
+      if (mount_bridge_ready_) {
+        record.fingerprint = mount_work_.fingerprint;
+        if (record.fingerprint.ok) {
+          SaveIndexEntry &entry = save_index_.entries[record.id];
+          entry.fingerprint = record.fingerprint;
+          entry.time_resolved = true;
+          entry.has_time = resolved;
+          entry.saved_at = resolved ? record.saved_at : SaveDateTime{};
+          entry.from_app_db = record.title_from_app_db;
+          entry.display_name = record.display_name;
+          entry.title_id = record.title_id;
+          entry.icon_path = record.icon_path;
+          save_index_dirty_ = true;
+        }
+      }
+      break;
+    }
+  }
+  mount_work_.discard = false;
+  mount_work_state_.store(0);
+}
+
 bool App::resolve_save_time(SaveRecord *save) {
   if (!save || !save->save_time_requires_mount) {
     return save && save->save_time_known;
@@ -642,7 +782,8 @@ void App::queue_selected_save_time_read() {
 }
 
 bool App::drain_pending_time_read() {
-  if (pending_time_reads_.empty()) {
+  // One request in flight at a time; the next queued save waits for the slot, not for the user.
+  if (pending_time_reads_.empty() || mount_work_state_.load() != 0 || mount_work_.async) {
     return false;
   }
   // The focused save is the one showing a spinner, so it is read first however long the queue
@@ -674,14 +815,14 @@ bool App::drain_pending_time_read() {
     return true;
   }
 
-  // Synchronous mount, one save at a time. Deliberately not on a background thread: mounting from
-  // a second thread leaked AppMgr mount slots until, mid-session, the system refused any further
-  // mounts. Blocking is therefore unavoidable - the queue only makes sure it happens between the
-  // user's presses instead of under them. The index is not written here: that waits for a longer
-  // idle gap, so its own cost never lands on top of the read that emptied the queue.
-  const SceCtrlData armed = arm_input_recovery();
-  resolve_save_time(save);
-  deferred_buttons_ |= buttons_pressed_since(armed);
+  if (mount_worker_thread_ < 0) {
+    // No worker: the old inline read, blocking this frame. Rare fallback, still single-threaded.
+    resolve_save_time(save);
+    return true;
+  }
+  // The mount, the metadata read, and the fingerprint walk all run on the worker; the main loop
+  // keeps drawing and taking input, and complete_async_read applies the result when it lands.
+  submit_async_save_time_read(*save);
   return true;
 }
 
@@ -1195,6 +1336,9 @@ void App::handle_restore() {
   }
 
   const SaveRecord &save = *selected;
+  // The worker may be mid-mount of this very folder for a queued read; restoring would rewrite
+  // the files out from under it. Land and apply the in-flight read before touching the save.
+  complete_async_read(true);
   // A card copy restores directly; a cloud-only snapshot downloads into the local backup folder
   // first (and stays there, so the row becomes card + Drive).
   std::string archive_path = local_backup_archive_path(kBackupRoot, save.id, backup_name);
@@ -1291,6 +1435,11 @@ void App::handle_restore() {
 }
 
 void App::invalidate_save_time(const SaveRecord &restored) {
+  // Belt and braces behind handle_restore's complete_async_read: should a read for this save
+  // still be in flight, its result describes the pre-restore folder and must not be applied.
+  if (mount_work_.async && mount_work_.async_save_id == restored.id) {
+    mount_work_.discard = true;
+  }
   // Only the time resets, back to "never resolved". The title fields and old fingerprint stay:
   // a stale fingerprint makes the next scan re-read an sfo-derived title and keeps an app-db
   // one, exactly as the split files behaved.
@@ -2838,6 +2987,9 @@ int App::run() {
   // work and metadata falls back to save-file times as before. The result gates the kernel-bridge
   // syscall so a failed load degrades to the AppMgr mount instead of calling an unloaded module.
   mount_bridge_ready_ = initialize_save_data_mount_bridge();
+  // Started right after the bridge so every mount from here on - queued reads, the batch read,
+  // backups, details - goes through the one worker thread.
+  start_mount_worker();
 
   // Scanning storage and reading the system app database (titles, icons) blocks for a moment on a
   // full library; draw a frame first so the screen is not blank while it runs. Start at a
@@ -3005,6 +3157,9 @@ int App::run() {
     // tap made during that read still moves the selection instead of vanishing with the frame.
     const unsigned int buttons = buttons_with_left_analog(pad) | deferred_buttons_;
     deferred_buttons_ = 0;
+    // A finished background read is applied here, before any mode branches, so it lands whether
+    // the user is on the grid, in the details screen, or mid-prompt.
+    complete_async_read(false);
     const unsigned int pressed =
         apply_hold_repeat(buttons, previous_buttons, &repeat_held_buttons, &repeat_frames);
 
@@ -3283,15 +3438,14 @@ int App::run() {
       square_hold_consumed = false;
     }
 
-    // Queued save times are read here, one per frame, and only after the pad has been idle for a
-    // moment: navigation always wins, so scrolling through encrypted saves stays smooth and each
-    // one keeps its spinner until its turn. Only the grid path reaches here; the details mode
-    // returns earlier, so an open details screen never triggers a read.
+    // Queued save times feed the mount worker from here. Submitting costs the frame nothing, so
+    // there is no idle gate any more: the next queued save goes out the moment the worker frees
+    // up, and spinners fill in while the user keeps scrolling.
     input_idle_frames_ = buttons == 0 ? input_idle_frames_ + 1 : 0;
     if (details_open_pending_) {
-      // A Triangle press is waiting on the focused save's time. That is an explicit demand, so it
-      // jumps the queue and the idle gap both, exactly as the old blocking resolve did. Only the
-      // focused save is read: anything else queued would just delay the screen the user asked for.
+      // A Triangle press is waiting on the focused save's time. That is an explicit demand, so
+      // the focused save goes to the worker first (the queue's focused-first rule) and the
+      // screen opens on the frame its result lands.
       const SaveRecord *focused = selected_save_record();
       if (focused && focused->save_time_requires_mount) {
         queue_selected_save_time_read();
@@ -3300,15 +3454,13 @@ int App::run() {
       }
       if (!focused || !focused->save_time_requires_mount) {
         details_open_pending_ = false;
-        // The press that opened this screen is the one the read stalled; replaying it into the
-        // details view would fire one of its own actions instead.
-        deferred_buttons_ = 0;
         open_save_details();
       }
-    } else if (input_idle_frames_ >= kSaveTimeReadIdleFrames) {
-      // Reads first; the index write only happens once they are done and the pause has stretched
-      // well past the read gap, so the two never land on the same frame.
-      if (!drain_pending_time_read() && input_idle_frames_ >= kSaveIndexWriteIdleFrames) {
+    } else {
+      drain_pending_time_read();
+      // The write still blocks a frame, so it keeps its deep-idle gate and waits out any read
+      // in flight - a landing result would just dirty the index again anyway.
+      if (!mount_work_.async && input_idle_frames_ >= kSaveIndexWriteIdleFrames) {
         write_save_index_when_idle();
       }
     }
@@ -3394,8 +3546,10 @@ int App::run() {
     sceKernelDelayThread(kFrameDelayUs);
   }
 
-  // Any reads still queued when the loop ends are already in memory; write them before leaving so
-  // a clean exit does not throw away work the next boot would have to re-mount for.
+  // Land the read in flight, stop the worker, then write: a clean exit keeps every resolved time
+  // instead of leaving the next boot to re-mount for it.
+  complete_async_read(true);
+  stop_mount_worker();
   flush_save_index();
   HttpClient::network_shutdown();
   ui_.shutdown();

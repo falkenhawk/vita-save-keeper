@@ -14,6 +14,7 @@
 #include "vita/ui/Ui.hpp"
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <functional>
 #include <map>
@@ -71,6 +72,21 @@ private:
   // Writes the index once the reads are done and the pause has run long, keeping its cost off the
   // frame that finished the last read.
   void write_save_index_when_idle();
+  // The mount worker: one thread that owns every PFS mount so the main thread never blocks on
+  // one and mounts never mix threads (the prime suspect for the historical mount-slot leak).
+  void start_mount_worker();
+  void stop_mount_worker();
+  static int mount_worker_entry(unsigned int args, void *argp);
+  // Blocking resolve through the worker, same semantics the old free function had; callers that
+  // hold a modal anyway (backups, details, the batch read) stay unchanged. Falls back to an
+  // inline resolve when the worker failed to start.
+  SaveMetadata resolve_live_save_metadata(const std::string &save_path,
+                                          const SaveDateTime &backup_clock,
+                                          bool allow_pfs_mount, bool bridge_available);
+  // Hands one queued save to the worker (mount + metadata + post-mount fingerprint) and returns
+  // immediately; complete_async_read applies the result on the main thread when it lands.
+  void submit_async_save_time_read(const SaveRecord &save);
+  void complete_async_read(bool wait);
   // Returns false if the user canceled (Square) mid-read, so the caller can keep the name order.
   bool resolve_all_save_times();
   bool resolve_save_time(SaveRecord *save);
@@ -233,10 +249,31 @@ private:
   // Frames since the last button. The drain waits for a short idle gap so a read never starts
   // under a press that is about to move the selection.
   int input_idle_frames_{};
-  // Buttons seen in the pad's sample history while a read blocked the frame, replayed on the next
-  // frame: the loop peeks one instantaneous sample, so a tap contained inside a mount is
-  // otherwise invisible and the navigation it asked for is lost.
+  // Buttons seen in the pad's sample history while the index write blocked the frame, replayed on
+  // the next frame: the loop peeks one instantaneous sample, so a tap contained inside the write
+  // is otherwise invisible and the navigation it asked for is lost.
   unsigned int deferred_buttons_{};
+  // The single mount-work slot. The worker only touches it in state 1 and the main thread only in
+  // states 0 and 2, so the atomic is the entire handshake; one request is in flight at a time.
+  struct MountWork {
+    std::string save_path;
+    SaveDateTime backup_clock;
+    bool allow_pfs_mount{};
+    bool want_fingerprint{};
+    // Set for queued reads, which return to the main loop instead of waiting: the id the result
+    // belongs to, and whether a restore made it stale before it landed.
+    bool async{};
+    bool discard{};
+    std::string async_save_id;
+    SaveMetadata metadata;
+    SaveFingerprint fingerprint;
+  };
+  MountWork mount_work_;
+  // 0 idle, 1 submitted, 2 done.
+  std::atomic<int> mount_work_state_{0};
+  std::atomic<bool> mount_worker_stop_{false};
+  int mount_worker_thread_{-1};
+  int mount_worker_wake_{-1};
   // Triangle pressed on the live-save row while its time was still resolving: open Save Details as
   // soon as the resolve lands instead of swallowing the press. Any other input cancels it.
   bool details_open_pending_{};

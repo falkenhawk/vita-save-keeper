@@ -9,6 +9,8 @@ All notable changes to Save Keeper are documented here. The format follows
 ### Changed
 - the two on-card scan caches merged into one `save-titles.json` - half the file reads and
   writes at every boot, and the leftover `save-times.json` is cleaned off the card on first launch
+- reading save times has been optimized and no longer blocks the interface while sweeping through games
+- the console no longer auto-suspends in the middle of a backup, restore, upload, or download
 
 ### Fixed
 - deleting a game's last backup now removes its folder from the memory card instead of leaving an
