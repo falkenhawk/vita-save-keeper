@@ -1183,10 +1183,12 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
     // instead of reporting the absence as a problem. Each folder carries the bytes it holds (in
     // the live save, or inside the inspected backup) when they could be read. A handful of paths
     // always fits on screen, so this never scrolls (details_max_scroll returns 0 then).
-    draw_text(fonts_, kRightX, 116, kColorMuted, kTextSizeTiny, "DATA FOLDERS");
+    // On the same baselines as the summary card across the gutter: label with LAST SAVE TIME
+    // (98), first row with the date value under it (124), so the two panes share one grid.
+    draw_text(fonts_, kRightX, 98, kColorMuted, kTextSizeTiny, "DATA FOLDERS");
     for (std::size_t i = 0; i < state.extra_paths.size() && i < 14; ++i) {
       const SlotDetailsState::DetailsFolder &folder = state.extra_paths[i];
-      const int y = 142 + static_cast<int>(i) * 24;
+      const int y = 124 + static_cast<int>(i) * 24;
       int path_max = kRightTextWidth;
       if (folder.bytes_known) {
         const std::string size_text = format_bytes(folder.bytes);
@@ -1344,8 +1346,8 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
   const int path_w = measure_text(kTextSizeSmall, path.c_str());
   const std::string heading =
       state.entry_name.empty()
-          ? std::string("Data folders")
-          : fit_text(kTextSizeTitle, "Data folders: " + state.entry_name, 942 - 18 - path_w - 24);
+          ? std::string("Data Folders")
+          : fit_text(kTextSizeTitle, "Data Folders: " + state.entry_name, 942 - 18 - path_w - 24);
   draw_text(fonts_, 18, 34, kColorText, kTextSizeTitle, heading.c_str());
   draw_text(fonts_, 942 - path_w, 32, kColorMuted, kTextSizeSmall, path.c_str());
 
