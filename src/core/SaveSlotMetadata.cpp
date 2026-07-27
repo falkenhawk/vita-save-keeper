@@ -495,9 +495,14 @@ std::string serialize_save_metadata_json(const std::string &identity,
       picojson::object item;
       item["prefix"] = picojson::value(target.prefix);
       item["path"] = picojson::value(target.path);
+      // Only ever written as true: absent means directory, keeping folder-only sidecars
+      // byte-identical to what builds without file support wrote.
+      if (target.is_file) {
+        item["file"] = picojson::value(true);
+      }
       targets.emplace_back(std::move(item));
     }
-    root["data_folders"] = picojson::value(std::move(targets));
+    root["savedata_paths"] = picojson::value(std::move(targets));
   }
   return picojson::value(std::move(root)).serialize();
 }
@@ -580,7 +585,7 @@ SaveMetadataJsonResult parse_save_metadata_json(const std::string &json) {
   // so every pre-field sidecar still parses. Entries missing/empty "path", with non-string fields,
   // or with a control character (see contains_control_character) anywhere in "path" are skipped,
   // matching the lenient parsing of the backup-settings config.
-  const picojson::value *targets = json_member(root, "data_folders");
+  const picojson::value *targets = json_member(root, "savedata_paths");
   if (targets && targets->is<picojson::array>()) {
     for (const picojson::value &target_value : targets->get<picojson::array>()) {
       if (!target_value.is<picojson::object>()) {
@@ -593,9 +598,11 @@ SaveMetadataJsonResult parse_save_metadata_json(const std::string &json) {
         continue;
       }
       const picojson::value *prefix = json_member(target, "prefix");
+      const picojson::value *file = json_member(target, "file");
       TrackedPath entry;
       entry.path = path->get<std::string>();
       entry.prefix = (prefix && prefix->is<std::string>()) ? prefix->get<std::string>() : "";
+      entry.is_file = file && file->is<bool>() && file->get<bool>();
       result.metadata.tracked_targets.push_back(std::move(entry));
     }
   }

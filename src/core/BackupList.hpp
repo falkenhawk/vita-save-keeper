@@ -13,7 +13,7 @@ struct BackupRow {
   std::string local_name;
   std::string remote_name;
   bool new_backup{};
-  // The homebrew entry's "Save Folders" row: a way into the folder picker that lives in the list
+  // The homebrew entry's "Savedata Paths" row: a way into the path picker that lives in the list
   // rather than behind a button chord. Carries no file names and is never a backup.
   bool data_folders{};
   // How many extra folders the entry has, for this row's label. Meaningless on any other row.

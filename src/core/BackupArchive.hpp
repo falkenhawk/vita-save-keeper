@@ -10,8 +10,9 @@
 
 namespace vsm {
 
-// One directory to fold into a multi-source archive, under its own zip path prefix. An empty
-// prefix is only valid when it is the sole source (single-directory archives keep flat paths).
+// One directory - or a single file - to fold into a multi-source archive, under its own zip path
+// prefix. A file source contributes exactly one entry, "<prefix>/<name>". An empty prefix is only
+// valid when it is the sole source (single-directory archives keep flat paths).
 struct BackupSource {
   std::string prefix;
   std::string path;
@@ -45,10 +46,13 @@ struct BackupResult {
   std::string error;
 };
 
-// One zip path prefix mapped back to the live directory it should repopulate.
+// One zip path prefix mapped back to the live directory it should repopulate - or, with is_file,
+// the single file it should replace. File targets never clear a directory: the staged entry moves
+// over the file, and a prefix absent from the archive removes it (mirroring the backup).
 struct RestoreTarget {
   std::string prefix;
   std::string destination_path;
+  bool is_file{};
 };
 
 struct RestoreRequest {
@@ -136,10 +140,10 @@ bool remove_backup_inspection_directory(const std::string &path);
 std::vector<ArchiveEntryInfo> compute_folder_entries(
     const std::string &folder_path, bool *ok,
     const std::function<void(std::uint64_t done, std::uint64_t total)> &progress = {});
-// Same content signature, but for several directories bundled under per-source prefixes (see
-// BackupRequest::sources). A missing source directory is skipped, not a failure; *ok is true when
-// every existing source walked cleanly (all sources missing yields an empty result and *ok true -
-// the "nothing to back up" decision belongs to the caller).
+// Same content signature, but for several sources (directories or single files) bundled under
+// per-source prefixes (see BackupRequest::sources). A missing source is skipped, not a failure;
+// *ok is true when every existing source walked cleanly (all sources missing yields an empty
+// result and *ok true - the "nothing to back up" decision belongs to the caller).
 std::vector<ArchiveEntryInfo> compute_sources_entries(const std::vector<BackupSource> &sources,
                                                       bool *ok);
 // Entry list (relative path, CRC32, uncompressed size) from an archive's central directory,

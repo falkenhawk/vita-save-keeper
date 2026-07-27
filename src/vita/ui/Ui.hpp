@@ -55,7 +55,7 @@ struct SlotDetailsState {
   // corner. Both false for the live save, which is not a snapshot.
   bool snapshot_on_card{};
   bool snapshot_in_cloud{};
-  // True when details was opened with the "Save Folders" row focused. The screen still shows the
+  // True when details was opened with the "Savedata Paths" row focused. The screen still shows the
   // live save (that row is not a snapshot), but the footer offers the picker instead of a backup.
   bool data_folders_row{};
   // The entry's extra ux0:data folders. For the live save these are the entry's current folders
@@ -71,10 +71,11 @@ struct SlotDetailsState {
   std::vector<DetailsFolder> extra_paths;
 };
 
-// Modal picker for a homebrew entry's data folders. Confined to "ux0:data" and never climbs above
-// it, so an included folder always stays on the ux0 filesystem. Rows are the child directories of
-// current_path; each row's size is filled in lazily (debounced) after the selection settles, so
-// browsing a folder full of huge trees does not stat-walk every one at once.
+// Modal picker for a homebrew entry's savedata paths. Confined to "ux0:data" and never climbs
+// above it, so an included path always stays on the ux0 filesystem. Rows are the child folders
+// and files of current_path; a folder's size is filled in lazily (debounced) after the selection
+// settles, so browsing a folder full of huge trees does not stat-walk every one at once, while a
+// file's size arrives with its directory entry.
 struct DirectoryBrowserState {
   bool open{};
   // The entry whose backups the picked folders join, captured when the browser opens so a later
@@ -90,6 +91,8 @@ struct DirectoryBrowserState {
     std::string name;
     // The ".." row shown below the root: Cross goes up a level. Carries no size and no state.
     bool parent_link{};
+    // A plain file: includable exactly like a folder, but with nothing to open inside.
+    bool is_file{};
     bool size_known{};
     std::uint64_t size_bytes{};
     // True while the incremental stat-walk is measuring this row; the size column spins.
@@ -115,6 +118,9 @@ struct DirectoryBrowserState {
   // True when the browser was opened from Save Details, so closing it goes back there rather than
   // dropping the user out to the grid.
   bool return_to_details{};
+  // Set by any successful include/exclude during this visit. The close pass re-resolves the
+  // entry's save time and re-sorts only then; a browse-only visit exits instantly.
+  bool changed{};
 };
 
 // Grid width of the save panel; D-pad up/down moves by one full row, so the input handler in App

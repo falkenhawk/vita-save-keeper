@@ -69,7 +69,7 @@ constexpr const char *kBackupSettingsConflictPath =
     "ux0:data/save-keeper/backup-settings.conflict.json";
 // Known folder sets shipped inside the VPK (RetroArch first). Same schema as the user file; the
 // user's backup-settings.json overrides it per entry id.
-constexpr const char *kBaseDataFoldersPath = "app0:sce_sys/resources/data-folders.json";
+constexpr const char *kBaseDataFoldersPath = "app0:sce_sys/resources/savedata-paths.json";
 // The file's name in the Drive "PSV Saves" root - the same name it carries on the card.
 constexpr const char *kBackupSettingsDriveName = "backup-settings.json";
 // The homebrew data convention root the folder browser is confined to. Distinct from kDataRoot
@@ -182,7 +182,7 @@ std::vector<RestoreTarget> entry_restore_targets(const SaveRecord &save) {
   std::vector<RestoreTarget> targets;
   targets.reserve(mapping.size());
   for (const TrackedPath &target : mapping) {
-    targets.push_back({target.prefix, target.path});
+    targets.push_back({target.prefix, target.path, target.is_file});
   }
   return targets;
 }
@@ -490,6 +490,24 @@ bool path_is_directory(const std::string &path) {
 // file-private, so the directory browser keeps its own. Names come straight from readdir and so can
 // never contain a path separator; the browser builds child paths as current + "/" + name, which is
 // what keeps it from ever escaping above its ux0:data root.
+// Case-insensitive, like the game grid's title sort: byte order files ABM and VitaDB ahead of
+// betterHomebrewBrowser, which reads as random on a mixed-case ux0:data. Byte order breaks ties
+// so names differing only by case keep a stable order.
+bool name_less_case_insensitive(const std::string &a, const std::string &b) {
+  const std::size_t common = std::min(a.size(), b.size());
+  for (std::size_t i = 0; i < common; ++i) {
+    const int left = std::tolower(static_cast<unsigned char>(a[i]));
+    const int right = std::tolower(static_cast<unsigned char>(b[i]));
+    if (left != right) {
+      return left < right;
+    }
+  }
+  if (a.size() != b.size()) {
+    return a.size() < b.size();
+  }
+  return a < b;
+}
+
 std::vector<std::string> list_child_directories(const std::string &root_path) {
   std::vector<std::string> directories;
   DIR *dir = opendir(root_path.c_str());
@@ -506,25 +524,48 @@ std::vector<std::string> list_child_directories(const std::string &root_path) {
     }
   }
   closedir(dir);
-  // Case-insensitive, like the game grid's title sort: byte order files ABM and VitaDB ahead of
-  // betterHomebrewBrowser, which reads as random on a mixed-case ux0:data. Byte order breaks ties
-  // so names differing only by case keep a stable order.
   std::sort(directories.begin(), directories.end(),
             [](const std::string &a, const std::string &b) {
-              const std::size_t common = std::min(a.size(), b.size());
-              for (std::size_t i = 0; i < common; ++i) {
-                const int left = std::tolower(static_cast<unsigned char>(a[i]));
-                const int right = std::tolower(static_cast<unsigned char>(b[i]));
-                if (left != right) {
-                  return left < right;
-                }
-              }
-              if (a.size() != b.size()) {
-                return a.size() < b.size();
-              }
-              return a < b;
+              return name_less_case_insensitive(a, b);
             });
   return directories;
+}
+
+// What the savedata-path picker lists: the immediate children of a directory, folders and plain
+// files alike. Folders sort ahead of files (each group case-insensitively), the way every console
+// file browser groups them; a file's size comes free with its dirent, so its row never needs the
+// incremental walk.
+struct BrowserChild {
+  std::string name;
+  bool is_file{};
+  std::uint64_t size{};
+};
+
+std::vector<BrowserChild> list_browser_children(const std::string &root_path) {
+  std::vector<BrowserChild> children;
+  DIR *dir = opendir(root_path.c_str());
+  if (!dir) {
+    return children;
+  }
+  while (dirent *entry = readdir(dir)) {
+    const std::string name = entry->d_name;
+    if (name == "." || name == "..") {
+      continue;
+    }
+    if (SCE_S_ISDIR(entry->d_stat.st_mode)) {
+      children.push_back({name, false, 0});
+    } else if (SCE_S_ISREG(entry->d_stat.st_mode)) {
+      children.push_back({name, true, static_cast<std::uint64_t>(entry->d_stat.st_size)});
+    }
+  }
+  closedir(dir);
+  std::sort(children.begin(), children.end(), [](const BrowserChild &a, const BrowserChild &b) {
+    if (a.is_file != b.is_file) {
+      return !a.is_file;
+    }
+    return name_less_case_insensitive(a.name, b.name);
+  });
+  return children;
 }
 
 } // namespace
@@ -1457,14 +1498,40 @@ void App::refresh_local_backups() {
 }
 
 void App::move_selected_save(int delta) {
+  move_selected_save_to(move_selection(selected_save_, visible_saves_.size(), delta));
+}
+
+void App::move_selected_save_vertical(int direction) {
+  const std::size_t count = visible_saves_.size();
+  if (count == 0) {
+    return;
+  }
+  constexpr std::size_t kColumns = static_cast<std::size_t>(kSaveGridColumns);
+  const std::size_t index = selected_save_;
+  const std::size_t column = index % kColumns;
+  std::size_t target;
+  if (direction > 0) {
+    // Off the bottom of a column, back to its own top. A plain +columns modulo jump landed
+    // columns away whenever the last row was partial.
+    target = index + kColumns < count ? index + kColumns : column;
+  } else {
+    // Off the top, down to the column's bottom-most occupied cell - the second-to-last row when
+    // the last row does not reach this column.
+    target = index >= kColumns ? index - kColumns
+                               : column + ((count - 1 - column) / kColumns) * kColumns;
+  }
+  move_selected_save_to(target);
+}
+
+void App::move_selected_save_to(std::size_t target) {
   const std::size_t previous = selected_save_;
-  selected_save_ = move_selection(selected_save_, visible_saves_.size(), delta);
+  selected_save_ = target < visible_saves_.size() ? target : previous;
   if (selected_save_ != previous) {
     cancel_restore_confirmation();
     cancel_delete_confirmation();
     cancel_duplicate_backup_confirmation();
     // A different save means a different backup list; focus its "New Backup" entry - picked after
-    // the refreshes below rebuild the rows, since a homebrew entry seats "Save Folders" above it.
+    // the refreshes below rebuild the rows, since a homebrew entry seats "Savedata Paths" above it.
     queue_selected_save_time_read();
     refresh_local_backups();
     refresh_remote_backups_view();
@@ -1617,7 +1684,7 @@ void App::handle_delete_button() {
     set_status(StatusKind::Info, "No save selected.");
     return;
   }
-  // Start deletes the focused backup and nothing else. The "Save Folders" row has no Start action:
+  // Start deletes the focused backup and nothing else. The "Savedata Paths" row has no Start action:
   // folders are added and removed inside the picker itself, which is the only place that shows which
   // ones an entry actually has.
   if (data_folders_row_focused()) {
@@ -1783,7 +1850,7 @@ void App::handle_action_button() {
     }
     return;
   }
-  // The "Save Folders" row is an action, not a backup: opening the picker is what it does.
+  // The "Savedata Paths" row is an action, not a backup: opening the picker is what it does.
   if (data_folders_row_focused()) {
     open_directory_browser(false);
     return;
@@ -1927,7 +1994,7 @@ void App::handle_restore() {
     // The savedata destination is supplied here from the live entry, never read from the sidecar,
     // so a tampered sidecar can only ever aim a directory clear inside ux0:data.
     for (const TrackedPath &target : restore_targets_for_backup(save.path, extra_targets)) {
-      restore_request.targets.push_back({target.prefix, target.path});
+      restore_request.targets.push_back({target.prefix, target.path, target.is_file});
     }
   }
   restore_request.progress = [this](std::uint64_t done, std::uint64_t total) {
@@ -2468,7 +2535,7 @@ std::vector<std::string> App::remote_backup_names() const {
 
 void App::rebuild_backup_rows() {
   backup_rows_ = build_backup_rows(remote_backup_names(), local_backups_);
-  // A homebrew entry gets a "Save Folders" row right above "New Backup". Putting the picker in the
+  // A homebrew entry gets a "Savedata Paths" row right above "New Backup". Putting the picker in the
   // list rather than on a button means it is visible without knowing it exists, and it costs no
   // footer space - the grid's footer has none left. Default focus still lands on "New Backup"
   // (default_backup_row), so switching titles keeps its familiar landing spot.
@@ -2494,7 +2561,7 @@ bool App::new_backup_row_focused() const {
 }
 
 std::size_t App::backup_count() const {
-  // Snapshot rows only. "New Backup" and "Save Folders" stand for actions, not backups, so a count
+  // Snapshot rows only. "New Backup" and "Savedata Paths" stand for actions, not backups, so a count
   // taken by subtracting a fixed number of leading rows would drift as sentinels come and go.
   std::size_t count = 0;
   for (const BackupRow &row : backup_rows_) {
@@ -2967,7 +3034,7 @@ void App::repair_remote_backup_metadata(const SaveRecord &save, const BackupRow 
 }
 
 void App::request_save_details() {
-  // The "Save Folders" row has no details of its own - Triangle opens the picker instead, an
+  // The "Savedata Paths" row has no details of its own - Triangle opens the picker instead, an
   // unhinted shortcut that mirrors Triangle silently closing it from inside.
   if (data_folders_row_focused()) {
     open_directory_browser(false);
@@ -3063,7 +3130,15 @@ void App::open_save_details() {
       // the total still sums savedata and every extra, which is what the next backup would hold.
       for (std::size_t i = 0; i < save.extra_paths.size(); ++i) {
         bool path_ok = false;
-        const std::uint64_t bytes = compute_folder_size(save.extra_paths[i].path, &path_ok);
+        std::uint64_t bytes = 0;
+        if (save.extra_paths[i].is_file) {
+          struct stat file_info {};
+          path_ok = stat(save.extra_paths[i].path.c_str(), &file_info) == 0 &&
+                    S_ISREG(file_info.st_mode);
+          bytes = path_ok ? static_cast<std::uint64_t>(file_info.st_size) : 0;
+        } else {
+          bytes = compute_folder_size(save.extra_paths[i].path, &path_ok);
+        }
         if (path_ok) {
           total += bytes;
           any_ok = true;
@@ -3481,7 +3556,7 @@ void App::open_directory_browser(bool from_details) {
     return;
   }
   if (classify_save(*selected) != SaveCategory::Homebrew) {
-    set_status(StatusKind::Info, "Save folders are for homebrew entries.");
+    set_status(StatusKind::Info, "Savedata paths are for homebrew entries.");
     return;
   }
   abort_browser_size_walk();
@@ -3501,6 +3576,7 @@ void App::open_directory_browser(bool from_details) {
 void App::close_directory_browser() {
   const std::string entry_id = directory_browser_.entry_id;
   const bool return_to_details = directory_browser_.return_to_details;
+  const bool changed = directory_browser_.changed;
   abort_browser_size_walk();
   browser_size_queue_.clear();
   directory_browser_.open = false;
@@ -3511,21 +3587,24 @@ void App::close_directory_browser() {
   // status afterwards if it has something to say.
   clear_status();
 
-  // Folder changes were applied to saves_ as they happened, but their save times and the grid
-  // order were deliberately left alone (each resolve is a full mtime walk - too slow per toggle).
-  // Settle both now, once, behind a busy frame; the re-sort also refocuses the entry (the
-  // selection never moved behind the modal) and refreshes its backup rows.
-  ui_.draw_busy("Updating save times", 0, -1);
-  for (SaveRecord &save : saves_) {
-    if (!save.extra_paths.empty()) {
-      resolve_data_folder_time(&save);
+  // Path changes were applied to saves_ as they happened, but the entry's save time and the grid
+  // order were deliberately left alone (a resolve is a full mtime walk - too slow per toggle).
+  // Settle both now, once, behind a busy frame - and only when this visit actually changed
+  // something: a browse-only visit costs nothing on the way out. Only the edited entry needs a
+  // resolve; every other entry's paths are exactly as the boot pass left them.
+  if (changed) {
+    ui_.draw_busy("Updating save times", 0, -1);
+    for (SaveRecord &save : saves_) {
+      if (save.id == entry_id && !save.extra_paths.empty()) {
+        resolve_data_folder_time(&save);
+      }
     }
+    apply_sort_and_rebuild();
   }
-  apply_sort_and_rebuild();
 
   const SaveRecord *current = selected_save_record();
   if (current && current->id == entry_id) {
-    // Land back on the "Save Folders" row the picker was opened from, with its folder count now
+    // Land back on the "Savedata Paths" row the picker was opened from, with its folder count now
     // updated, rather than kicking the focus up to "New Backup" - and when the visit started in
     // Save Details, reopen it, which rebuilds its folder list and sizes to show the changes.
     for (std::size_t i = 0; i < backup_rows_.size(); ++i) {
@@ -3579,10 +3658,11 @@ void App::reload_browser_rows(bool keep_selection) {
     up.parent_link = true;
     directory_browser_.rows.push_back(std::move(up));
   }
-  for (const std::string &name : list_child_directories(directory_browser_.current_path)) {
+  for (const BrowserChild &child_entry : list_browser_children(directory_browser_.current_path)) {
     DirectoryBrowserState::Row row;
-    row.name = name;
-    const std::string child = directory_browser_.current_path + "/" + name;
+    row.name = child_entry.name;
+    row.is_file = child_entry.is_file;
+    const std::string child = directory_browser_.current_path + "/" + child_entry.name;
     row.tracked_here = mine.count(child) != 0;
     if (!row.tracked_here) {
       // Inside an included folder means backed up through it; nesting a second inclusion in
@@ -3606,11 +3686,16 @@ void App::reload_browser_rows(bool keep_selection) {
       }
     }
     // Sizes survive re-tags and revisits through the per-visit cache, so Square never wipes what
-    // was already measured.
-    const auto cached = browser_size_cache_.find(child);
-    if (cached != browser_size_cache_.end()) {
+    // was already measured. A file's size arrived with its dirent and needs neither.
+    if (row.is_file) {
       row.size_known = true;
-      row.size_bytes = cached->second;
+      row.size_bytes = child_entry.size;
+    } else {
+      const auto cached = browser_size_cache_.find(child);
+      if (cached != browser_size_cache_.end()) {
+        row.size_known = true;
+        row.size_bytes = cached->second;
+      }
     }
     directory_browser_.rows.push_back(std::move(row));
   }
@@ -3905,8 +3990,8 @@ void App::browser_toggle_selected() {
       if (path_is_inside(extra.path, full_path)) {
         set_status(StatusKind::Info,
                    save.id == browser.entry_id
-                       ? "A folder inside is already included - exclude it first."
-                       : "A folder inside is backed up by another entry.");
+                       ? "A path inside is already included - exclude it first."
+                       : "A path inside is backed up by another entry.");
         return;
       }
     }
@@ -3936,13 +4021,16 @@ void App::browser_toggle_selected() {
   constexpr std::uint64_t kMaxBackupBytes = 128ULL * kMebibyte;
   constexpr std::uint64_t kLargeFolderWarnBytes = 64ULL * kMebibyte;
   if (row.size_known && row.size_bytes > kMaxBackupBytes) {
-    set_status(StatusKind::Error, "Too large to back up (over " + ui_.format_size(kMaxBackupBytes) +
-                                      ") - drill into the save subfolder.");
+    // The drill-in escape hatch only makes sense for a folder; an oversized file is simply out.
+    set_status(StatusKind::Error,
+               "Too large to back up (over " + ui_.format_size(kMaxBackupBytes) +
+                   (row.is_file ? ")." : ") - drill into the save subfolder."));
     return;
   }
   if (row.size_known && row.size_bytes > kLargeFolderWarnBytes && !browser.large_confirm_pending) {
     browser.large_confirm_pending = true;
-    set_status(StatusKind::Info, "Large folder (" + ui_.format_size(row.size_bytes) +
+    set_status(StatusKind::Info, std::string(row.is_file ? "Large file (" : "Large folder (") +
+                                     ui_.format_size(row.size_bytes) +
                                      ") - press Square again to include it anyway.");
     return;
   }
@@ -3970,10 +4058,11 @@ void App::browser_toggle_selected() {
   // backup's restore mapping. make_extra_prefix also keeps "savedata" reserved for the entry's own
   // save folder. Re-including a base folder by hand regenerates the same prefix, which is what
   // lets the result compare equal to the base and drop the override.
-  new_paths.push_back({make_extra_prefix(row.name, taken_prefixes), full_path});
+  new_paths.push_back({make_extra_prefix(row.name, taken_prefixes), full_path, row.is_file});
   if (!set_entry_data_folders(entry_id, browser.entry_name, std::move(new_paths))) {
     return;
   }
+  browser.changed = true;
   // Stay put: picking several folders for one app is the common case (RetroArch's savefiles and
   // savestates), and bouncing back to the grid after each one made that a chore. The grid is
   // re-sorted once, on close. No status line - the row's tag flipping is the confirmation.
@@ -4016,6 +4105,7 @@ void App::browser_exclude_selected(const std::string &full_path) {
     return;
   }
   const bool dropping_entry = new_paths.empty();
+  directory_browser_.changed = true;
   if (!set_entry_data_folders(entry_id, directory_browser_.entry_name, std::move(new_paths))) {
     return;
   }
@@ -4176,7 +4266,12 @@ void App::run_sync_all() {
   SyncRunCounts run;
   std::size_t metadata_warnings = 0;
   bool auth_lost = false;
-  const bool drive_online = google_connected_ && HttpClient::network_reachable();
+  // The run honors what the confirmation promised (baked when the window opened) instead of
+  // re-polling reachability here: the Vita's wifi power-save can report unreachable for a moment,
+  // and a fresh poll then silently downgraded the whole run to local-only - a game whose backup
+  // existed but was never uploaded came back "up to date" with the upload quietly skipped. If the
+  // network is genuinely gone, the first upload fails and the summary says so out loud.
+  const bool drive_online = google_connected_ && sync_all_will_upload_;
   batch_running_ = true;
   batch_cancel_requested_ = false;
   // The batch only uploads; a folder lookup/create response is the only download, and reporting
@@ -4551,7 +4646,7 @@ int App::run() {
         sceKernelDelayThread(kFrameDelayUs);
         continue;
       }
-      // On the "Save Folders" row the context action opens the picker. Details has to close first -
+      // On the "Savedata Paths" row the context action opens the picker. Details has to close first -
       // both the draw and input paths check it before the browser, so leaving it open would hide
       // the browser behind it - and closing the picker reopens details from where it left off.
       if ((pressed & backup_button) != 0 && data_folders_row_focused()) {
@@ -4679,15 +4774,17 @@ int App::run() {
         rows_changed = true;
       }
       if (!rows_changed && (pressed & backup_button) != 0 && browser.selected < browser.rows.size()) {
-        // Cross opens the focused folder; on the ".." row it climbs instead.
+        // Cross opens the focused folder; on the ".." row it climbs instead. A file row has
+        // nothing to open - Square is its whole interaction - so the press falls through.
         if (browser.rows[browser.selected].parent_link) {
           browser_go_up();
-        } else {
+          rows_changed = true;
+        } else if (!browser.rows[browser.selected].is_file) {
           clear_status();
           browser.current_path += "/" + browser.rows[browser.selected].name;
           reload_browser_rows();
+          rows_changed = true;
         }
-        rows_changed = true;
       }
       if (!rows_changed && (pressed & cancel_button) != 0) {
         // Circle climbs one level at a time while strictly inside the folder the picker opened at
@@ -4758,10 +4855,10 @@ int App::run() {
       move_selected_save(1);
     }
     if ((pressed & SCE_CTRL_UP) != 0) {
-      move_selected_save(-kSaveGridColumns);
+      move_selected_save_vertical(-1);
     }
     if ((pressed & SCE_CTRL_DOWN) != 0) {
-      move_selected_save(kSaveGridColumns);
+      move_selected_save_vertical(1);
     }
     // Inside the batch window the shoulder buttons belong to the checkboxes, so both drop their
     // tab-switch meaning (a tab switch would tear the window down sideways): R flips the focused

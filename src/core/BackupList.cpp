@@ -26,8 +26,8 @@ std::string BackupRow::display_name() const {
   if (data_folders) {
     // Title Case, like the "New Backup" row it sits beside.
     return data_folder_count == 0
-               ? std::string("Save Folders")
-               : "Save Folders (" + std::to_string(data_folder_count) + ")";
+               ? std::string("Savedata Paths")
+               : "Savedata Paths (" + std::to_string(data_folder_count) + ")";
   }
   // Only the display is transformed (no ".zip", the " auto" marker shown as an [AUTO] prefix) -
   // the stored file name is never mutated. Cloud presence is drawn as a pill by the UI instead

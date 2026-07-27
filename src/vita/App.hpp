@@ -58,6 +58,11 @@ public:
 private:
   void refresh_local_backups();
   void move_selected_save(int delta);
+  // Up/down in the grid wrap within the column: off the bottom back to its top, off the top to
+  // its bottom-most occupied cell - honest about a partial last row, unlike a +-columns modulo
+  // jump that landed columns away.
+  void move_selected_save_vertical(int direction);
+  void move_selected_save_to(std::size_t target);
   void move_selected_backup(int delta);
   void move_selected_category(int delta);
   void cycle_sort_mode();
@@ -94,13 +99,11 @@ private:
   // or absent) and syncing the current tab's remembered position to match. Used after a re-sort
   // reorders saves_ and after attaching a folder; callers call rebuild_visible_saves() first.
   void refocus_selection_by_id(const std::string &id);
-  // The current tab's entries minus those marked to skip - what the hold-Select batch runs over.
-  // Reads tracked-folders.json once at startup (bounded, capped). A present-but-unreadable or
+  // Reads backup-settings.json once at startup (bounded, capped). A present-but-unreadable or
   // unparseable file sets tracked_config_load_failed_ and leaves the config empty, so it is never
   // overwritten later.
   void load_tracked_folders();
-  // Writes the user config to data-folders.json (atomic) and removes the pre-release file name on
-  // success. False (with a status set) on failure.
+  // Writes the user config to backup-settings.json (atomic). False (with a status set) on failure.
   bool save_data_folders_config();
   // The base entry for id, or null when there is none or none of its folders exist here.
   const TrackedFolderEntry *applicable_base_entry(const std::string &id) const;
@@ -214,13 +217,13 @@ private:
   void rebuild_backup_rows();
   std::size_t backup_count() const;
   const BackupRow *selected_backup_row() const;
-  // True when the focused row is the homebrew entry's "Save Folders" action row. It is a sentinel,
+  // True when the focused row is the homebrew entry's "Savedata Paths" action row. It is a sentinel,
   // so selected_backup_row() reports it as no row at all; this is how the action button tells the
   // two "no row" cases apart.
   bool data_folders_row_focused() const;
   bool new_backup_row_focused() const;
   // Index of the "New Backup" row - the default focus whenever the backup list resets. Not 0 on
-  // homebrew entries, where the "Save Folders" row sits above it.
+  // homebrew entries, where the "Savedata Paths" row sits above it.
   std::size_t default_backup_row() const;
   std::string selected_backup_name() const;
   void focus_backup_row_by_identity(const std::string &backup_name);

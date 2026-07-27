@@ -139,7 +139,7 @@ else()
     FILE sce_sys/resources/cloud-synced.png sce_sys/resources/cloud-synced.png
     FILE sce_sys/resources/cloud-drive-only.png sce_sys/resources/cloud-drive-only.png
     FILE sce_sys/resources/cloud-local-only.png sce_sys/resources/cloud-local-only.png
-    FILE sce_sys/resources/data-folders.json sce_sys/resources/data-folders.json
+    FILE sce_sys/resources/savedata-paths.json sce_sys/resources/savedata-paths.json
     FILE sce_sys/resources/folder-edit.png sce_sys/resources/folder-edit.png
     FILE sce_sys/resources/mark-available.png sce_sys/resources/mark-available.png
     FILE sce_sys/resources/mark-included.png sce_sys/resources/mark-included.png

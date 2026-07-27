@@ -44,6 +44,9 @@ bool parse_path(const picojson::value &value, TrackedPath *path) {
   path->prefix = (prefix_field != object.end() && prefix_field->second.is<std::string>())
                      ? prefix_field->second.get<std::string>()
                      : "";
+  const auto file_field = object.find("file");
+  path->is_file = file_field != object.end() && file_field->second.is<bool>() &&
+                  file_field->second.get<bool>();
   return true;
 }
 
@@ -197,6 +200,10 @@ std::string serialize_tracked_folders_json(const TrackedFoldersConfig &config) {
       picojson::object path_object;
       path_object["prefix"] = picojson::value(path.prefix);
       path_object["path"] = picojson::value(path.path);
+      // Written only as true, so folder-only configs stay byte-identical to earlier builds'.
+      if (path.is_file) {
+        path_object["file"] = picojson::value(true);
+      }
       paths.push_back(picojson::value(std::move(path_object)));
     }
     object["paths"] = picojson::value(std::move(paths));
@@ -281,7 +288,11 @@ ArchiveLayout archive_layout_for_record(const SaveRecord &record) {
     if (has_savedata) {
       layout.sources.push_back({std::string(), record.path});
     } else {
-      layout.sources.push_back({std::string(), record.extra_paths.front().path});
+      // Copy, not brace-init: the sole extra's is_file must survive into the flat layout, or a
+      // single tracked file would restore as if it were a directory.
+      TrackedPath sole = record.extra_paths.front();
+      sole.prefix.clear();
+      layout.sources.push_back(std::move(sole));
       layout.extra_targets = layout.sources;
     }
     return layout;
@@ -357,7 +368,8 @@ bool tracked_paths_equal(const std::vector<TrackedPath> &a, const std::vector<Tr
   for (const TrackedPath &left : a) {
     bool found = false;
     for (std::size_t i = 0; i < b.size(); ++i) {
-      if (!used[i] && b[i].prefix == left.prefix && b[i].path == left.path) {
+      if (!used[i] && b[i].prefix == left.prefix && b[i].path == left.path &&
+          b[i].is_file == left.is_file) {
         used[i] = true;
         found = true;
         break;

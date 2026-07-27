@@ -282,6 +282,30 @@ bool measure_file(ZipEntry *entry, const std::function<void(std::size_t)> &on_by
   return true;
 }
 
+std::string path_basename(const std::string &path) {
+  const std::size_t slash = path.rfind('/');
+  return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+// A source path may be a directory (walked recursively) or a single file (one entry named
+// "<prefix>/<name>"). Anything else - missing, special - is a failed collect.
+bool collect_source_files(const std::string &path, const std::string &prefix,
+                          std::vector<ZipEntry> *entries) {
+  if (is_directory(path)) {
+    return collect_files(path, prefix, entries);
+  }
+  if (!is_regular_file(path)) {
+    return false;
+  }
+  const std::string name = path_basename(path);
+  entries->push_back({path, prefix.empty() ? name : prefix + "/" + name});
+  return true;
+}
+
+bool source_exists(const std::string &path) {
+  return is_directory(path) || is_regular_file(path);
+}
+
 // Walks one directory and appends its content signature (relative path within `prefix`, CRC32,
 // size) to *out. Shared by compute_folder_entries (a single directory) and compute_sources_entries
 // (several directories bundled under per-source prefixes).
@@ -718,13 +742,13 @@ BackupResult create_backup_archive(const BackupRequest &request) {
     }
     bool any_source_exists = false;
     for (const BackupSource &source : request.sources) {
-      if (is_directory(source.path)) {
+      if (source_exists(source.path)) {
         any_source_exists = true;
         break;
       }
     }
     if (!any_source_exists) {
-      return error_result(archive_path, "source path is not a directory");
+      return error_result(archive_path, "no source path exists");
     }
   } else if (!is_directory(request.source_path)) {
     return error_result(archive_path, "source path is not a directory");
@@ -738,7 +762,8 @@ BackupResult create_backup_archive(const BackupRequest &request) {
     for (const BackupSource &source : request.sources) {
       // A tracked path missing on disk (a core the user never ran, say) simply contributes
       // nothing to the archive; only a wholly absent set of sources is an error, checked above.
-      if (is_directory(source.path) && !collect_files(source.path, source.prefix, &entries)) {
+      if (source_exists(source.path) &&
+          !collect_source_files(source.path, source.prefix, &entries)) {
         return error_result(archive_path, "could not read source directory");
       }
     }
@@ -910,11 +935,22 @@ std::vector<ArchiveEntryInfo> compute_sources_entries(const std::vector<BackupSo
   bool walked_cleanly = true;
   for (const BackupSource &source : sources) {
     // A source missing on disk contributes nothing; it is not itself a failure to walk.
-    if (!is_directory(source.path)) {
+    if (!source_exists(source.path)) {
       continue;
     }
-    if (!append_folder_entries(source.path, source.prefix, &result)) {
+    std::vector<ZipEntry> entries;
+    if (!collect_source_files(source.path, source.prefix, &entries)) {
       walked_cleanly = false;
+      break;
+    }
+    for (ZipEntry &entry : entries) {
+      if (!measure_file(&entry, {})) {
+        walked_cleanly = false;
+        break;
+      }
+      result.push_back({entry.zip_path, entry.crc32, entry.size});
+    }
+    if (!walked_cleanly) {
       break;
     }
   }
@@ -1134,6 +1170,31 @@ RestoreResult restore_backup_archive(const RestoreRequest &request) {
 
   if (multi_target) {
     for (const RestoreTarget &target : request.targets) {
+      if (target.is_file) {
+        // A file target replaces exactly one file - never a directory clear. The staged copy
+        // moves over it; a prefix absent from the archive means the file was missing when the
+        // backup was made, so removing the live one mirrors the backup the same way an empty
+        // prefix leaves a directory target empty.
+        const std::string staged_dir =
+            target.prefix.empty() ? staging_path : join_path(staging_path, target.prefix);
+        const std::string staged_file =
+            join_path(staged_dir, path_basename(target.destination_path));
+        if (is_regular_file(staged_file)) {
+          const std::size_t slash = target.destination_path.rfind('/');
+          if (slash != std::string::npos &&
+              !ensure_directory(target.destination_path.substr(0, slash))) {
+            remove_tree(staging_path);
+            return restore_error("could not create destination folder");
+          }
+          if (std::rename(staged_file.c_str(), target.destination_path.c_str()) != 0) {
+            remove_tree(staging_path);
+            return restore_error("could not replace destination file");
+          }
+        } else {
+          std::remove(target.destination_path.c_str());
+        }
+        continue;
+      }
       if (!clear_directory_contents(target.destination_path)) {
         remove_tree(staging_path);
         return restore_error("could not clear destination save");

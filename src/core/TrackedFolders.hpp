@@ -49,7 +49,7 @@ struct TrackedFoldersParseResult {
 };
 
 // {"version":1,"modified":epoch,"entries":[{id,title,paths:[{prefix,path}]}],"skipped":[ids]}.
-// One schema serves both the base file shipped inside the VPK (data-folders.json: known folder
+// One schema serves both the base file shipped inside the VPK (savedata-paths.json: known folder
 // sets, RetroArch first) and the user's backup-settings.json, which overrides it per entry id and
 // adds the skip list. An entry with an EMPTY paths array is a tombstone: in the user file it
 // suppresses the base entry with that id. Unknown fields are ignored so older builds can read

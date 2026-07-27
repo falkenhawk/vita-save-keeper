@@ -36,6 +36,10 @@ struct SaveSlotMetadata {
 struct TrackedPath {
   std::string prefix;
   std::string path;
+  // A single file rather than a directory. Backed up as "<prefix>/<name>"; restored by replacing
+  // exactly that file (never by clearing a directory), which is why the flag is persisted in the
+  // config and the sidecar instead of being re-inferred from the card at restore time.
+  bool is_file{};
 };
 
 struct SaveMetadata {

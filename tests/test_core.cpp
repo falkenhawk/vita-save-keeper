@@ -538,22 +538,28 @@ void test_save_metadata_json_records_tracked_targets_when_present() {
   metadata.tracked_targets = {
       {"savefiles", "ux0:data/retroarch/savefiles"},
       {"savestates", "ux0:data/retroarch/savestates"},
+      {"config.sav", "ux0:data/app/config.sav", true},
   };
 
   const std::string json =
       vsm::serialize_save_metadata_json("2026-07-23 09-15-00", metadata);
   EXPECT_TRUE(json.find("\"version\":2") != std::string::npos);
   // Written and read only under the user-facing name; the struct member keeps its internal name.
-  EXPECT_TRUE(json.find("\"data_folders\"") != std::string::npos);
+  EXPECT_TRUE(json.find("\"savedata_paths\"") != std::string::npos);
   EXPECT_TRUE(json.find("\"tracked_targets\"") == std::string::npos);
 
   const vsm::SaveMetadataJsonResult parsed = vsm::parse_save_metadata_json(json);
   EXPECT_TRUE(parsed.ok);
-  EXPECT_EQ(parsed.metadata.tracked_targets.size(), static_cast<std::size_t>(2));
+  EXPECT_EQ(parsed.metadata.tracked_targets.size(), static_cast<std::size_t>(3));
   EXPECT_EQ(parsed.metadata.tracked_targets[0].prefix, "savefiles");
   EXPECT_EQ(parsed.metadata.tracked_targets[0].path, "ux0:data/retroarch/savefiles");
+  EXPECT_TRUE(!parsed.metadata.tracked_targets[0].is_file);
   EXPECT_EQ(parsed.metadata.tracked_targets[1].prefix, "savestates");
   EXPECT_EQ(parsed.metadata.tracked_targets[1].path, "ux0:data/retroarch/savestates");
+  // The file marker survives the round trip; without it a tracked file would restore as if it
+  // were a directory.
+  EXPECT_TRUE(parsed.metadata.tracked_targets[2].is_file);
+  EXPECT_EQ(parsed.metadata.tracked_targets[2].path, "ux0:data/app/config.sav");
 
   // lenient parse: an entry missing/empty "path" is skipped and the rest survive, matching how
   // tracked-folders.json entries are read; a missing "prefix" defaults to empty. A "path" carrying
@@ -563,7 +569,7 @@ void test_save_metadata_json_records_tracked_targets_when_present() {
   // (tested above) remains the authoritative gate before any such target is used to restore a save.
   const std::string lenient =
       R"({"version":2,"archiveIdentity":"id","savedAt":"2026-07-23T09:15:00",)"
-      R"("source":"filesystem","approximate":true,"slots":[],"data_folders":[)"
+      R"("source":"filesystem","approximate":true,"slots":[],"savedata_paths":[)"
       R"({"prefix":"a"},{"prefix":"","path":""},{"path":"ux0:data/keep"},)"
       R"({"path":"ux0:data/\u0000evil"}]})";
   const vsm::SaveMetadataJsonResult lenient_parsed = vsm::parse_save_metadata_json(lenient);
@@ -2877,6 +2883,68 @@ void test_backup_archive_restore_clears_destination_for_absent_prefix() {
   std::filesystem::remove_all(base);
 }
 
+void test_backup_archive_bundles_and_restores_file_sources() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-file-source-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "saves");
+  std::filesystem::create_directories(base / "backups");
+  { std::ofstream(base / "saves" / "game.srm", std::ios::binary) << "srm"; }
+  { std::ofstream(base / "config.sav", std::ios::binary) << "settings v1"; }
+
+  // A file source archives as exactly one entry under its prefix, beside a directory source.
+  vsm::BackupRequest request;
+  request.backup_root = (base / "backups").string();
+  request.save_id = "RETROVITA";
+  request.timestamp = {2026, 7, 27, 10, 0, 0};
+  request.sources = {{"savefiles", (base / "saves").string()},
+                     {"config.sav", (base / "config.sav").string()}};
+  const vsm::BackupResult created = vsm::create_backup_archive(request);
+  EXPECT_TRUE(created.ok);
+  const std::vector<std::string> names = read_zip_central_directory_names(created.archive_path);
+  EXPECT_EQ(names.size(), static_cast<std::size_t>(2));
+  EXPECT_TRUE(std::find(names.begin(), names.end(), "config.sav/config.sav") != names.end());
+
+  // compute_sources_entries measures the file the same way, so dedup sees identical signatures.
+  bool entries_ok = false;
+  const std::vector<vsm::ArchiveEntryInfo> entries =
+      vsm::compute_sources_entries({{"savefiles", (base / "saves").string()},
+                                    {"config.sav", (base / "config.sav").string()}},
+                                   &entries_ok);
+  EXPECT_TRUE(entries_ok);
+  EXPECT_TRUE(vsm::entries_match_backup_archive(entries, created.archive_path));
+
+  // Restore replaces the file's content without touching its siblings.
+  { std::ofstream(base / "config.sav", std::ios::binary) << "settings v2 much longer"; }
+  { std::ofstream(base / "bystander.txt", std::ios::binary) << "untouched"; }
+  vsm::RestoreRequest restore;
+  restore.archive_path = created.archive_path;
+  restore.targets = {{"savefiles", (base / "saves").string()},
+                     {"config.sav", (base / "config.sav").string(), true}};
+  EXPECT_TRUE(vsm::restore_backup_archive(restore).ok);
+  {
+    std::ifstream in(base / "config.sav", std::ios::binary);
+    std::string content((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+    EXPECT_EQ(content, "settings v1");
+  }
+  EXPECT_TRUE(std::filesystem::exists(base / "bystander.txt"));
+
+  // A file target whose prefix is absent from the archive mirrors the backup: the live file goes.
+  vsm::BackupRequest without = request;
+  without.sources = {{"savefiles", (base / "saves").string()}};
+  without.archive_name = "2026-07-27 10-00-01.zip";
+  const vsm::BackupResult second = vsm::create_backup_archive(without);
+  EXPECT_TRUE(second.ok);
+  vsm::RestoreRequest mirror;
+  mirror.archive_path = second.archive_path;
+  mirror.targets = {{"savefiles", (base / "saves").string()},
+                    {"config.sav", (base / "config.sav").string(), true}};
+  EXPECT_TRUE(vsm::restore_backup_archive(mirror).ok);
+  EXPECT_TRUE(!std::filesystem::exists(base / "config.sav"));
+  std::filesystem::remove_all(base);
+}
+
 void test_sources_entries_carry_prefixes_for_dedup() {
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() / "save-keeper-sources-entries-test";
@@ -3304,6 +3372,7 @@ int main() {
   test_backup_archive_zips_multiple_sources_under_prefixes();
   test_backup_archive_restores_prefixes_to_mapped_directories_only();
   test_backup_archive_restore_clears_destination_for_absent_prefix();
+  test_backup_archive_bundles_and_restores_file_sources();
   test_sources_entries_carry_prefixes_for_dedup();
   test_backup_archive_rejects_misconfigured_tracked_paths();
   test_sync_plan_decides_backup_and_upload_per_game();
