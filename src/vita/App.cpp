@@ -646,14 +646,17 @@ bool App::drain_pending_time_read() {
     return false;
   }
   // The focused save is the one showing a spinner, so it is read first however long the queue
-  // behind it is; the rest follow in the order they were passed over.
+  // behind it is; after it, the most recently passed saves come before older ones.
   const std::string focused_id =
       visible_saves_.empty()
           ? std::string()
           : saves_[visible_saves_[selected_save_ % visible_saves_.size()]].id;
   auto next = std::find(pending_time_reads_.begin(), pending_time_reads_.end(), focused_id);
   if (next == pending_time_reads_.end()) {
-    next = pending_time_reads_.begin();
+    // Most recently passed first, not oldest first: after a sweep the newest entries are the
+    // saves sitting right next to the cursor, so stepping back finds them already resolved.
+    // Oldest-first spent the same reads on the sweep's distant starting point instead.
+    next = pending_time_reads_.end() - 1;
   }
   const std::string save_id = *next;
   pending_time_reads_.erase(next);

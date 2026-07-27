@@ -225,9 +225,10 @@ private:
   // database stamp is. Loaded once at startup; flushed after each resolve batch and rebuild.
   SaveIndex save_index_;
   bool save_index_dirty_{};
-  // Save ids whose mount-only time is still unread, in the order they were focused. Each is read
-  // one at a time (mounts must stay sequential) while the pad is idle, so scrolling past a row of
-  // encrypted saves stays smooth and every one of them keeps its spinner until its turn comes.
+  // Save ids whose mount-only time is still unread, in the order they were focused; reads take
+  // the focused save first and then the newest entries, since those sit next to the cursor. Each
+  // is read one at a time (mounts must stay sequential) while the pad is idle, so scrolling past
+  // a row of encrypted saves stays smooth and each keeps its spinner until its turn comes.
   std::vector<std::string> pending_time_reads_;
   // Frames since the last button. The drain waits for a short idle gap so a read never starts
   // under a press that is about to move the selection.
