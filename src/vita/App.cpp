@@ -3988,15 +3988,16 @@ void App::browser_toggle_selected() {
     browser_exclude_selected(full_path);
     return;
   }
-  // Nesting the other way: this folder contains one that is already included, so its tree would be
-  // archived twice and restored twice. Refused rather than silently merged.
+  // A folder that wraps a path some other entry includes stays refused: absorbing it would
+  // silently edit an entry the user is not looking at. This entry's own nested paths are handled
+  // below - the parent absorbs them.
   for (const SaveRecord &save : saves_) {
+    if (save.id == browser.entry_id) {
+      continue;
+    }
     for (const TrackedPath &extra : save.extra_paths) {
       if (path_is_inside(extra.path, full_path)) {
-        set_status(StatusKind::Info,
-                   save.id == browser.entry_id
-                       ? "A path inside is already included - exclude it first."
-                       : "A path inside is backed up by another entry.");
+        set_status(StatusKind::Info, "A path inside is backed up by another entry.");
         return;
       }
     }
@@ -4056,6 +4057,14 @@ void App::browser_toggle_selected() {
       break;
     }
   }
+  // Including a parent absorbs this entry's own paths nested anywhere inside it - they are backed
+  // up through the parent from now on, so they leave the set instead of blocking the include (the
+  // reloaded rows show them as covered). Their prefixes free up with them.
+  new_paths.erase(std::remove_if(new_paths.begin(), new_paths.end(),
+                                 [&full_path](const TrackedPath &path) {
+                                   return path_is_inside(path.path, full_path);
+                                 }),
+                  new_paths.end());
   for (const TrackedPath &path : new_paths) {
     taken_prefixes.insert(path.prefix);
   }
