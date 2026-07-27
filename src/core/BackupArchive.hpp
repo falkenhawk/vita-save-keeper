@@ -142,6 +142,10 @@ std::vector<ArchiveEntryInfo> compute_folder_entries(
 // the "nothing to back up" decision belongs to the caller).
 std::vector<ArchiveEntryInfo> compute_sources_entries(const std::vector<BackupSource> &sources,
                                                       bool *ok);
+// Entry list (relative path, CRC32, uncompressed size) from an archive's central directory,
+// read without decompressing anything. False when the file is not one of our readable ZIPs.
+bool read_archive_central_directory(const std::string &archive_path,
+                                    std::vector<ArchiveEntryInfo> *out);
 // True when the archive's central directory lists exactly the given entries.
 bool entries_match_backup_archive(const std::vector<ArchiveEntryInfo> &folder_entries,
                                   const std::string &archive_path);

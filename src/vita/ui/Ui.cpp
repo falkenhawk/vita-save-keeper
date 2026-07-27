@@ -1136,22 +1136,17 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
 
   // Real slot metadata always wins this column - hiding it because the entry also has data folders
   // would suppress genuine save information. The folder list only stands in when there are no
-  // slots to show, which is the normal case for data-folder homebrew.
+  // slots to show, which is the normal case for data-folder homebrew - and it lives entirely in
+  // the right pane, so this column simply ends at the summary card then.
   const bool show_folders = state.metadata.slots.empty() && !state.extra_paths.empty();
   const int slots_heading_y = 72 + card_h + 24;
   const int slots_list_y = slots_heading_y + 12;
-  draw_text(fonts_, 18, slots_heading_y, kColorMuted, kTextSizeTiny,
-            show_folders ? "DATA FOLDERS" : "SLOTS");
-  if (show_folders) {
-    // The paths themselves render in the metadata pane on the right; this column just echoes how
-    // many there are, keeping the same empty look a slotless save already has here.
-    const std::string count = state.extra_paths.size() == 1
-                                   ? "1 folder"
-                                   : std::to_string(state.extra_paths.size()) + " folders";
-    draw_text(fonts_, 34, slots_list_y + 22, kColorMuted, kTextSizeSmall, count.c_str());
-  } else if (state.metadata.slots.empty()) {
+  if (!show_folders) {
+    draw_text(fonts_, 18, slots_heading_y, kColorMuted, kTextSizeTiny, "SLOTS");
+  }
+  if (!show_folders && state.metadata.slots.empty()) {
     draw_text(fonts_, 34, slots_list_y + 22, kColorMuted, kTextSizeSmall, "No slot details");
-  } else {
+  } else if (!state.metadata.slots.empty()) {
     // Fit as many slot rows as the space between the summary card and the footer allows. Rows are
     // 36 tall on a 42 pitch and the footer starts at 508, so the last top must satisfy
     // y + 36 <= 508, giving (514 - slots_list_y) / 42 rows; 7 is the no-stats parity cap.
@@ -1185,12 +1180,23 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
     // Same origin as the "no slot metadata" fallback this replaces, styled as a small label like
     // the pane's other labeled blocks (TITLE/SUBTITLE/DETAILS) rather than that fallback's big
     // heading: a homebrew data folder has no sdslot metadata, so this explains what is backed up
-    // instead of reporting the absence as a problem. A handful of paths always fits on screen, so
-    // this never scrolls (details_max_scroll returns 0 then).
+    // instead of reporting the absence as a problem. Each folder carries the bytes it holds (in
+    // the live save, or inside the inspected backup) when they could be read. A handful of paths
+    // always fits on screen, so this never scrolls (details_max_scroll returns 0 then).
     draw_text(fonts_, kRightX, 116, kColorMuted, kTextSizeTiny, "DATA FOLDERS");
     for (std::size_t i = 0; i < state.extra_paths.size() && i < 14; ++i) {
-      draw_text(fonts_, kRightX, 142 + static_cast<int>(i) * 24, kColorText, kTextSizeSmall,
-                fit_text_left(kTextSizeSmall, state.extra_paths[i], kRightTextWidth).c_str());
+      const SlotDetailsState::DetailsFolder &folder = state.extra_paths[i];
+      const int y = 142 + static_cast<int>(i) * 24;
+      int path_max = kRightTextWidth;
+      if (folder.bytes_known) {
+        const std::string size_text = format_bytes(folder.bytes);
+        const int size_w = measure_text(kTextSizeSmall, size_text.c_str());
+        draw_text(fonts_, kRightX + kRightTextWidth - size_w, y, kColorMuted, kTextSizeSmall,
+                  size_text.c_str());
+        path_max = kRightTextWidth - size_w - 16;
+      }
+      draw_text(fonts_, kRightX, y, kColorText, kTextSizeSmall,
+                fit_text_left(kTextSizeSmall, folder.path, path_max).c_str());
     }
   } else if (state.metadata.slots.empty()) {
     const std::string heading = state.unavailable_message.empty()

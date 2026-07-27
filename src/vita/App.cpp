@@ -3007,9 +3007,10 @@ void App::open_save_details() {
   slot_details_.data_folders_row = data_folders_row_focused();
   // Shared by both branches below (the live row and a snapshot describe the same entry), so the
   // details screen can list the extra folders regardless of which one is inspected. Left empty by
-  // the reset above for every entry that has none.
+  // the reset above for every entry that has none; a snapshot with its own sidecar record
+  // replaces this with what the archive actually holds, further down.
   for (const TrackedPath &extra : save.extra_paths) {
-    slot_details_.extra_paths.push_back(extra.path);
+    slot_details_.extra_paths.push_back({extra.path, 0, false});
   }
   if (!selected_row) {
     // "New Backup" represents the live save. Resolve its details directly without creating an
@@ -3050,12 +3051,24 @@ void App::open_save_details() {
     } else {
       std::uint64_t total = 0;
       bool any_ok = false;
-      for (const std::string &path : save_path_list(save)) {
+      if (!save.path.empty()) {
         bool path_ok = false;
-        const std::uint64_t bytes = compute_folder_size(path, &path_ok);
+        const std::uint64_t bytes = compute_folder_size(save.path, &path_ok);
         if (path_ok) {
           total += bytes;
           any_ok = true;
+        }
+      }
+      // Each extra folder is measured on its own so the folder list can print per-folder sizes;
+      // the total still sums savedata and every extra, which is what the next backup would hold.
+      for (std::size_t i = 0; i < save.extra_paths.size(); ++i) {
+        bool path_ok = false;
+        const std::uint64_t bytes = compute_folder_size(save.extra_paths[i].path, &path_ok);
+        if (path_ok) {
+          total += bytes;
+          any_ok = true;
+          slot_details_.extra_paths[i].bytes = bytes;
+          slot_details_.extra_paths[i].bytes_known = true;
         }
       }
       if (any_ok) {
@@ -3130,6 +3143,38 @@ void App::open_save_details() {
 
   if (usable_metadata) {
     slot_details_.metadata = std::move(metadata.metadata);
+    if (!slot_details_.metadata.tracked_targets.empty()) {
+      // A snapshot lists the folders its own sidecar recorded - what the archive actually holds -
+      // not the entry's current set, which may have changed since the backup was made. Per-folder
+      // sizes come from the archive's central directory, summed under each target's prefix; a
+      // Cloud-only copy has no local file to read, so its paths list without sizes.
+      slot_details_.extra_paths.clear();
+      for (const TrackedPath &target : slot_details_.metadata.tracked_targets) {
+        slot_details_.extra_paths.push_back({target.path, 0, false});
+      }
+      std::vector<ArchiveEntryInfo> archive_entries;
+      if (row.has_local() &&
+          read_archive_central_directory(
+              local_backup_archive_path(kBackupRoot, save.id, row.local_name),
+              &archive_entries)) {
+        for (std::size_t i = 0; i < slot_details_.metadata.tracked_targets.size(); ++i) {
+          const std::string &prefix = slot_details_.metadata.tracked_targets[i].prefix;
+          if (prefix.empty()) {
+            continue;
+          }
+          std::uint64_t bytes = 0;
+          for (const ArchiveEntryInfo &entry : archive_entries) {
+            if (entry.path.size() > prefix.size() + 1 &&
+                entry.path.compare(0, prefix.size(), prefix) == 0 &&
+                entry.path[prefix.size()] == '/') {
+              bytes += entry.size;
+            }
+          }
+          slot_details_.extra_paths[i].bytes = bytes;
+          slot_details_.extra_paths[i].bytes_known = true;
+        }
+      }
+    }
   } else {
     // Old Save Keeper ZIPs used backup creation time in their names and entry headers, so neither
     // is evidence of when the game was saved. Leave the time unknown instead of presenting it as

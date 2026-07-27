@@ -58,10 +58,17 @@ struct SlotDetailsState {
   // True when details was opened with the "Data folders" row focused. The screen still shows the
   // live save (that row is not a snapshot), but the footer offers the picker instead of a backup.
   bool data_folders_row{};
-  // The entry's extra ux0:data folders (SaveRecord.extra_paths, path only). A data folder has no
-  // sdslot metadata, so when this is non-empty the renderer lists these alongside the slot table
-  // rather than falling back to "no readable slot metadata". Empty for every entry with none.
-  std::vector<std::string> extra_paths;
+  // The entry's extra ux0:data folders. For the live save these are the entry's current folders
+  // with sizes measured from the card; for a snapshot they are what its sidecar recorded, sized
+  // from the archive itself. A data folder has no sdslot metadata, so when this is non-empty the
+  // renderer lists these rather than falling back to "no readable slot metadata". Empty for every
+  // entry with none; bytes_known false when the folder or archive could not be read.
+  struct DetailsFolder {
+    std::string path;
+    std::uint64_t bytes{};
+    bool bytes_known{};
+  };
+  std::vector<DetailsFolder> extra_paths;
 };
 
 // Modal picker for a homebrew entry's data folders. Confined to "ux0:data" and never climbs above
