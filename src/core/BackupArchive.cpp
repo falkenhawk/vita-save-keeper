@@ -687,7 +687,7 @@ bool extract_archive_to_directory(
 
 // Recursively sums the byte size of every regular file under a directory. Returns false when the
 // directory (or a subdirectory) could not be opened, but still adds whatever it did read.
-bool add_directory_size(const std::string &path, std::uint64_t *total) {
+bool add_directory_size(const std::string &path, std::uint64_t *total, std::size_t *files) {
   DIR *dir = opendir(path.c_str());
   if (!dir) {
     return false;
@@ -704,11 +704,14 @@ bool add_directory_size(const std::string &path, std::uint64_t *total) {
       continue;
     }
     if (S_ISDIR(info.st_mode)) {
-      if (!add_directory_size(child, total)) {
+      if (!add_directory_size(child, total, files)) {
         ok = false;
       }
     } else if (S_ISREG(info.st_mode)) {
       *total += static_cast<std::uint64_t>(info.st_size);
+      if (files) {
+        ++*files;
+      }
     }
   }
   closedir(dir);
@@ -908,7 +911,7 @@ std::vector<ArchiveEntryInfo> compute_folder_entries(
   std::uint64_t last_reported = 0;
   std::function<void(std::size_t)> on_bytes;
   if (progress) {
-    add_directory_size(folder_path, &total_bytes);
+    add_directory_size(folder_path, &total_bytes, nullptr);
     progress(0, total_bytes);
     on_bytes = [&](std::size_t chunk) {
       hashed += chunk;
@@ -1053,9 +1056,13 @@ bool entries_match_backup_archive(const std::vector<ArchiveEntryInfo> &folder_en
   return true;
 }
 
-std::uint64_t compute_folder_size(const std::string &folder_path, bool *ok) {
+std::uint64_t compute_folder_size(const std::string &folder_path, bool *ok,
+                                  std::size_t *file_count) {
   std::uint64_t total = 0;
-  const bool walked = add_directory_size(folder_path, &total);
+  if (file_count) {
+    *file_count = 0;
+  }
+  const bool walked = add_directory_size(folder_path, &total, file_count);
   if (ok) {
     *ok = walked;
   }

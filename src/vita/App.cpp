@@ -3077,7 +3077,7 @@ void App::open_save_details() {
   // the reset above for every entry that has none; a snapshot with its own sidecar record
   // replaces this with what the archive actually holds, further down.
   for (const TrackedPath &extra : save.extra_paths) {
-    slot_details_.extra_paths.push_back({extra.path, 0, false});
+    slot_details_.extra_paths.push_back({extra.path, 0, false, extra.is_file, 0});
   }
   if (!selected_row) {
     // "New Backup" represents the live save. Resolve its details directly without creating an
@@ -3131,19 +3131,21 @@ void App::open_save_details() {
       for (std::size_t i = 0; i < save.extra_paths.size(); ++i) {
         bool path_ok = false;
         std::uint64_t bytes = 0;
+        std::size_t files = 0;
         if (save.extra_paths[i].is_file) {
           struct stat file_info {};
           path_ok = stat(save.extra_paths[i].path.c_str(), &file_info) == 0 &&
                     S_ISREG(file_info.st_mode);
           bytes = path_ok ? static_cast<std::uint64_t>(file_info.st_size) : 0;
         } else {
-          bytes = compute_folder_size(save.extra_paths[i].path, &path_ok);
+          bytes = compute_folder_size(save.extra_paths[i].path, &path_ok, &files);
         }
         if (path_ok) {
           total += bytes;
           any_ok = true;
           slot_details_.extra_paths[i].bytes = bytes;
           slot_details_.extra_paths[i].bytes_known = true;
+          slot_details_.extra_paths[i].files = files;
         }
       }
       if (any_ok) {
@@ -3225,7 +3227,7 @@ void App::open_save_details() {
       // Cloud-only copy has no local file to read, so its paths list without sizes.
       slot_details_.extra_paths.clear();
       for (const TrackedPath &target : slot_details_.metadata.tracked_targets) {
-        slot_details_.extra_paths.push_back({target.path, 0, false});
+        slot_details_.extra_paths.push_back({target.path, 0, false, target.is_file, 0});
       }
       std::vector<ArchiveEntryInfo> archive_entries;
       if (row.has_local() &&
@@ -3238,15 +3240,18 @@ void App::open_save_details() {
             continue;
           }
           std::uint64_t bytes = 0;
+          std::size_t files = 0;
           for (const ArchiveEntryInfo &entry : archive_entries) {
             if (entry.path.size() > prefix.size() + 1 &&
                 entry.path.compare(0, prefix.size(), prefix) == 0 &&
                 entry.path[prefix.size()] == '/') {
               bytes += entry.size;
+              ++files;
             }
           }
           slot_details_.extra_paths[i].bytes = bytes;
           slot_details_.extra_paths[i].bytes_known = true;
+          slot_details_.extra_paths[i].files = files;
         }
       }
     }

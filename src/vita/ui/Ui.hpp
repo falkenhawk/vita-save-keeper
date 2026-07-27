@@ -67,6 +67,10 @@ struct SlotDetailsState {
     std::string path;
     std::uint64_t bytes{};
     bool bytes_known{};
+    // Set for folder paths whenever bytes are (the same walk yields both); a single-file path
+    // shows its size alone.
+    bool is_file{};
+    std::size_t files{};
   };
   std::vector<DetailsFolder> extra_paths;
 };

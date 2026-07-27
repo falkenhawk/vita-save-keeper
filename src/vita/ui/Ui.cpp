@@ -1192,7 +1192,13 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
       const int y = 124 + static_cast<int>(i) * 24;
       int path_max = kRightTextWidth;
       if (folder.bytes_known) {
-        const std::string size_text = format_bytes(folder.bytes);
+        // Folder paths report what the walk (or the archive) counted alongside the bytes; a
+        // single-file path's size already says everything.
+        std::string size_text = format_bytes(folder.bytes);
+        if (!folder.is_file) {
+          size_text = std::to_string(folder.files) + (folder.files == 1 ? " file, " : " files, ") +
+                      size_text;
+        }
         const int size_w = measure_text(kTextSizeSmall, size_text.c_str());
         draw_text(fonts_, kRightX + kRightTextWidth - size_w, y, kColorMuted, kTextSizeSmall,
                   size_text.c_str());
@@ -1388,7 +1394,7 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
       const int text_y = y + 22;
       if (row.parent_link) {
         // The way up: no size, no marker, just the conventional name, aligned with the others.
-        draw_text(fonts_, kListX + 64, text_y, focused ? kColorText : kColorMuted, kTextSizeSmall,
+        draw_text(fonts_, kListX + 39, text_y, focused ? kColorText : kColorMuted, kTextSizeSmall,
                   "..");
         y += kRowPitch;
         continue;
@@ -1443,9 +1449,11 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
       }
       const unsigned int name_color =
           row.tracked_elsewhere ? kColorIdleDot : (focused ? kColorText : kColorMuted);
-      // Folder rows carry a small folder glyph between the mark and the name; a file row's empty
-      // cell is what says "file" without any extra label. Tinted like the name so the pair reads
-      // as one item.
+      // Folder rows carry a small folder glyph between the mark and the name; file rows (and
+      // "..") have none and their text starts where the glyph would, so the indent itself says
+      // "file". Pens sit 1px left of the intended ink: the glyph column's ink starts at
+      // kListX+40 and the balanced ink gap on both sides of the glyph is 8px, measured on a
+      // hardware capture. Tinted like the name so the pair reads as one item.
       if (!row.is_file) {
         if (folder_small_tex_) {
           vita2d_draw_texture_tint(folder_small_tex_, static_cast<float>(kListX + 40),
@@ -1454,7 +1462,7 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
           draw_folder_glyph(kListX + 54, y + 10, name_color);
         }
       }
-      const int name_x = kListX + 64;
+      const int name_x = row.is_file ? kListX + 39 : kListX + 63;
       const int name_max = kSizeRight - right_w - 16 - name_x;
       const std::string name = fit_text(kTextSizeSmall, row.name, std::max(40, name_max));
       draw_text(fonts_, name_x, text_y, name_color, kTextSizeSmall, name.c_str());
