@@ -743,6 +743,7 @@ bool Ui::initialize() {
   cloud_drive_only_tex_ = vita2d_load_PNG_file("app0:sce_sys/resources/cloud-drive-only.png");
   cloud_local_only_tex_ = vita2d_load_PNG_file("app0:sce_sys/resources/cloud-local-only.png");
   folder_edit_tex_ = vita2d_load_PNG_file("app0:sce_sys/resources/folder-edit.png");
+  folder_small_tex_ = vita2d_load_PNG_file("app0:sce_sys/resources/folder-small.png");
   mark_available_tex_ = vita2d_load_PNG_file("app0:sce_sys/resources/mark-available.png");
   mark_included_tex_ = vita2d_load_PNG_file("app0:sce_sys/resources/mark-included.png");
   mark_covered_tex_ = vita2d_load_PNG_file("app0:sce_sys/resources/mark-covered.png");
@@ -761,8 +762,8 @@ void Ui::shutdown() {
     cloud_drive_only_tex_ = nullptr;
   }
   for (vita2d_texture **texture :
-       {&folder_edit_tex_, &mark_available_tex_, &mark_included_tex_, &mark_covered_tex_,
-        &mark_inuse_tex_}) {
+       {&folder_edit_tex_, &folder_small_tex_, &mark_available_tex_, &mark_included_tex_,
+        &mark_covered_tex_, &mark_inuse_tex_}) {
     if (*texture) {
       vita2d_free_texture(*texture);
       *texture = nullptr;
@@ -1356,10 +1357,11 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
   constexpr int kListX = 24;
   constexpr int kListW = 912;  // spans 24..936
   // Condensed against the rest of the UI's 42px lists: mixed folder and file listings run long,
-  // and two extra rows on screen beat the extra air.
+  // and two extra rows on screen beat the extra air. Top offset centers the 432px block in the
+  // 456px between header rule (52) and footer (508), 12px of air each side.
   constexpr int kRowPitch = 36;
   constexpr int kRowH = 32;
-  constexpr int kListTop = 76;
+  constexpr int kListTop = 64;
   constexpr std::size_t kVisibleRows = 12;
   // Right edge the size/state text right-aligns against - a 24px inset from the row's own right
   // edge (kListX + kListW), not the row width itself. Derived so it cannot drift out of sync with
@@ -1386,7 +1388,7 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
       const int text_y = y + 22;
       if (row.parent_link) {
         // The way up: no size, no marker, just the conventional name, aligned with the others.
-        draw_text(fonts_, kListX + 34, text_y, focused ? kColorText : kColorMuted, kTextSizeSmall,
+        draw_text(fonts_, kListX + 64, text_y, focused ? kColorText : kColorMuted, kTextSizeSmall,
                   "..");
         y += kRowPitch;
         continue;
@@ -1441,7 +1443,18 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
       }
       const unsigned int name_color =
           row.tracked_elsewhere ? kColorIdleDot : (focused ? kColorText : kColorMuted);
-      const int name_x = kListX + 40;
+      // Folder rows carry a small folder glyph between the mark and the name; a file row's empty
+      // cell is what says "file" without any extra label. Tinted like the name so the pair reads
+      // as one item.
+      if (!row.is_file) {
+        if (folder_small_tex_) {
+          vita2d_draw_texture_tint(folder_small_tex_, static_cast<float>(kListX + 40),
+                                   static_cast<float>(y) + 10.0f, name_color);
+        } else {
+          draw_folder_glyph(kListX + 54, y + 10, name_color);
+        }
+      }
+      const int name_x = kListX + 64;
       const int name_max = kSizeRight - right_w - 16 - name_x;
       const std::string name = fit_text(kTextSizeSmall, row.name, std::max(40, name_max));
       draw_text(fonts_, name_x, text_y, name_color, kTextSizeSmall, name.c_str());

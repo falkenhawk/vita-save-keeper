@@ -141,6 +141,7 @@ else()
     FILE sce_sys/resources/cloud-local-only.png sce_sys/resources/cloud-local-only.png
     FILE sce_sys/resources/savedata-paths.json sce_sys/resources/savedata-paths.json
     FILE sce_sys/resources/folder-edit.png sce_sys/resources/folder-edit.png
+    FILE sce_sys/resources/folder-small.png sce_sys/resources/folder-small.png
     FILE sce_sys/resources/mark-available.png sce_sys/resources/mark-available.png
     FILE sce_sys/resources/mark-included.png sce_sys/resources/mark-included.png
     FILE sce_sys/resources/mark-covered.png sce_sys/resources/mark-covered.png

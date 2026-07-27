@@ -291,6 +291,7 @@ private:
   std::size_t browser_top_row_{};
   // Picker glyphs, loaded with the cloud set; primitive fallbacks cover a failed load.
   vita2d_texture *folder_edit_tex_{};
+  vita2d_texture *folder_small_tex_{};
   vita2d_texture *mark_available_tex_{};
   vita2d_texture *mark_included_tex_{};
   vita2d_texture *mark_covered_tex_{};
