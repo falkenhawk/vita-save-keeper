@@ -2651,6 +2651,22 @@ void test_tracked_metadata_takes_newest_observed_time_across_paths() {
   const vsm::SaveMetadata none = vsm::resolve_tracked_metadata(
       {(base / "missing").string()}, vsm::current_local_datetime());
   EXPECT_TRUE(!vsm::save_metadata_has_observed_time(none));
+
+  // Slot metadata only ever lives in the savedata path (the first one); the newest time may come
+  // from any other path without discarding the slot table on the way.
+  std::filesystem::create_directories(base / "a" / "sce_sys");
+  {
+    const std::vector<unsigned char> sdslot =
+        build_sdslot({{0, {2020, 1, 1, 0, 0, 0}, "Slot title", "", ""}});
+    std::ofstream out(base / "a" / "sce_sys" / "sdslot.dat", std::ios::binary);
+    out.write(reinterpret_cast<const char *>(sdslot.data()),
+              static_cast<std::streamsize>(sdslot.size()));
+  }
+  const vsm::SaveMetadata grafted = vsm::resolve_tracked_metadata(
+      {(base / "a").string(), (base / "b").string()}, vsm::current_local_datetime());
+  EXPECT_EQ(grafted.slots.size(), static_cast<std::size_t>(1));
+  EXPECT_EQ(static_cast<std::size_t>(vsm::save_datetime_to_local_epoch(grafted.saved_at)),
+            static_cast<std::size_t>(new_epoch));
   std::filesystem::remove_all(base);
 }
 

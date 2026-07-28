@@ -343,7 +343,8 @@ SaveMetadata resolve_tracked_metadata(const std::vector<std::string> &paths,
   if (paths.empty()) {
     return resolve_save_metadata("", backup_clock);
   }
-  SaveMetadata newest = resolve_save_metadata(paths.front(), backup_clock);
+  SaveMetadata first = resolve_save_metadata(paths.front(), backup_clock);
+  SaveMetadata newest = first;
   long long newest_epoch = save_datetime_to_local_epoch(newest.saved_at);
   for (std::size_t i = 1; i < paths.size(); ++i) {
     const SaveMetadata candidate = resolve_save_metadata(paths[i], backup_clock);
@@ -355,6 +356,12 @@ SaveMetadata resolve_tracked_metadata(const std::vector<std::string> &paths,
       newest = candidate;
       newest_epoch = candidate_epoch;
     }
+  }
+  // The time is the newest across every path, but slot metadata only ever comes from the savedata
+  // folder (paths.front()). Without this graft a fresher savestate would silently discard the
+  // slot table from the details screen.
+  if (newest.slots.empty() && !first.slots.empty()) {
+    newest.slots = std::move(first.slots);
   }
   return newest;
 }

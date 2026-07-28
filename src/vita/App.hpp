@@ -357,6 +357,10 @@ private:
     SaveDateTime backup_clock;
     bool allow_pfs_mount{};
     bool want_fingerprint{};
+    // Non-empty for an entry with extra paths: the worker resolves the newest time across these
+    // directories and files instead of mounting anything, and no fingerprint is taken - the
+    // result must stay out of the save index, whose fingerprints cover only savedata folders.
+    std::vector<std::string> tracked_paths;
     // Set for queued reads, which return to the main loop instead of waiting: the id the result
     // belongs to, and whether a restore made it stale before it landed.
     bool async{};

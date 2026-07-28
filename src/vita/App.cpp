@@ -788,8 +788,12 @@ int App::mount_worker_entry(unsigned int, void *argp) {
       continue;
     }
     MountWork &work = app->mount_work_;
-    work.metadata = resolve_live_metadata_on_mount_thread(
-        work.save_path, work.backup_clock, work.allow_pfs_mount, app->mount_bridge_ready_);
+    work.metadata =
+        work.tracked_paths.empty()
+            ? resolve_live_metadata_on_mount_thread(work.save_path, work.backup_clock,
+                                                    work.allow_pfs_mount,
+                                                    app->mount_bridge_ready_)
+            : resolve_tracked_metadata(work.tracked_paths, work.backup_clock);
     if (work.want_fingerprint) {
       // After the unmount, so bookkeeping the mount touched is part of the stored state and the
       // next scan sees an unchanged folder. Blocking here is free - this is not the main thread.
@@ -814,6 +818,7 @@ SaveMetadata App::resolve_live_save_metadata(const std::string &save_path,
   mount_work_.backup_clock = backup_clock;
   mount_work_.allow_pfs_mount = allow_pfs_mount;
   mount_work_.want_fingerprint = false;
+  mount_work_.tracked_paths.clear();
   mount_work_.async = false;
   mount_work_.discard = false;
   mount_work_state_.store(1);
@@ -828,9 +833,14 @@ SaveMetadata App::resolve_live_save_metadata(const std::string &save_path,
 
 void App::submit_async_save_time_read(const SaveRecord &save) {
   mount_work_.save_path = save.path;
-  mount_work_.backup_clock = {};
-  mount_work_.allow_pfs_mount = true;
-  mount_work_.want_fingerprint = true;
+  // An entry with extras resolves across all of its paths (no mount, no fingerprint); the wall
+  // clock stands in when nothing observable is found, same as the boot-time resolve.
+  mount_work_.tracked_paths =
+      save.extra_paths.empty() ? std::vector<std::string>() : save_path_list(save);
+  mount_work_.backup_clock =
+      save.extra_paths.empty() ? SaveDateTime{} : current_local_datetime();
+  mount_work_.allow_pfs_mount = save.extra_paths.empty();
+  mount_work_.want_fingerprint = save.extra_paths.empty();
   mount_work_.async = true;
   mount_work_.discard = false;
   mount_work_.async_save_id = save.id;
@@ -862,6 +872,12 @@ void App::complete_async_read(bool wait) {
         break;
       }
       const bool resolved = apply_mounted_save_time(&record, mount_work_.metadata);
+      if (!record.extra_paths.empty()) {
+        // A tracked read is complete here: no fingerprint was taken, and its time spans every
+        // path rather than the savedata folder alone, so it must stay out of the save index.
+        record.save_time_requires_mount = false;
+        break;
+      }
       // Same caching rule as the blocking path: skip when the bridge is down, that failure can
       // heal without the folder changing and those saves must retry next launch.
       if (mount_bridge_ready_) {
@@ -889,6 +905,13 @@ void App::complete_async_read(bool wait) {
 bool App::resolve_save_time(SaveRecord *save) {
   if (!save || !save->save_time_requires_mount) {
     return save && save->save_time_known;
+  }
+  if (!save->extra_paths.empty()) {
+    // Flagged pending by the picker's close pass: a plain walk over its paths, no mount, and
+    // never the save index (see complete_async_read).
+    resolve_data_folder_time(save);
+    save->save_time_requires_mount = false;
+    return save->save_time_known;
   }
   const SaveMetadata metadata =
       resolve_live_save_metadata(save->path, {}, true, mount_bridge_ready_);
@@ -3594,17 +3617,18 @@ void App::close_directory_browser() {
 
   // Path changes were applied to saves_ as they happened, but the entry's save time and the grid
   // order were deliberately left alone (a resolve is a full mtime walk - too slow per toggle).
-  // Settle both now, once, behind a busy frame - and only when this visit actually changed
-  // something: a browse-only visit costs nothing on the way out. Only the edited entry needs a
-  // resolve; every other entry's paths are exactly as the boot pass left them.
+  // When the visit changed something, the edited entry is marked pending and queued through the
+  // same async read the encrypted saves use: its row shows the spinner until the walk lands, and
+  // nothing blocks on the way out. A browse-only visit costs nothing at all.
   if (changed) {
-    ui_.draw_busy("Updating save times", 0, -1);
     for (SaveRecord &save : saves_) {
       if (save.id == entry_id && !save.extra_paths.empty()) {
-        resolve_data_folder_time(&save);
+        save.save_time_known = false;
+        save.save_time_requires_mount = true;
       }
     }
     apply_sort_and_rebuild();
+    queue_selected_save_time_read();
   }
 
   const SaveRecord *current = selected_save_record();
