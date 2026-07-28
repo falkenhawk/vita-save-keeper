@@ -130,6 +130,9 @@ struct DirectoryBrowserState {
   // Set by any successful include/exclude during this visit. The close pass re-resolves the
   // entry's save time and re-sorts only then; a browse-only visit exits instantly.
   bool changed{};
+  // True when the entry has a shipped base config and the current selection differs from it -
+  // the footer offers "L (hold) Restore Defaults" only then.
+  bool defaults_available{};
 };
 
 // Grid width of the save panel; D-pad up/down moves by one full row, so the input handler in App

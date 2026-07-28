@@ -107,6 +107,9 @@ private:
   bool save_data_folders_config();
   // The base entry for id, or null when there is none or none of its folders exist here.
   const TrackedFolderEntry *applicable_base_entry(const std::string &id) const;
+  // A held L in the picker: puts the entry back on its shipped base paths. The snap-back in
+  // update_data_folder_override then drops the override, so future base updates apply again.
+  void browser_restore_defaults();
   // Routes one UI change through update_data_folder_override + persistence + re-apply, so an entry
   // matching the shipped base again drops its override and follows future base updates. Stamps
   // modified; the Drive copy catches up at the next boot/refresh reconcile.

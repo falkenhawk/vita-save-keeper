@@ -3673,12 +3673,23 @@ void App::reload_browser_rows(bool keep_selection) {
   // not looking at.
   std::unordered_set<std::string> mine;
   std::unordered_set<std::string> others;
+  const SaveRecord *entry_record = nullptr;
   for (const SaveRecord &save : saves_) {
     const bool is_target = save.id == directory_browser_.entry_id;
+    if (is_target) {
+      entry_record = &save;
+    }
     for (const TrackedPath &extra : save.extra_paths) {
       (is_target ? mine : others).insert(extra.path);
     }
   }
+  // Restore Defaults is offered only while there is a shipped base for this entry and the current
+  // selection is not already exactly it.
+  const TrackedFolderEntry *base_entry = applicable_base_entry(directory_browser_.entry_id);
+  directory_browser_.defaults_available =
+      base_entry != nullptr &&
+      (entry_record == nullptr ||
+       !tracked_paths_equal(entry_record->extra_paths, base_entry->paths));
   // Re-tagging after a toggle must not move the cursor - the folder list is the same, only its
   // tags changed. Drilling in or out passes false and starts at the top. A size walk in flight is
   // left running: its result lands in the cache wherever the user is by then, and the sizing flag
@@ -4115,6 +4126,21 @@ void App::browser_toggle_selected() {
   clear_status();
 }
 
+void App::browser_restore_defaults() {
+  const TrackedFolderEntry *base_entry = applicable_base_entry(directory_browser_.entry_id);
+  if (!base_entry || !directory_browser_.defaults_available) {
+    return;
+  }
+  std::vector<TrackedPath> base_paths = base_entry->paths;
+  if (!set_entry_data_folders(directory_browser_.entry_id, directory_browser_.entry_name,
+                              std::move(base_paths))) {
+    return;
+  }
+  directory_browser_.changed = true;
+  reload_browser_rows(true);
+  set_status(StatusKind::Success, "Restored the built-in savedata paths.");
+}
+
 void App::browser_exclude_selected(const std::string &full_path) {
   const std::string entry_id = directory_browser_.entry_id;
   // Current folders come from the record - the effective set, base and overrides applied - so a
@@ -4150,10 +4176,10 @@ void App::browser_exclude_selected(const std::string &full_path) {
     return;
   }
   const bool dropping_entry = new_paths.empty();
-  directory_browser_.changed = true;
   if (!set_entry_data_folders(entry_id, directory_browser_.entry_name, std::move(new_paths))) {
     return;
   }
+  directory_browser_.changed = true;
   if (dropping_entry && row_is_config_only) {
     // Nothing but the config was holding this row up (guarded above: it has no backups), and
     // apply_tracked_folders only assigns extras - it never removes a record - so the ghost row
@@ -4617,6 +4643,10 @@ int App::run() {
   // trigger as the other hold gestures. (R toggles individually, on the press edge - no counter.)
   int batch_l_hold_frames = 0;
   bool batch_l_hold_consumed = false;
+  // L inside the picker: a tap jumps across included paths, a full hold restores the shipped
+  // base selection (offered only while the current set differs from it).
+  int browser_l_hold_frames = 0;
+  bool browser_l_hold_consumed = false;
   int network_poll_delay_frames = 0;
   while (running) {
     if (network_poll_delay_frames <= 0) {
@@ -4811,10 +4841,24 @@ int App::run() {
         schedule_browser_size_resolve();
       }
       bool rows_changed = false;
-      // L/R hop across the entry's included folders, wherever they live.
-      if ((pressed & SCE_CTRL_LTRIGGER) != 0) {
-        browser_jump_included(-1);
-        rows_changed = true;
+      // L/R hop across the entry's included paths, wherever they live. L splits tap/hold: the
+      // jump fires on a quick release, a full hold restores the shipped base selection.
+      if ((buttons & SCE_CTRL_LTRIGGER) != 0) {
+        ++browser_l_hold_frames;
+        if (!browser_l_hold_consumed && browser_l_hold_frames >= kSelectHoldTriggerFrames &&
+            browser.defaults_available) {
+          browser_l_hold_consumed = true;
+          browser_restore_defaults();
+          rows_changed = true;
+        }
+      } else {
+        if (browser_l_hold_frames > 0 && !browser_l_hold_consumed &&
+            browser_l_hold_frames < kSelectHoldTapFrames) {
+          browser_jump_included(-1);
+          rows_changed = true;
+        }
+        browser_l_hold_frames = 0;
+        browser_l_hold_consumed = false;
       }
       if (!rows_changed && (pressed & SCE_CTRL_RTRIGGER) != 0) {
         browser_jump_included(1);

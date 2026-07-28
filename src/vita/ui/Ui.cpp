@@ -1515,6 +1515,9 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
   if (state.included_count > 0) {
     hints.push_back({ButtonSymbol::TriggerLR, "Jump to Included", nullptr, nullptr});
   }
+  if (state.defaults_available) {
+    hints.push_back({ButtonSymbol::TriggerL, "Restore Defaults", "(hold)", nullptr});
+  }
   // Square toggles whether the folder is part of this entry's backup. Nothing on disk is created or
   // deleted by it, so the words are about inclusion, not about adding or removing folders. A folder
   // that is covered (a parent is included), in use by another entry, or the ".." link offers none.
