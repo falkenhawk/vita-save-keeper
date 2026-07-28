@@ -3095,6 +3095,7 @@ void App::open_save_details() {
   slot_details_ = {};
   slot_details_.game_title = save.display_name;
   slot_details_.data_folders_row = data_folders_row_focused();
+  slot_details_.entry_is_homebrew = classify_save(save) == SaveCategory::Homebrew;
   // Shared by both branches below (the live row and a snapshot describe the same entry), so the
   // details screen can list the extra folders regardless of which one is inspected. Left empty by
   // the reset above for every entry that has none; a snapshot with its own sidecar record
@@ -3176,6 +3177,8 @@ void App::open_save_details() {
         slot_details_.save_bytes_known = true;
       }
     }
+    slot_details_.selected_slot =
+        (!slot_details_.extra_paths.empty() && !slot_details_.metadata.slots.empty()) ? 1 : 0;
     slot_details_.open = true;
     return;
   }
@@ -3304,6 +3307,10 @@ void App::open_save_details() {
           "No readable save slot information was found in this backup.";
     }
   }
+  // Land on the first slot when there are slots (same as before the paths row existed), on the
+  // paths row otherwise.
+  slot_details_.selected_slot =
+      (!slot_details_.extra_paths.empty() && !slot_details_.metadata.slots.empty()) ? 1 : 0;
   slot_details_.open = true;
 }
 
@@ -4728,17 +4735,19 @@ int App::run() {
         sceKernelDelayThread(kFrameDelayUs);
         continue;
       }
-      if (!slot_details_.metadata.slots.empty()) {
+      const std::size_t detail_items =
+          (slot_details_.extra_paths.empty() ? 0u : 1u) + slot_details_.metadata.slots.size();
+      if (detail_items > 1) {
         if ((pressed & SCE_CTRL_UP) != 0) {
           slot_details_.selected_slot =
               slot_details_.selected_slot == 0
-                  ? slot_details_.metadata.slots.size() - 1
+                  ? detail_items - 1
                   : slot_details_.selected_slot - 1;
           slot_details_.details_scroll = 0;
         }
         if ((pressed & SCE_CTRL_DOWN) != 0) {
           slot_details_.selected_slot =
-              (slot_details_.selected_slot + 1) % slot_details_.metadata.slots.size();
+              (slot_details_.selected_slot + 1) % detail_items;
           slot_details_.details_scroll = 0;
         }
       }

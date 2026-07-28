@@ -38,6 +38,8 @@ struct SlotDetailsState {
   std::string game_title;
   std::string snapshot_name;
   SaveMetadata metadata;
+  // Selects across the left column's list: item 0 is the "Savedata Paths" row when the entry has
+  // any, the slot rows follow. The right pane renders whichever is selected.
   std::size_t selected_slot{};
   int details_scroll{};
   std::string unavailable_message;
@@ -58,6 +60,9 @@ struct SlotDetailsState {
   // True when details was opened with the "Savedata Paths" row focused. The screen still shows the
   // live save (that row is not a snapshot), but the footer offers the picker instead of a backup.
   bool data_folders_row{};
+  // Lets the no-slots explainer point homebrew at the Savedata Paths row; retail and PSP saves
+  // keep the plain explanation (paths are a homebrew feature).
+  bool entry_is_homebrew{};
   // The entry's extra ux0:data folders. For the live save these are the entry's current folders
   // with sizes measured from the card; for a snapshot they are what its sidecar recorded, sized
   // from the archive itself. A data folder has no sdslot metadata, so when this is non-empty the

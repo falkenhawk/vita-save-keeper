@@ -1049,13 +1049,14 @@ void Ui::draw_modal_backdrop() {
 }
 
 int Ui::details_max_scroll(const SlotDetailsState &state) const {
-  // Covers the data-folder list too: it only shows when there are no slots, and it is static (a
-  // handful of paths always fits in the metadata pane).
-  if (state.metadata.slots.empty()) {
+  // Only a slot's description scrolls. The savedata-paths view (item 0 when the entry has paths)
+  // is static - a handful of paths always fits in the metadata pane.
+  const std::size_t item_offset = state.extra_paths.empty() ? 0 : 1;
+  if (state.metadata.slots.empty() || state.selected_slot < item_offset) {
     return 0;
   }
   const std::size_t selected =
-      std::min(state.selected_slot, state.metadata.slots.size() - 1);
+      std::min(state.selected_slot - item_offset, state.metadata.slots.size() - 1);
   const std::string details = state.metadata.slots[selected].details.empty()
                                   ? "No description provided."
                                   : state.metadata.slots[selected].details;
@@ -1135,32 +1136,51 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
     }
   }
 
-  // Real slot metadata always wins this column - hiding it because the entry also has data folders
-  // would suppress genuine save information. The folder list only stands in when there are no
-  // slots to show, which is the normal case for data-folder homebrew - and it lives entirely in
-  // the right pane, so this column simply ends at the summary card then.
-  const bool show_folders = state.metadata.slots.empty() && !state.extra_paths.empty();
-  const int slots_heading_y = 72 + card_h + 24;
-  const int slots_list_y = slots_heading_y + 12;
-  if (!show_folders) {
-    draw_text(fonts_, 18, slots_heading_y, kColorMuted, kTextSizeTiny, "SLOTS");
+  // The column below the card is a selectable list: a "Savedata Paths (N)" row when the entry
+  // has any, then the slot rows. Up/down walks the whole list and the right pane follows, so
+  // slots and paths stop competing for one screen.
+  const bool paths_present = !state.extra_paths.empty();
+  const std::size_t item_offset = paths_present ? 1 : 0;
+  const std::size_t item_count = item_offset + state.metadata.slots.size();
+  const std::size_t selected_item =
+      item_count == 0 ? 0 : std::min(state.selected_slot, item_count - 1);
+  const bool paths_selected = paths_present && selected_item == 0;
+  const std::size_t selected_slot_index =
+      paths_selected || state.metadata.slots.empty() ? 0 : selected_item - item_offset;
+
+  int list_top = 72 + card_h + 16;
+  if (paths_present) {
+    vita2d_draw_rectangle(18, list_top, kLeftCardWidth, 36,
+                          paths_selected ? kColorAccentSoft : RGBA8(255, 255, 255, 10));
+    if (paths_selected) {
+      vita2d_draw_rectangle(18, list_top, 4, 36, kColorAccent);
+    }
+    const std::string paths_label =
+        "Savedata Paths (" + std::to_string(state.extra_paths.size()) + ")";
+    draw_text(fonts_, 32, list_top + 24, paths_selected ? kColorText : kColorMuted,
+              kTextSizeSmall, paths_label.c_str());
+    list_top += 36 + 16;
   }
-  if (!show_folders && state.metadata.slots.empty()) {
+  const int slots_heading_y = list_top + 8;
+  const int slots_list_y = slots_heading_y + 12;
+  draw_text(fonts_, 18, slots_heading_y, kColorMuted, kTextSizeTiny, "SLOTS");
+  if (state.metadata.slots.empty()) {
+    // The short version of "no readable slot information": with a paths row above (or the
+    // explainer in the right pane for entries with nothing at all), one muted line is enough.
     draw_text(fonts_, 34, slots_list_y + 22, kColorMuted, kTextSizeSmall, "No slot details");
-  } else if (!state.metadata.slots.empty()) {
+  } else {
     // Fit as many slot rows as the space between the summary card and the footer allows. Rows are
     // 36 tall on a 42 pitch and the footer starts at 508, so the last top must satisfy
     // y + 36 <= 508, giving (514 - slots_list_y) / 42 rows; 7 is the no-stats parity cap.
     const std::size_t visible_slots =
         static_cast<std::size_t>(std::max(1, std::min(7, (514 - slots_list_y) / 42)));
-    const std::size_t selected =
-        std::min(state.selected_slot, state.metadata.slots.size() - 1);
+    const std::size_t selected = selected_slot_index;
     const std::size_t top = selected >= visible_slots ? selected - visible_slots + 1 : 0;
     const std::size_t count =
         std::min(visible_slots, state.metadata.slots.size() - top);
     for (std::size_t i = 0; i < count; ++i) {
       const SaveSlotMetadata &slot = state.metadata.slots[top + i];
-      const bool focused = top + i == selected;
+      const bool focused = !paths_selected && top + i == selected;
       const int y = slots_list_y + static_cast<int>(i) * 42;
       vita2d_draw_rectangle(18, y, kLeftCardWidth, 36,
                             focused ? kColorAccentSoft : RGBA8(255, 255, 255, 10));
@@ -1177,7 +1197,7 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
     }
   }
 
-  if (show_folders) {
+  if (paths_selected) {
     // Same origin as the "no slot metadata" fallback this replaces, styled as a small label like
     // the pane's other labeled blocks (TITLE/SUBTITLE/DETAILS) rather than that fallback's big
     // heading: a homebrew data folder has no sdslot metadata, so this explains what is backed up
@@ -1213,6 +1233,12 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
                                     : state.unavailable_message;
     draw_text(fonts_, kRightX, 116, kColorText, kTextSizeTitle, heading.c_str());
     std::string explanation = state.warning_message;
+    if (explanation.empty() && state.entry_is_homebrew) {
+      // A homebrew entry with neither slots nor paths: point at the feature that would give its
+      // backups something to hold, instead of only reporting an absence.
+      explanation = "No readable save slot information was found. If this app saves under "
+                    "ux0:data, pick its folders or files from the Savedata Paths row.";
+    }
     if (explanation.empty()) {
       explanation = state.metadata.source == SaveTimeSource::Filesystem
                         ? "The backup has a save time, but no readable save slot information."
@@ -1225,9 +1251,7 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
                 lines[i].c_str());
     }
   } else {
-    const std::size_t selected =
-        std::min(state.selected_slot, state.metadata.slots.size() - 1);
-    const SaveSlotMetadata &slot = state.metadata.slots[selected];
+    const SaveSlotMetadata &slot = state.metadata.slots[selected_slot_index];
     // Echo the selected slot's number and time at the top of this pane (they are also in the left
     // list). When several slots share the same title/subtitle/details, this header is the only part
     // that visibly changes as you move between them, confirming the selection landed.
