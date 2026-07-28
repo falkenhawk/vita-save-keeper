@@ -26,6 +26,11 @@ bool is_retail_vita_title_id(const std::string &id) {
 
 } // namespace
 
+// Exploit saves live inside a real retail title's savedata - a retail-shaped id is the very
+// mechanism - but their content is homebrew tooling, and that is the tab where users look for
+// them. PCSG90096 is h-encore (and h-encore2), riding the "bitter smile" demo.
+bool is_exploit_save_id(const std::string &id) { return id == "PCSG90096"; }
+
 SaveCategory classify_save(const SaveRecord &save) {
   if (save.platform == SavePlatform::Psp) {
     return SaveCategory::Psp;
@@ -35,6 +40,9 @@ SaveCategory classify_save(const SaveRecord &save) {
     return SaveCategory::VitaGame;
   }
   const std::string &id = save.title_id.empty() ? save.id : save.title_id;
+  if (is_exploit_save_id(id)) {
+    return SaveCategory::Homebrew;
+  }
   return is_retail_vita_title_id(id) ? SaveCategory::VitaGame : SaveCategory::Homebrew;
 }
 

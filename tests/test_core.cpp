@@ -2310,6 +2310,12 @@ void test_save_category_classification() {
   title_id_wins.title_id = "PCSE00099";
   EXPECT_TRUE(vsm::classify_save(title_id_wins) == vsm::SaveCategory::VitaGame);
 
+  // h-encore's id is retail-shaped by design (the exploit lives in a real demo's savedata), so
+  // only the named exception can put it where users look for it.
+  vsm::SaveRecord exploit;
+  exploit.id = "PCSG90096";
+  EXPECT_TRUE(vsm::classify_save(exploit) == vsm::SaveCategory::Homebrew);
+
   vsm::SaveRecord card;
   card.platform = vsm::SavePlatform::GameCard;
   card.id = "WHATEVER1";
