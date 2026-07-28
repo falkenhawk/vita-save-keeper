@@ -110,6 +110,11 @@ private:
   // A held L in the picker: puts the entry back on its shipped base paths. The snap-back in
   // update_data_folder_override then drops the override, so future base updates apply again.
   void browser_restore_defaults();
+  // Include tail shared by the direct Square press and the deferred completion after a queued
+  // measurement; works from values because it reloads the row list. owning_entry_name feeds the
+  // "belongs to another entry" refusals with the actual app's name.
+  void browser_include_path(const std::string &full_path, std::uint64_t size_bytes, bool is_file);
+  std::string owning_entry_name(const std::string &path) const;
   // Routes one UI change through update_data_folder_override + persistence + re-apply, so an entry
   // matching the shipped base again drops its override and follows future base updates. Stamps
   // modified; the Drive copy catches up at the next boot/refresh reconcile.

@@ -3698,6 +3698,11 @@ void App::reload_browser_rows(bool keep_selection) {
   directory_browser_.rows.clear();
   directory_browser_.selected = 0;
   directory_browser_.large_confirm_pending = false;
+  if (!keep_selection) {
+    // Drilling in or out abandons a parked include - completing it against a list the user has
+    // already left would include something no longer on screen.
+    directory_browser_.pending_include_path.clear();
+  }
   if (directory_browser_.current_path != kUserDataRoot) {
     // A visible way up, on top where every file browser puts it; Cross on it climbs a level.
     DirectoryBrowserState::Row up;
@@ -3930,6 +3935,12 @@ void App::fill_browser_row_size(const std::string &path, std::uint64_t bytes) {
       row.size_bytes = bytes;
       row.size_known = true;
       row.sizing = false;
+      if (directory_browser_.pending_include_path == path) {
+        // The Square press that queued this measurement completes now (or turns into the
+        // large-folder question). Reloads inside invalidate `row`, so nothing touches it after.
+        directory_browser_.pending_include_path.clear();
+        browser_include_path(path, bytes, false);
+      }
       break;
     }
   }
@@ -4018,7 +4029,9 @@ void App::browser_toggle_selected() {
     return;
   }
   if (row.tracked_elsewhere) {
-    set_status(StatusKind::Info, "Already backed up by another entry.");
+    set_status(StatusKind::Info,
+               status_with_name("Already backed up by ", owning_entry_name(
+                                    browser.current_path + "/" + row.name), "."));
     return;
   }
   if (!row.covered_by.empty()) {
@@ -4026,40 +4039,77 @@ void App::browser_toggle_selected() {
     return;
   }
   const std::string full_path = browser.current_path + "/" + row.name;
+  if (browser.pending_include_path == full_path) {
+    // Square again while the measurement is still running: change of mind, the optimistic check
+    // flips back off. The walk keeps going - its result still lands in the size cache.
+    browser.pending_include_path.clear();
+    return;
+  }
   if (row.tracked_here) {
     browser_exclude_selected(full_path);
     return;
   }
+  if (!row.size_known) {
+    // The size caps need a measurement, but blocking on one here would flash the very modal the
+    // incremental walk exists to avoid. The checkbox flips optimistically right now (the mark
+    // reads pending_include_path); the measurement runs behind it and fill_browser_row_size
+    // finishes the real include the moment the total lands - or flips the mark back off with
+    // the over-the-cap status in the rare case the folder turns out huge. A hover walk on some
+    // other folder is abandoned so this one starts immediately.
+    browser.pending_include_path = full_path;
+    if (browser_size_walk_.active && browser_size_walk_.target != full_path) {
+      abort_browser_size_walk();
+    }
+    browser_size_queue_.erase(
+        std::remove(browser_size_queue_.begin(), browser_size_queue_.end(), full_path),
+        browser_size_queue_.end());
+    browser_size_queue_.insert(browser_size_queue_.begin(), full_path);
+    if (!browser_size_walk_.active) {
+      start_browser_size_walk();
+    }
+    refresh_browser_sizing_marks();
+    return;
+  }
+  browser_include_path(full_path, row.size_bytes, row.is_file);
+}
+
+// The name shown when a row (or a folder wrapping it) already belongs to some other entry's
+// backup - scanning at press time keeps the rows themselves lean.
+std::string App::owning_entry_name(const std::string &path) const {
+  for (const SaveRecord &save : saves_) {
+    if (save.id == directory_browser_.entry_id) {
+      continue;
+    }
+    for (const TrackedPath &extra : save.extra_paths) {
+      if (extra.path == path || path_is_inside(path, extra.path) ||
+          path_is_inside(extra.path, path)) {
+        return save.display_name;
+      }
+    }
+  }
+  return "another entry";
+}
+
+// The include tail, shared by the direct press (size already known) and the deferred completion
+// out of fill_browser_row_size. Works from values, not a row reference: completing an include
+// reloads the rows, which would invalidate any reference held across it.
+void App::browser_include_path(const std::string &full_path, std::uint64_t size_bytes,
+                               bool is_file) {
+  DirectoryBrowserState &browser = directory_browser_;
   // A folder that wraps a path some other entry includes stays refused: absorbing it would
-  // silently edit an entry the user is not looking at. This entry's own nested paths are handled
-  // below - the parent absorbs them.
+  // silently edit an entry the user is not looking at. This entry's own nested paths are
+  // absorbed further down instead.
   for (const SaveRecord &save : saves_) {
     if (save.id == browser.entry_id) {
       continue;
     }
     for (const TrackedPath &extra : save.extra_paths) {
       if (path_is_inside(extra.path, full_path)) {
-        set_status(StatusKind::Info, "A path inside is backed up by another entry.");
+        set_status(StatusKind::Info,
+                   status_with_name("A path inside is backed up by ",
+                                    save.display_name, "."));
         return;
       }
-    }
-  }
-  if (!row.size_known) {
-    // The debounce usually has this already; measure now otherwise, since the size caps below need
-    // it. A deliberate press gets the standard busy modal - the incremental walk exists so that
-    // *browsing* never blocks, but here the user asked for this folder specifically. A walk on the
-    // same folder is dropped (this measurement replaces it); one on another folder keeps going.
-    ui_.draw_busy("Measuring folder", 0, -1);
-    if (browser_size_walk_.active &&
-        browser_size_walk_.target == full_path) {
-      abort_browser_size_walk();
-    }
-    bool ok = false;
-    const std::uint64_t bytes = compute_folder_size(full_path, &ok);
-    if (ok) {
-      row.size_bytes = bytes;
-      row.size_known = true;
-      browser_size_cache_[full_path] = bytes;
     }
   }
   constexpr std::uint64_t kMebibyte = 1024ULL * 1024ULL;
@@ -4068,17 +4118,17 @@ void App::browser_toggle_selected() {
   // limits stay in MiB so ui_.format_size (1024-based) prints them back as exactly "64 MB"/"128 MB".
   constexpr std::uint64_t kMaxBackupBytes = 128ULL * kMebibyte;
   constexpr std::uint64_t kLargeFolderWarnBytes = 64ULL * kMebibyte;
-  if (row.size_known && row.size_bytes > kMaxBackupBytes) {
+  if (size_bytes > kMaxBackupBytes) {
     // The drill-in escape hatch only makes sense for a folder; an oversized file is simply out.
     set_status(StatusKind::Error,
                "Too large to back up (over " + ui_.format_size(kMaxBackupBytes) +
-                   (row.is_file ? ")." : ") - drill into the save subfolder."));
+                   (is_file ? ")." : ") - drill into the save subfolder."));
     return;
   }
-  if (row.size_known && row.size_bytes > kLargeFolderWarnBytes && !browser.large_confirm_pending) {
+  if (size_bytes > kLargeFolderWarnBytes && !browser.large_confirm_pending) {
     browser.large_confirm_pending = true;
-    set_status(StatusKind::Info, std::string(row.is_file ? "Large file (" : "Large folder (") +
-                                     ui_.format_size(row.size_bytes) +
+    set_status(StatusKind::Info, std::string(is_file ? "Large file (" : "Large folder (") +
+                                     ui_.format_size(size_bytes) +
                                      ") - press Square again to include it anyway.");
     return;
   }
@@ -4114,7 +4164,9 @@ void App::browser_toggle_selected() {
   // backup's restore mapping. make_extra_prefix also keeps "savedata" reserved for the entry's own
   // save folder. Re-including a base folder by hand regenerates the same prefix, which is what
   // lets the result compare equal to the base and drop the override.
-  new_paths.push_back({make_extra_prefix(row.name, taken_prefixes), full_path, row.is_file});
+  new_paths.push_back(
+      {make_extra_prefix(full_path.substr(full_path.rfind('/') + 1), taken_prefixes), full_path,
+       is_file});
   if (!set_entry_data_folders(entry_id, browser.entry_name, std::move(new_paths))) {
     return;
   }
@@ -4916,6 +4968,17 @@ int App::run() {
       browser_ui.directory_browser = &directory_browser_;
       browser_ui.status_message = status_message_;
       browser_ui.status_kind = status_kind_;
+      // The held L announces itself exactly like the overview's hold gestures: once past the tap
+      // window the status line explains what is coming and the gauge fills toward the trigger.
+      if (!browser_l_hold_consumed && browser_l_hold_frames >= kSelectHoldTapFrames &&
+          directory_browser_.defaults_available) {
+        browser_ui.hold_gauge_fraction = std::min(
+            1.0f, std::max(0.0f, static_cast<float>(browser_l_hold_frames - kSelectHoldTapFrames) /
+                                     static_cast<float>(kSelectHoldTriggerFrames -
+                                                        kSelectHoldTapFrames)));
+        browser_ui.status_message = "Keep holding to restore the built-in defaults";
+        browser_ui.status_kind = StatusKind::Info;
+      }
       ui_.draw(browser_ui);
       previous_buttons = buttons;
       sceKernelDelayThread(kFrameDelayUs);

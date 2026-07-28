@@ -133,6 +133,9 @@ struct DirectoryBrowserState {
   // True when the entry has a shipped base config and the current selection differs from it -
   // the footer offers "L (hold) Restore Defaults" only then.
   bool defaults_available{};
+  // A Square press on a row whose size is still being measured parks the wish here; the include
+  // completes when the walk delivers the total. Navigation away abandons it.
+  std::string pending_include_path;
 };
 
 // Grid width of the save panel; D-pad up/down moves by one full row, so the input handler in App
@@ -269,7 +272,8 @@ private:
   // The directory-picker modal; takes the shared status line the same way draw_slot_details does so
   // the track action's feedback (already tracked, too large, large-folder confirmation) shows here.
   void draw_directory_browser(const DirectoryBrowserState &state, bool enter_is_cross,
-                              const std::string &status_message, StatusKind status_kind);
+                              const std::string &status_message, StatusKind status_kind,
+                              float hold_gauge_fraction);
   int measure_text(unsigned int size, const char *text) const;
   std::string fit_text(unsigned int size, const std::string &text, int max_width) const;
   // Ellipsizes from the left ("...ata/retroarch") so a long path keeps its trailing leaf visible,

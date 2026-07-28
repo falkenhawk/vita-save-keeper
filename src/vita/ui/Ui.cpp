@@ -980,7 +980,7 @@ void Ui::draw(const UiState &state) {
 
   if (state.directory_browser && state.directory_browser->open) {
     draw_directory_browser(*state.directory_browser, state.enter_is_cross, state.status_message,
-                           state.status_kind);
+                           state.status_kind, state.hold_gauge_fraction);
   } else if (state.slot_details && state.slot_details->open) {
     draw_slot_details(*state.slot_details, state.enter_is_cross, state.status_message,
                       state.status_kind, state.restore_confirmation_pending,
@@ -1031,7 +1031,8 @@ void Ui::draw_modal_backdrop() {
   }
   if (last_state_.directory_browser && last_state_.directory_browser->open) {
     draw_directory_browser(*last_state_.directory_browser, last_state_.enter_is_cross,
-                           last_state_.status_message, last_state_.status_kind);
+                           last_state_.status_message, last_state_.status_kind,
+                           last_state_.hold_gauge_fraction);
   } else if (last_state_.slot_details && last_state_.slot_details->open) {
     draw_slot_details(*last_state_.slot_details, last_state_.enter_is_cross,
                       last_state_.status_message, last_state_.status_kind,
@@ -1364,7 +1365,8 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
 }
 
 void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_is_cross,
-                                const std::string &status_message, StatusKind status_kind) {
+                                const std::string &status_message, StatusKind status_kind,
+                                float hold_gauge_fraction) {
   // Header band matching the details screen; the current path sits at the right, ellipsized from
   // the left so the folder you are inside stays legible at its trailing end.
   vita2d_draw_rectangle(0, 0, 960, 52, kColorHeader);
@@ -1443,7 +1445,12 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
       // the list - and Square literally toggles it. Hollow = available, checked green = included
       // here, dim green = covered by an included parent (Square explains), grey = another entry's.
       FolderMark mark = FolderMark::Available;
-      if (row.tracked_here) {
+      // A parked include (measurement still running) shows checked right away - optimistic, so
+      // the press never feels laggy; it flips back only if the size lands over the cap.
+      const bool pending_here =
+          !state.pending_include_path.empty() &&
+          state.pending_include_path == state.current_path + "/" + row.name;
+      if (row.tracked_here || pending_here) {
         mark = FolderMark::Included;
       } else if (!row.covered_by.empty()) {
         mark = FolderMark::Covered;
@@ -1512,11 +1519,14 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
       state.selected < state.rows.size() ? &state.rows[state.selected] : nullptr;
   const char *const close_label = state.return_to_details ? "Back" : "Close";
   std::vector<HintSpec> hints;
+  // Once the hold is underway the gauge and its status line carry this exact information, and
+  // the row is worth more as room for that text - the swap happens the same frame the status
+  // appears, so it reads as the hint turning into the announcement.
+  if (state.defaults_available && hold_gauge_fraction <= 0.0f) {
+    hints.push_back({ButtonSymbol::TriggerL, "Restore Defaults", "(hold)", nullptr});
+  }
   if (state.included_count > 0) {
     hints.push_back({ButtonSymbol::TriggerLR, "Jump to Included", nullptr, nullptr});
-  }
-  if (state.defaults_available) {
-    hints.push_back({ButtonSymbol::TriggerL, "Restore Defaults", "(hold)", nullptr});
   }
   // Square toggles whether the folder is part of this entry's backup. Nothing on disk is created or
   // deleted by it, so the words are about inclusion, not about adding or removing folders. A folder
@@ -1544,7 +1554,7 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
 
   if (!status_message.empty()) {
     unsigned int color = kColorMuted;
-    if (state.large_confirm_pending) {
+    if (state.large_confirm_pending || hold_gauge_fraction > 0.0f) {
       color = kColorAccent;
     } else if (status_kind == StatusKind::Success) {
       color = kColorSuccess;
@@ -1553,6 +1563,13 @@ void Ui::draw_directory_browser(const DirectoryBrowserState &state, bool enter_i
     }
     draw_text(fonts_, 18, 531, color, kTextSizeSmall,
               fit_text(kTextSizeSmall, status_message, std::max(120, hints_left - 48)).c_str());
+  }
+  // Same affordance as the overview's hold gestures: the bar fills from the tap window to the
+  // trigger right under the explaining status text.
+  if (hold_gauge_fraction > 0.0f) {
+    const float fraction = std::min(1.0f, hold_gauge_fraction);
+    vita2d_draw_rectangle(18, 536, 300, 3, RGBA8(255, 255, 255, 24));
+    vita2d_draw_rectangle(18, 536, static_cast<int>(300.0f * fraction), 3, kColorAccent);
   }
 }
 
