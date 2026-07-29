@@ -4,7 +4,7 @@ All notable changes to Save Keeper are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.2.0] - 2026-07-29
 
 ### Added
 - back up homebrew saves in `ux0:data` - pick an app's savedata paths (folders or single files)

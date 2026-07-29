@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(save_keeper VERSION 1.1.1 LANGUAGES C CXX)
+project(save_keeper VERSION 1.2.0 LANGUAGES C CXX)
 
 if(NOT CMAKE_BUILD_TYPE)
   # An unset build type compiles without optimization: slower TLS/zip/QR work on the Vita CPU and
@@ -76,7 +76,7 @@ else()
 
   set(VITA_APP_NAME "Save Keeper")
   set(VITA_TITLEID "SVK000001")
-  set(VITA_VERSION "01.01")
+  set(VITA_VERSION "01.02")
 
   add_executable(save-keeper
     src/vita/App.cpp
