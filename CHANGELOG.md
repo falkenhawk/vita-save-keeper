@@ -4,6 +4,21 @@ All notable changes to Save Keeper are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.3.0-test1] - 2026-07-30
+
+### Added
+- initialize savedata from a backup for games that have never been played on this device - they
+  now show in the overview
+- delete a game's savedata to start it from scratch (hold Start on "New Backup") - a backup is
+  made first, so it stays restorable
+- a cloud badge on games whose newest Drive backup is newer than the local save (or when local save does not exist)
+- transfers show file sizes and can be canceled
+
+### Fixed
+- big downloads no longer fail partway - the time limit now grows with the file size
+- faster transfers and faster backup checks and creation
+- wifi no longer slows down or drops mid-transfer
+
 ## [1.2.0] - 2026-07-29
 
 ### Added
