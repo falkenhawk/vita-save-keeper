@@ -1905,19 +1905,21 @@ void test_restore_and_inspection_report_archive_byte_progress() {
   EXPECT_TRUE(backup.ok);
 
   // The writer reads every byte twice (hash pass, then write pass) but reports one continuous
-  // bar: a single zero start, one shared denominator of twice the content size, monotonic
-  // throughout, and a final report landing exactly on full.
+  // bar under the REAL content size - the modal prints the totals as byte captions now, so the
+  // internal two-pass budget must not leak. A single zero start, monotonic throughout, and a
+  // final report landing exactly on full.
   const std::uint64_t source_bytes = 10ULL * 64ULL * 1024ULL;
   std::size_t zero_starts = 0;
   for (std::size_t i = 0; i < create_reports.size(); ++i) {
     if (create_reports[i].first == 0) {
       ++zero_starts;
     }
-    EXPECT_TRUE(create_reports[i].second == 2 * source_bytes);
+    EXPECT_TRUE(create_reports[i].second == source_bytes);
+    EXPECT_TRUE(create_reports[i].first <= source_bytes);
     EXPECT_TRUE(i == 0 || create_reports[i - 1].first <= create_reports[i].first);
   }
   EXPECT_EQ(zero_starts, static_cast<std::size_t>(1));
-  EXPECT_TRUE(create_reports.back().first == 2 * source_bytes);
+  EXPECT_TRUE(create_reports.back().first == source_bytes);
 
   bool size_ok = false;
   const std::uint64_t archive_bytes = vsm::archive_file_size(backup.archive_path, &size_ok);

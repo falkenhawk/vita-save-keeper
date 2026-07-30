@@ -787,10 +787,12 @@ BackupResult create_backup_archive(const BackupRequest &request) {
 
   // The archive reads every byte twice - a hash pass for the entry headers, then the write pass -
   // but reports one continuous bar: the hash pass fills the first half and the write continues
-  // from the midpoint under a single denominator, so the bar never restarts. Stat sizes fix that
-  // denominator up front; they are advisory, so a file changing mid-scan just clamps in range.
+  // from the midpoint. The reported denominator is the real content size, not the internal
+  // two-pass budget - the modal prints these numbers as "X MB of Y MB" now, and a doubled total
+  // read as a save twice its size - so each pass advances the shown bytes at half rate. Stat
+  // sizes fix the denominator up front; they are advisory, so a file changing mid-scan just
+  // clamps in range.
   std::uint64_t stat_total = 0;
-  std::uint64_t progress_total = 0;
   std::uint64_t hashed = 0;
   std::uint64_t hash_reported = 0;
   std::function<void(std::size_t)> on_hash_bytes;
@@ -801,13 +803,12 @@ BackupResult create_backup_archive(const BackupRequest &request) {
         stat_total += static_cast<std::uint64_t>(info.st_size);
       }
     }
-    progress_total = 2 * stat_total;
-    request.progress(0, progress_total);
+    request.progress(0, stat_total);
     on_hash_bytes = [&](std::size_t chunk) {
       hashed += chunk;
       if (hashed - hash_reported >= kProgressReportStep) {
         hash_reported = hashed;
-        request.progress(std::min(hashed, stat_total), progress_total);
+        request.progress(std::min(hashed, stat_total) / 2, stat_total);
       }
     };
   }
@@ -848,7 +849,7 @@ BackupResult create_backup_archive(const BackupRequest &request) {
         if (written - last_reported >= kProgressReportStep || written == total_bytes) {
           last_reported = written;
           // The write pass continues the same bar from the hash pass's midpoint.
-          request.progress(std::min(stat_total + written, progress_total), progress_total);
+          request.progress(std::min(stat_total + written, 2 * stat_total) / 2, stat_total);
         }
       })
                        : std::function<void(std::size_t)>();
@@ -892,7 +893,7 @@ BackupResult create_backup_archive(const BackupRequest &request) {
   }
   if (request.progress) {
     // Land exactly on full regardless of advisory stat drift.
-    request.progress(progress_total, progress_total);
+    request.progress(stat_total, stat_total);
   }
 
   BackupResult result;

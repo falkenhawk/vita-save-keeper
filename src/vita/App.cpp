@@ -596,11 +596,14 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
                                                bool force_new) {
   // The label's bar fills exactly once across the whole snapshot: the folder hash is the first
   // third and the archive's own two read passes are the rest, phase-offset below so the bar
-  // continues instead of restarting.
+  // continues instead of restarting. The displayed denominator is the real content size - the
+  // modal prints these numbers as byte captions, and the internal three-pass budget once leaked
+  // through as a save three times its size - so each pass advances the shown bytes at a third
+  // of its raw rate.
   std::function<void(std::uint64_t, std::uint64_t)> check_progress;
   if (busy_label != nullptr) {
     check_progress = [this, busy_label](std::uint64_t done, std::uint64_t total) {
-      ui_.draw_busy(busy_label, static_cast<long long>(done), static_cast<long long>(total * 3));
+      ui_.draw_busy(busy_label, static_cast<long long>(done / 3), static_cast<long long>(total));
     };
   }
   LocalSnapshotResult snapshot;
@@ -666,16 +669,18 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
     request.timestamp = timestamp;
     request.archive_name = plan.archive_name;
     if (busy_label != nullptr) {
-      // The archive reports its two passes over (0..2x content); offsetting by the bytes the hash
-      // above already covered turns the label's bar into one continuous 0..3x fill.
+      // The archive reports its two passes at half rate over the real size (0..content); doubling
+      // its units back and offsetting by the hash pass above turns the label's bar into one
+      // continuous fill across all three passes, still shown against the real size.
       std::uint64_t checked_bytes = 0;
       for (const ArchiveEntryInfo &entry : entries) {
         checked_bytes += entry.size;
       }
       request.progress = [this, busy_label, checked_bytes](std::uint64_t done,
                                                           std::uint64_t total) {
-        ui_.draw_busy(busy_label, static_cast<long long>(checked_bytes + done),
-                      static_cast<long long>(checked_bytes + total));
+        ui_.draw_busy(busy_label,
+                      static_cast<long long>((checked_bytes + 2 * done) / 3),
+                      static_cast<long long>(total));
       };
     }
     const BackupResult backup = create_backup_archive(request);
