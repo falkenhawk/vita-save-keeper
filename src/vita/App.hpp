@@ -232,6 +232,13 @@ private:
   // anything that moves either side: a Drive sync, a landed lazy time read, a restore, an
   // upload, or a Drive-side delete.
   void refresh_drive_newer_marks();
+  // The mark can only be as informed as the grid: an encrypted save with no cached time shows no
+  // badge until its first mount read. Rather than wait for the user to focus it, the few games
+  // whose newest Drive backup beats their newest card backup (decided from names alone) join the
+  // existing idle read queue after a sync, so their badges settle moments later with no modal
+  // and no sweep. A save whose folder is unchanged since its last read never gets here - the
+  // index already supplied its time at scan.
+  void queue_drive_newer_candidates();
   void remove_drive_folder_if_empty(const std::string &folder_name);
   void refresh_remote_backups_view();
   std::vector<std::string> remote_backup_names() const;

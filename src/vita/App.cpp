@@ -2699,7 +2699,43 @@ bool App::sync_drive_index() {
   drive_synced_ = true;
   synthesize_backups_only_saves();
   refresh_drive_newer_marks();
+  queue_drive_newer_candidates();
   return true;
+}
+
+void App::queue_drive_newer_candidates() {
+  for (const SaveRecord &save : saves_) {
+    // Time already known (resolved at scan, or served from the index because the folder is
+    // unchanged) or not applicable: nothing to read.
+    if (!save.save_time_requires_mount || save.backups_only) {
+      continue;
+    }
+    const std::string folder_name = resolved_drive_folder_name(save.id);
+    if (folder_name.empty()) {
+      continue;
+    }
+    const auto indexed = drive_index_.find(folder_name);
+    if (indexed == drive_index_.end() || indexed->second.empty()) {
+      continue;
+    }
+    // Timestamped identities sort lexically as chronologically; a cloud newest that does not
+    // beat the newest card backup cannot produce a badge, so its save is not worth a read.
+    const std::string remote_identity = backup_identity(indexed->second.front().name);
+    std::string local_newest;
+    for (const std::string &name : scan_local_backup_names(kBackupRoot, save.id)) {
+      std::string identity = backup_identity(name);
+      if (identity > local_newest) {
+        local_newest = std::move(identity);
+      }
+    }
+    if (!local_newest.empty() && remote_identity <= local_newest) {
+      continue;
+    }
+    if (std::find(pending_time_reads_.begin(), pending_time_reads_.end(), save.id) ==
+        pending_time_reads_.end()) {
+      pending_time_reads_.push_back(save.id);
+    }
+  }
 }
 
 void App::synthesize_backups_only_saves() {
