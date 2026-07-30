@@ -195,11 +195,12 @@ std::vector<RestoreTarget> entry_restore_targets(const SaveRecord &save) {
 // one is bounded by the picker's size caps and stays quick.
 std::vector<ArchiveEntryInfo> compute_save_entries(
     const SaveRecord &save, bool *ok,
-    const std::function<void(std::uint64_t, std::uint64_t)> &progress = {}) {
+    const std::function<void(std::uint64_t, std::uint64_t)> &progress = {},
+    const std::function<bool()> &cancel_check = {}) {
   if (!save.extra_paths.empty()) {
-    return compute_sources_entries(archive_sources(save), ok);
+    return compute_sources_entries(archive_sources(save), ok, cancel_check);
   }
-  return compute_folder_entries(save.path, ok, progress);
+  return compute_folder_entries(save.path, ok, progress, cancel_check);
 }
 
 // Resolves and stores a record's save time from its live directories (newest observed file time).
@@ -1668,13 +1669,22 @@ void App::create_new_backup() {
   if (!force_new) {
     // Content identical to an existing archive would only stack a same-bytes snapshot under a new
     // timestamp; warn first, and let a second press force it anyway (the batch never forces).
+    // The check is cancelable - hashing a large save takes long enough that backing out of a
+    // mispressed backup should not mean sitting it out.
     ui_.draw_busy("Checking current save", 0, -1);
+    begin_cancelable_transfer();
     bool signature_ok = false;
     const std::vector<ArchiveEntryInfo> entries = compute_save_entries(
-        save, &signature_ok, [this](std::uint64_t done, std::uint64_t total) {
+        save, &signature_ok,
+        [this](std::uint64_t done, std::uint64_t total) {
           ui_.draw_busy("Checking current save", static_cast<long long>(done),
                         static_cast<long long>(total));
-        });
+        },
+        [this] { return poll_transfer_cancel(); });
+    if (end_cancelable_transfer()) {
+      set_status(StatusKind::Info, "Backup canceled.");
+      return;
+    }
     if (signature_ok && !entries.empty()) {
       const std::string match = matching_backup_name(entries, save.id, local_backups_);
       if (!match.empty()) {
@@ -1808,12 +1818,19 @@ void App::perform_savedata_delete() {
   // Same safety net as restore: nothing is deleted unless the current content provably exists in
   // a local archive. An unreadable save cannot be backed up, so it cannot be deleted either.
   ui_.draw_busy("Checking current save", 0, -1);
+  begin_cancelable_transfer();
   bool signature_ok = false;
   const std::vector<ArchiveEntryInfo> entries = compute_save_entries(
-      save, &signature_ok, [this](std::uint64_t done, std::uint64_t total) {
+      save, &signature_ok,
+      [this](std::uint64_t done, std::uint64_t total) {
         ui_.draw_busy("Checking current save", static_cast<long long>(done),
                       static_cast<long long>(total));
-      });
+      },
+      [this] { return poll_transfer_cancel(); });
+  if (end_cancelable_transfer()) {
+    set_status(StatusKind::Info, "Delete canceled.");
+    return;
+  }
   if (!signature_ok) {
     set_status(StatusKind::Error, "Could not read the save - nothing was deleted.");
     return;
@@ -2063,12 +2080,20 @@ void App::handle_restore() {
   // already holds exactly this content (compared by per-file path, size, and CRC32, because
   // file timestamps change on every restore and cannot be trusted).
   ui_.draw_busy("Checking current save", 0, -1);
+  begin_cancelable_transfer();
   bool signature_ok = false;
   const std::vector<ArchiveEntryInfo> current_entries = compute_save_entries(
-      save, &signature_ok, [this](std::uint64_t done, std::uint64_t total) {
+      save, &signature_ok,
+      [this](std::uint64_t done, std::uint64_t total) {
         ui_.draw_busy("Checking current save", static_cast<long long>(done),
                       static_cast<long long>(total));
-      });
+      },
+      [this] { return poll_transfer_cancel(); });
+  if (end_cancelable_transfer()) {
+    restore_confirmation_pending_ = false;
+    set_status(StatusKind::Info, "Restore canceled.");
+    return;
+  }
   if (signature_ok && !current_entries.empty()) {
     const bool already_backed_up =
         !matching_backup_name(current_entries, save.id, local_backups_).empty();

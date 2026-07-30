@@ -246,7 +246,8 @@ std::uint32_t update_crc32(std::uint32_t crc, const unsigned char *data, std::si
   return ~crc;
 }
 
-bool measure_file(ZipEntry *entry, const std::function<void(std::size_t)> &on_bytes = {}) {
+bool measure_file(ZipEntry *entry, const std::function<void(std::size_t)> &on_bytes = {},
+                  const std::function<bool()> &cancel_check = {}) {
   FILE *input = std::fopen(entry->source_path.c_str(), "rb");
   if (!input) {
     return false;
@@ -256,6 +257,12 @@ bool measure_file(ZipEntry *entry, const std::function<void(std::size_t)> &on_by
   std::uint64_t size = 0;
   std::array<unsigned char, kCopyBufferSize> buffer {};
   while (true) {
+    // Checked per chunk, not per file: a single save-slot file can be tens of megabytes, and a
+    // cancel press should land within a buffer, not after the whole file is hashed.
+    if (cancel_check && cancel_check()) {
+      std::fclose(input);
+      return false;
+    }
     const std::size_t read = std::fread(buffer.data(), 1, buffer.size(), input);
     if (read > 0) {
       crc = update_crc32(crc, buffer.data(), read);
@@ -311,13 +318,14 @@ bool source_exists(const std::string &path) {
 // (several directories bundled under per-source prefixes).
 bool append_folder_entries(const std::string &folder_path, const std::string &prefix,
                            std::vector<ArchiveEntryInfo> *out,
-                           const std::function<void(std::size_t)> &on_bytes = {}) {
+                           const std::function<void(std::size_t)> &on_bytes = {},
+                           const std::function<bool()> &cancel_check = {}) {
   std::vector<ZipEntry> entries;
   if (!collect_files(folder_path, prefix, &entries)) {
     return false;
   }
   for (ZipEntry &entry : entries) {
-    if (!measure_file(&entry, on_bytes)) {
+    if (!measure_file(&entry, on_bytes, cancel_check)) {
       return false;
     }
     out->push_back({entry.zip_path, entry.crc32, entry.size});
@@ -895,7 +903,8 @@ BackupResult create_backup_archive(const BackupRequest &request) {
 
 std::vector<ArchiveEntryInfo> compute_folder_entries(
     const std::string &folder_path, bool *ok,
-    const std::function<void(std::uint64_t, std::uint64_t)> &progress) {
+    const std::function<void(std::uint64_t, std::uint64_t)> &progress,
+    const std::function<bool()> &cancel_check) {
   std::vector<ArchiveEntryInfo> result;
   if (ok) {
     *ok = false;
@@ -922,7 +931,7 @@ std::vector<ArchiveEntryInfo> compute_folder_entries(
     };
   }
 
-  const bool walked = append_folder_entries(folder_path, "", &result, on_bytes);
+  const bool walked = append_folder_entries(folder_path, "", &result, on_bytes, cancel_check);
   if (progress) {
     progress(total_bytes, total_bytes);
   }
@@ -933,7 +942,8 @@ std::vector<ArchiveEntryInfo> compute_folder_entries(
 }
 
 std::vector<ArchiveEntryInfo> compute_sources_entries(const std::vector<BackupSource> &sources,
-                                                      bool *ok) {
+                                                      bool *ok,
+                                                      const std::function<bool()> &cancel_check) {
   std::vector<ArchiveEntryInfo> result;
   bool walked_cleanly = true;
   for (const BackupSource &source : sources) {
@@ -947,7 +957,7 @@ std::vector<ArchiveEntryInfo> compute_sources_entries(const std::vector<BackupSo
       break;
     }
     for (ZipEntry &entry : entries) {
-      if (!measure_file(&entry, {})) {
+      if (!measure_file(&entry, {}, cancel_check)) {
         walked_cleanly = false;
         break;
       }

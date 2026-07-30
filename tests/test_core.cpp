@@ -1496,6 +1496,27 @@ void test_remove_directory_tree_deletes_recursively_and_refuses_roots() {
   EXPECT_TRUE(!vsm::remove_directory_tree("/"));
 }
 
+void test_entry_walk_cancel_aborts_and_reports_not_ok() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-walk-cancel-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base);
+  std::ofstream(base / "data.bin") << "content";
+
+  bool ok = true;
+  const std::vector<vsm::ArchiveEntryInfo> canceled =
+      vsm::compute_folder_entries(base.string(), &ok, {}, [] { return true; });
+  EXPECT_TRUE(!ok);
+  EXPECT_TRUE(canceled.empty());
+  // A cancel check that never fires must not disturb the walk.
+  const std::vector<vsm::ArchiveEntryInfo> walked =
+      vsm::compute_folder_entries(base.string(), &ok, {}, [] { return false; });
+  EXPECT_TRUE(ok);
+  EXPECT_EQ(walked.size(), static_cast<std::size_t>(1));
+
+  std::filesystem::remove_all(base);
+}
+
 void test_backup_time_newer_comparison_uses_identity_with_margin() {
   const vsm::SaveDateTime saved = {2026, 7, 30, 12, 0, 0};
   // Clearly newer, labeled and countered names included - identity is what compares.
@@ -3448,6 +3469,7 @@ int main() {
   test_backup_folder_listing_reports_zip_holders_only();
   test_remove_directory_tree_deletes_recursively_and_refuses_roots();
   test_backup_time_newer_comparison_uses_identity_with_margin();
+  test_entry_walk_cancel_aborts_and_reports_not_ok();
   test_backup_archive_reads_bounded_sdslot_entry_without_restoring();
   test_legacy_zip_metadata_can_be_recovered_without_rewriting_the_archive();
   test_backup_archive_extracts_to_isolated_inspection_directory_and_cleans_up();

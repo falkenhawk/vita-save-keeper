@@ -142,16 +142,21 @@ bool remove_backup_inspection_directory(const std::string &path);
 // Content signature of a live save folder: relative path, CRC32, and size per file, the same
 // values our ZIP writer stores. Used to detect whether a folder is already backed up. The
 // optional callback reports (bytes hashed, total bytes) while the folder is read, throttled,
-// because hashing a large save takes long enough to freeze a single busy frame.
+// because hashing a large save takes long enough to freeze a single busy frame. cancel_check,
+// when set, is polled per read chunk; returning true aborts the walk and reports *ok false -
+// the caller knows the abort was its own, so it can tell "canceled" from "unreadable".
 std::vector<ArchiveEntryInfo> compute_folder_entries(
     const std::string &folder_path, bool *ok,
-    const std::function<void(std::uint64_t done, std::uint64_t total)> &progress = {});
+    const std::function<void(std::uint64_t done, std::uint64_t total)> &progress = {},
+    const std::function<bool()> &cancel_check = {});
 // Same content signature, but for several sources (directories or single files) bundled under
 // per-source prefixes (see BackupRequest::sources). A missing source is skipped, not a failure;
 // *ok is true when every existing source walked cleanly (all sources missing yields an empty
-// result and *ok true - the "nothing to back up" decision belongs to the caller).
-std::vector<ArchiveEntryInfo> compute_sources_entries(const std::vector<BackupSource> &sources,
-                                                      bool *ok);
+// result and *ok true - the "nothing to back up" decision belongs to the caller). cancel_check
+// as in compute_folder_entries.
+std::vector<ArchiveEntryInfo> compute_sources_entries(
+    const std::vector<BackupSource> &sources, bool *ok,
+    const std::function<bool()> &cancel_check = {});
 // Entry list (relative path, CRC32, uncompressed size) from an archive's central directory,
 // read without decompressing anything. False when the file is not one of our readable ZIPs.
 bool read_archive_central_directory(const std::string &archive_path,
