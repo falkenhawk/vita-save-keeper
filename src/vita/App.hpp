@@ -41,6 +41,10 @@ struct LocalSnapshotResult {
   bool ok{};
   bool reused{};
   bool metadata_warning{};
+  // The user pressed the cancel button mid-check or mid-archive (never set during a batch, which
+  // owns its own cancel). ok is false and any partial archive is already removed; callers report
+  // their own "canceled" wording instead of a failure.
+  bool canceled{};
   std::string archive_name;
   std::string error;
 };

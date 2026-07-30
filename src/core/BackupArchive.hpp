@@ -38,6 +38,10 @@ struct BackupRequest {
   // Appended last (rather than next to source_path) so existing positional-brace-init callers,
   // which only ever supply source_path..progress, keep compiling unchanged.
   std::vector<BackupSource> sources;
+  // Polled per chunk through the hash and write passes; returning true aborts the archive and the
+  // partial file is removed like any other failure. The caller knows the abort was its own, so it
+  // can tell "canceled" from a real error.
+  std::function<bool()> cancel_check;
 };
 
 struct BackupResult {

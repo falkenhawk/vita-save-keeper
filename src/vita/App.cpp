@@ -605,7 +605,13 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
     check_progress = [this, busy_label](std::uint64_t done, std::uint64_t total) {
       ui_.draw_busy(busy_label, static_cast<long long>(done / 3), static_cast<long long>(total));
     };
+    // The whole snapshot - check walk and archive passes - honors the cancel button. During a
+    // batch this arms nothing (the batch owns the gesture), and a silent snapshot never grabs it.
+    begin_cancelable_transfer();
   }
+  const std::function<bool()> cancel_check =
+      busy_label != nullptr ? std::function<bool()>([this] { return poll_transfer_cancel(); })
+                            : std::function<bool()>();
   LocalSnapshotResult snapshot;
   // Resolve once so the ZIP name and JSON describe the same moment, even if creating the archive
   // takes long enough for the wall clock to tick over. An entry carrying extra data folders takes
@@ -624,12 +630,14 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
 
   bool entries_ok = false;
   const std::vector<ArchiveEntryInfo> entries =
-      compute_save_entries(save, &entries_ok, check_progress);
+      compute_save_entries(save, &entries_ok, check_progress, cancel_check);
   if (!entries_ok) {
+    snapshot.canceled = end_cancelable_transfer();
     snapshot.error = "could not read the save folder";
     return snapshot;
   }
   if (entries.empty()) {
+    end_cancelable_transfer();
     snapshot.error = "save folder is empty";
     return snapshot;
   }
@@ -683,14 +691,18 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
                       static_cast<long long>(total));
       };
     }
+    request.cancel_check = cancel_check;
     const BackupResult backup = create_backup_archive(request);
     if (!backup.ok) {
-      // create_backup_archive makes the folder before any failure it can realistically hit here.
+      // create_backup_archive makes the folder before any failure it can realistically hit here,
+      // and removes its own partial archive - a cancel leaves nothing behind either.
       remove_local_backup_folder_if_empty(kBackupRoot, save.id);
+      snapshot.canceled = end_cancelable_transfer();
       snapshot.error = backup.error;
       return snapshot;
     }
   }
+  end_cancelable_transfer();
 
   std::string metadata_error;
   const std::string metadata_path =
@@ -1730,6 +1742,8 @@ void App::create_new_backup() {
       set_status(StatusKind::Success,
                  status_with_name("Created ", display_backup_name(file_name), "."));
     }
+  } else if (result.canceled) {
+    set_status(StatusKind::Info, "Backup canceled.");
   } else {
     set_status(StatusKind::Error, "Backup failed: " + result.error);
   }
@@ -1845,8 +1859,12 @@ void App::perform_savedata_delete() {
     const LocalSnapshotResult auto_result =
         create_local_snapshot(save, " auto", "Backing up current save");
     if (!auto_result.ok) {
-      set_status(StatusKind::Error,
-                 "Could not back up the current save - nothing was deleted.");
+      if (auto_result.canceled) {
+        set_status(StatusKind::Info, "Delete canceled.");
+      } else {
+        set_status(StatusKind::Error,
+                   "Could not back up the current save - nothing was deleted.");
+      }
       return;
     }
     refresh_local_backups();
@@ -2108,9 +2126,13 @@ void App::handle_restore() {
           create_local_snapshot(save, " auto", "Backing up current save");
       if (!auto_result.ok) {
         // Losing the current save is the one outcome this feature exists to prevent; a restore
-        // does not proceed over a failed safety snapshot.
+        // does not proceed over a failed safety snapshot - nor over a canceled one.
         restore_confirmation_pending_ = false;
-        set_status(StatusKind::Error, "Could not back up current save: " + auto_result.error);
+        if (auto_result.canceled) {
+          set_status(StatusKind::Info, "Restore canceled.");
+        } else {
+          set_status(StatusKind::Error, "Could not back up current save: " + auto_result.error);
+        }
         return;
       }
       refresh_local_backups();

@@ -458,7 +458,8 @@ bool write_local_header(FILE *zip, ZipEntry *entry, const ZipTimestamp &timestam
 }
 
 bool write_file_data(FILE *zip, const std::string &source_path,
-                     const std::function<void(std::size_t)> &on_bytes) {
+                     const std::function<void(std::size_t)> &on_bytes,
+                     const std::function<bool()> &cancel_check = {}) {
   FILE *input = std::fopen(source_path.c_str(), "rb");
   if (!input) {
     return false;
@@ -466,6 +467,12 @@ bool write_file_data(FILE *zip, const std::string &source_path,
 
   std::array<unsigned char, kCopyBufferSize> buffer {};
   while (true) {
+    // Same per-chunk granularity as the hash pass: a cancel lands within a buffer even inside a
+    // huge slot file.
+    if (cancel_check && cancel_check()) {
+      std::fclose(input);
+      return false;
+    }
     const std::size_t read = std::fread(buffer.data(), 1, buffer.size(), input);
     if (read > 0 && !write_bytes(zip, buffer.data(), read)) {
       std::fclose(input);
@@ -817,7 +824,7 @@ BackupResult create_backup_archive(const BackupRequest &request) {
     if (entry.zip_path.size() > 0xffffU) {
       return error_result(archive_path, "file path is too long for simple ZIP archive");
     }
-    if (!measure_file(&entry, on_hash_bytes) ||
+    if (!measure_file(&entry, on_hash_bytes, request.cancel_check) ||
         !read_file_zip_timestamp(entry.source_path, &entry.modified_at)) {
       return error_result(archive_path, "could not read source file");
     }
@@ -857,7 +864,7 @@ BackupResult create_backup_archive(const BackupRequest &request) {
   bool ok = true;
   for (ZipEntry &entry : entries) {
     ok = write_local_header(zip, &entry, entry.modified_at) &&
-         write_file_data(zip, entry.source_path, on_bytes);
+         write_file_data(zip, entry.source_path, on_bytes, request.cancel_check);
     if (!ok) {
       break;
     }

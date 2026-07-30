@@ -1517,6 +1517,26 @@ void test_entry_walk_cancel_aborts_and_reports_not_ok() {
   std::filesystem::remove_all(base);
 }
 
+void test_backup_archive_cancel_aborts_and_leaves_no_partial() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-archive-cancel-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source");
+  std::ofstream(base / "source" / "data.bin") << std::string(200000, 'x');
+
+  vsm::BackupRequest request;
+  request.source_path = (base / "source").string();
+  request.backup_root = (base / "backups").string();
+  request.save_id = "PCSE00120";
+  request.timestamp = {2026, 7, 30, 12, 0, 0};
+  request.cancel_check = [] { return true; };
+  const vsm::BackupResult backup = vsm::create_backup_archive(request);
+  EXPECT_TRUE(!backup.ok);
+  EXPECT_TRUE(!std::filesystem::exists(backup.archive_path));
+
+  std::filesystem::remove_all(base);
+}
+
 void test_backup_time_newer_comparison_uses_identity_with_margin() {
   const vsm::SaveDateTime saved = {2026, 7, 30, 12, 0, 0};
   // Clearly newer, labeled and countered names included - identity is what compares.
@@ -3472,6 +3492,7 @@ int main() {
   test_remove_directory_tree_deletes_recursively_and_refuses_roots();
   test_backup_time_newer_comparison_uses_identity_with_margin();
   test_entry_walk_cancel_aborts_and_reports_not_ok();
+  test_backup_archive_cancel_aborts_and_leaves_no_partial();
   test_backup_archive_reads_bounded_sdslot_entry_without_restoring();
   test_legacy_zip_metadata_can_be_recovered_without_rewriting_the_archive();
   test_backup_archive_extracts_to_isolated_inspection_directory_and_cleans_up();
