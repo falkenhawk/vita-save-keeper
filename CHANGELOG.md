@@ -4,6 +4,13 @@ All notable changes to Save Keeper are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.3.0-test2] - 2026-07-31
+
+### Fixed
+- PSP saves stored outside `ux0` are found now - `uma0`, `imc0` and `xmc0` are searched too
+- a PSP game whose savedata was deleted now shows its backups, like Vita games already did
+- backup creation can be canceled
+
 ## [1.3.0-test1] - 2026-07-30
 
 ### Added
