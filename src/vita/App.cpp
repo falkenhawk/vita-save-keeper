@@ -4,6 +4,7 @@
 #include "core/BackupArchive.hpp"
 #include "core/BackupName.hpp"
 #include "core/BackupStore.hpp"
+#include "core/BackupOnlySaves.hpp"
 #include "core/GoogleAuth.hpp"
 #include "core/GoogleConfig.hpp"
 #include "core/GoogleDrive.hpp"
@@ -1248,6 +1249,22 @@ void App::apply_tracked_folders(bool resolve_times) {
     configured.emplace(entry.id, &entry);
   }
 
+  // A configured entry claims its id outright: if the last Drive sync synthesized a backups-only
+  // row for it (its folders did not exist then, so no orphan row shielded the id), that row gives
+  // way - the orphan row shows the same Drive backups and restores prefixed archives into their
+  // recorded targets, and a restore-only row must never carry extras. The visible list is rebuilt
+  // here and not left to the caller: the picker path defers its rebuild to browser close, and the
+  // grid keeps rendering through visible_saves_ in between.
+  const std::size_t before_erase = saves_.size();
+  saves_.erase(std::remove_if(saves_.begin(), saves_.end(),
+                              [&configured](const SaveRecord &save) {
+                                return save.backups_only && configured.count(save.id) != 0;
+                              }),
+               saves_.end());
+  if (saves_.size() != before_erase) {
+    rebuild_visible_saves();
+  }
+
   std::unordered_set<std::string> known_ids;
   known_ids.reserve(saves_.size());
   for (SaveRecord &save : saves_) {
@@ -1848,6 +1865,25 @@ void App::perform_scoped_delete(bool delete_local, bool delete_remote) {
   if (selected_backup_ >= backup_rows_.size()) {
     selected_backup_ = backup_rows_.empty() ? 0 : backup_rows_.size() - 1;
   }
+  // A backups-only row that just lost its last backup anywhere stands for nothing - no live save,
+  // no card copy, no cloud copy - so the record goes too, the way the config-only ghost row does.
+  // Both lists are current here: the remote branch refreshed the Drive view, and a local copy of
+  // a backups-only row can only vanish through the local branch, which refreshed the card list.
+  if (selected->backups_only && local_backups_.empty() && remote_backups_.empty()) {
+    const std::string gone_id = selected->id;
+    selected = nullptr;  // invalidated by the erase below
+    saves_.erase(std::remove_if(saves_.begin(), saves_.end(),
+                                [&gone_id](const SaveRecord &save) {
+                                  return save.backups_only && save.id == gone_id;
+                                }),
+                 saves_.end());
+    rebuild_visible_saves();
+    // The focus fell to a neighbouring save; give it its own backup lists.
+    refresh_local_backups();
+    refresh_remote_backups_view();
+    set_status(StatusKind::Success, status_with_name("Deleted ", display, "."));
+    return;
+  }
 
   if (local_failed) {
     set_status(StatusKind::Error,
@@ -1969,19 +2005,30 @@ void App::handle_restore() {
     BusyLabelScope busy(busy_label.c_str());
     const std::string download_url = std::string(kDriveFilesEndpoint) + "/" +
                                      form_url_encode(file_id) + "?alt=media";
+    begin_cancelable_transfer();
     const HttpResponse download = drive_request([&](const std::string &token) {
-      return HttpClient().download_file(download_url, archive_path, token);
+      return HttpClient().download_file(download_url, archive_path, token,
+                                        remote_size_for(row.remote_name));
     });
+    const bool canceled = end_cancelable_transfer();
     if (!download.ok) {
       // A failed stream leaves a partial zip that would list as a real backup on next refresh.
       std::remove(archive_path.c_str());
       // ensure_parent_directory created the folder for this download; do not leave it behind empty.
       remove_local_backup_folder_if_empty(kBackupRoot, save.id);
       restore_confirmation_pending_ = false;
-      set_status(StatusKind::Error, "Cloud download failed.");
+      set_status(canceled ? StatusKind::Info : StatusKind::Error,
+                 canceled ? "Download canceled." : "Cloud download failed.");
       return;
     }
     refresh_local_backups();
+    if (save.backups_only) {
+      // The archive may be a prefixed tracked-folders backup made on another console. With the
+      // companion on the card, the sidecar read below maps prefixes back to their recorded
+      // targets instead of extracting them flat; a missing or failed companion falls through to
+      // the flat path, which is exactly what 1.0-era archives are.
+      download_remote_backup_metadata(save, backup_name, file_id);
+    }
   }
 
   ui_.draw_busy("Restoring save", 0, -1);
@@ -2027,6 +2074,21 @@ void App::handle_restore() {
   const RestoreResult result = restore_backup_archive(restore_request);
   restore_confirmation_pending_ = false;
   if (result.ok) {
+    if (save.backups_only) {
+      // The restore just created the savedata folder: the row is an ordinary save from here on.
+      // invalidate_save_time below re-derives everything else - the mount flag, the fingerprint,
+      // and the time - from the real folder.
+      for (SaveRecord &record : saves_) {
+        if (record.id == save.id && record.backups_only) {
+          record.backups_only = false;
+          break;
+        }
+      }
+      // The explain row gives its place back to "New Backup" (and a homebrew entry regains its
+      // "Savedata Paths" row, shifting indices); re-locate the restored row by identity.
+      rebuild_backup_rows();
+      focus_backup_row_by_identity(backup_name);
+    }
     // The live folder now holds different content; drop the cached time and re-read so the grid
     // does not keep showing the pre-restore save time.
     invalidate_save_time(save);
@@ -2527,7 +2589,97 @@ bool App::sync_drive_index() {
   }
   drive_root_folder_id_ = root_id;
   drive_synced_ = true;
+  synthesize_backups_only_saves();
   return true;
+}
+
+void App::synthesize_backups_only_saves() {
+  const std::string focused_id = selected_save_ < visible_saves_.size()
+                                     ? saves_[visible_saves_[selected_save_]].id
+                                     : std::string();
+  // Last sync's rows go first, then the current candidate set is added back: a game restored
+  // since then is now covered by its real record, and a folder deleted from the web disappears
+  // with nothing to re-add it.
+  const std::size_t before = saves_.size();
+  saves_.erase(std::remove_if(saves_.begin(), saves_.end(),
+                              [](const SaveRecord &save) { return save.backups_only; }),
+               saves_.end());
+  bool changed = saves_.size() != before;
+
+  // Drive folders first, then the local backup folders: a game can hold backups on either side
+  // (or both) while its savedata is gone, and the core key extraction deduplicates the union.
+  std::vector<std::string> folder_names;
+  folder_names.reserve(drive_index_.size());
+  for (const auto &entry : drive_index_) {
+    folder_names.push_back(entry.first);
+  }
+  for (std::string &folder : list_backup_folder_names(kBackupRoot)) {
+    folder_names.push_back(std::move(folder));
+  }
+  std::vector<std::string> known_ids;
+  known_ids.reserve(saves_.size());
+  for (const SaveRecord &save : saves_) {
+    known_ids.push_back(save.id);
+  }
+
+  std::string vita_root;
+  std::string card_root;
+  for (const SaveRoot &root : default_save_roots()) {
+    if (root.platform == SavePlatform::Vita) {
+      vita_root = root.path;
+    } else if (root.platform == SavePlatform::GameCard) {
+      card_root = root.path;
+    }
+  }
+  const bool card_present = path_is_directory(card_root);
+  // Whether any Drive folder covers this key - the tile badge follows where the backups live.
+  const auto key_on_drive = [this](const std::string &key) {
+    for (const auto &entry : drive_index_) {
+      if (drive_folder_matches_save(entry.first, key)) {
+        return true;
+      }
+    }
+    return false;
+  };
+  std::vector<SaveRecord> candidates;
+  for (const std::string &key : backup_only_save_keys(folder_names, known_ids)) {
+    SaveRecord record;
+    record.id = key;
+    record.display_name = key;
+    record.backups_only = true;
+    record.backups_on_drive = key_on_drive(key);
+    // A digital install lives in ux0:app/<id>. With a card inserted and no such install, the id
+    // can only belong to the card game, whose saves live on the card partition; everything else
+    // restores to the ordinary savedata root (which also covers a card-less PS TV outright).
+    if (card_present && !path_is_directory(join_path("ux0:app", key))) {
+      record.platform = SavePlatform::GameCard;
+      record.path = join_path(card_root, key);
+    } else {
+      record.platform = SavePlatform::Vita;
+      record.path = join_path(vita_root, key);
+    }
+    candidates.push_back(std::move(record));
+  }
+  if (!candidates.empty()) {
+    // The scope gate: only ids the app database can name get a row - a real title, a real icon,
+    // and the certainty the game is installed here. A targeted second query, run only when there
+    // are candidates at all; the common all-covered library never pays for it.
+    apply_app_db_metadata(&candidates);
+    for (SaveRecord &record : candidates) {
+      if (record.title_from_app_db) {
+        saves_.push_back(std::move(record));
+        changed = true;
+      }
+    }
+  }
+  if (!changed) {
+    return;
+  }
+  // begin_sync_all reads visible_saves_ straight after its sync; a stale list here would index
+  // the wrong records.
+  apply_save_sort(&saves_, sort_mode_, newest_backup_by_folder());
+  rebuild_visible_saves();
+  refocus_selection_by_id(focused_id);
 }
 
 void App::refresh_remote_backups_view() {
@@ -2540,6 +2692,12 @@ void App::refresh_remote_backups_view() {
     if (found != drive_index_.end()) {
       remote_backups_ = found->second;
     }
+  }
+  // Keep the focused backups-only row's badge honest between syncs: an upload or a Drive-side
+  // delete moves where its backups live without a fresh sync. Only with a synced index - before
+  // the first sync an empty listing means "not looked" rather than "not there".
+  if (save && save->backups_only && drive_synced_) {
+    saves_[visible_saves_[selected_save_]].backups_on_drive = !remote_backups_.empty();
   }
   rebuild_backup_rows();
   if (selected_backup_ >= backup_rows_.size()) {
@@ -2558,11 +2716,19 @@ std::vector<std::string> App::remote_backup_names() const {
 
 void App::rebuild_backup_rows() {
   backup_rows_ = build_backup_rows(remote_backup_names(), local_backups_);
+  const SaveRecord *save = selected_save_record();
+  // A backups-only entry has no live save, so the guaranteed front "New Backup" sentinel becomes
+  // the row that says why - focusable but inert, like the other sentinels. No "Savedata Paths"
+  // row either: a restore-only row must never grow a folder set (apps that need one arrive
+  // through the settings sync as proper config rows).
+  if (save && save->backups_only && !backup_rows_.empty()) {
+    backup_rows_.front() = BackupRow::no_live_save_row();
+    return;
+  }
   // A homebrew entry gets a "Savedata Paths" row right above "New Backup". Putting the picker in the
   // list rather than on a button means it is visible without knowing it exists, and it costs no
   // footer space - the grid's footer has none left. Default focus still lands on "New Backup"
   // (default_backup_row), so switching titles keeps its familiar landing spot.
-  const SaveRecord *save = selected_save_record();
   if (save && classify_save(*save) == SaveCategory::Homebrew && !backup_rows_.empty()) {
     backup_rows_.insert(backup_rows_.begin(),
                         BackupRow::data_folders_row(save->extra_paths.size()));
@@ -2573,6 +2739,13 @@ std::size_t App::default_backup_row() const {
   // The "New Backup" row, wherever it sits - the landing spot whenever focus resets.
   for (std::size_t i = 0; i < backup_rows_.size(); ++i) {
     if (backup_rows_[i].new_backup) {
+      return i;
+    }
+  }
+  // A backups-only entry has no New Backup row; land on the newest backup instead of the inert
+  // explainer above it.
+  for (std::size_t i = 0; i < backup_rows_.size(); ++i) {
+    if (!backup_rows_[i].is_sentinel()) {
       return i;
     }
   }
@@ -2722,13 +2895,25 @@ bool App::download_remote_backup_to_card(const SaveRecord &save, const BackupRow
   BusyLabelScope busy(busy_label.c_str());
   const std::string download_url =
       std::string(kDriveFilesEndpoint) + "/" + form_url_encode(file_id) + "?alt=media";
+  begin_cancelable_transfer();
   const HttpResponse download = drive_request([&](const std::string &token) {
-    return HttpClient().download_file(download_url, temporary_path, token);
+    return HttpClient().download_file(download_url, temporary_path, token,
+                                      remote_size_for(row.remote_name));
   });
+  const bool canceled = end_cancelable_transfer();
   if (!download.ok) {
     std::remove(temporary_path.c_str());
     // A Drive-only row may have had its folder created just above; do not leave it behind empty.
     remove_local_backup_folder_if_empty(kBackupRoot, save.id);
+    if (canceled) {
+      // The user asked for this, so it must not read as an error - and the caller paints every
+      // reported error string red, so the neutral status is set here instead of routed through it.
+      if (error) {
+        error->clear();
+      }
+      set_status(StatusKind::Info, "Download canceled.");
+      return false;
+    }
     if (error) {
       *error = "Cloud download failed.";
     }
@@ -2814,8 +2999,14 @@ void App::handle_transfer_button() {
   const std::uint64_t zip_bytes = archive_file_size(
       local_backup_archive_path(kBackupRoot, selected->id, backup_name), &zip_size_ok);
   TransferBudgetScope budget(zip_size_ok ? static_cast<long long>(zip_bytes) : 0);
+  begin_cancelable_transfer();
   const BackupUploadResult uploaded = upload_local_backup(*selected, backup_name);
+  const bool canceled = end_cancelable_transfer();
   if (!uploaded.ok) {
+    if (canceled) {
+      // Overrides the generic failure status the upload path just set - the user asked for this.
+      set_status(StatusKind::Info, "Upload canceled.");
+    }
     return;
   }
   sync_backup_settings_if_dirty();
@@ -3104,6 +3295,16 @@ void App::open_save_details() {
     slot_details_.extra_paths.push_back({extra.path, 0, false, extra.is_file, 0});
   }
   if (!selected_row) {
+    if (save.backups_only) {
+      // Nothing on this console to inspect or size; the row exists for its Drive backups. Skip
+      // the resolve outright - mounting a folder that does not exist only buys a busy flash.
+      slot_details_.snapshot_name = "Current Save";
+      slot_details_.unavailable_message = "No save on this console";
+      slot_details_.warning_message =
+          "Local savedata does not exist yet. Restore a backup to recreate it.";
+      slot_details_.open = true;
+      return;
+    }
     // "New Backup" represents the live save. Resolve its details directly without creating an
     // archive or JSON companion; this is a read-only preview of what the next backup would use.
     slot_details_.snapshot_name = "Current Save";
@@ -4276,6 +4477,39 @@ bool App::poll_batch_cancel() {
   return batch_cancel_requested_;
 }
 
+void App::begin_cancelable_transfer() {
+  if (batch_running_) {
+    // The batch owns the modal and the cancel gesture; its own flag covers everything in it.
+    return;
+  }
+  transfer_cancel_enabled_ = true;
+  transfer_cancel_requested_ = false;
+  ui_.set_transfer_cancel_hint(enter_is_cross_);
+}
+
+bool App::end_cancelable_transfer() {
+  const bool canceled = transfer_cancel_enabled_ && transfer_cancel_requested_;
+  transfer_cancel_enabled_ = false;
+  transfer_cancel_requested_ = false;
+  ui_.clear_transfer_cancel_hint();
+  return canceled;
+}
+
+bool App::poll_transfer_cancel() {
+  if (!transfer_cancel_enabled_) {
+    return false;
+  }
+  if (!transfer_cancel_requested_) {
+    SceCtrlData pad{};
+    sceCtrlPeekBufferPositive(0, &pad, 1);
+    const unsigned int cancel_mask = enter_is_cross_ ? SCE_CTRL_CIRCLE : SCE_CTRL_CROSS;
+    if ((pad.buttons & cancel_mask) != 0) {
+      transfer_cancel_requested_ = true;
+    }
+  }
+  return transfer_cancel_requested_;
+}
+
 void App::cancel_duplicate_backup_confirmation() {
   if (duplicate_backup_confirmation_pending_) {
     duplicate_backup_confirmation_pending_ = false;
@@ -4294,6 +4528,11 @@ void App::begin_sync_all() {
     set_status(StatusKind::Info, "No saves in this tab.");
     return;
   }
+  if (batch_eligible_count() == 0) {
+    // Every row here is backups-only; a window over zero candidates has nothing to offer.
+    set_status(StatusKind::Info, "Nothing to back up - local savedata does not exist yet.");
+    return;
+  }
   // A sign-in without internet cannot upload; the confirmation says so and the run only backs up.
   const bool drive_online = google_connected_ && HttpClient::network_reachable();
   // Accurate duplicate skipping needs the Drive index; a stored sign-in whose startup sync
@@ -4307,8 +4546,15 @@ void App::begin_sync_all() {
   // because the window is now also where skips are undone.
   batch_deselected_.clear();
   for (const std::size_t index : visible_saves_) {
-    if (tracked_config_.skipped_ids.count(saves_[index].id) != 0) {
-      batch_deselected_.insert(saves_[index].id);
+    const SaveRecord &save = saves_[index];
+    // Backups-only rows are never candidates, so the set stays eligible-ids-only - the fold in
+    // run_sync_all writes it back into skipped_ids, and a stale skip entry (from when this game
+    // still had a live save) must not re-enter through the seed.
+    if (save.backups_only) {
+      continue;
+    }
+    if (tracked_config_.skipped_ids.count(save.id) != 0) {
+      batch_deselected_.insert(save.id);
     }
   }
 
@@ -4320,14 +4566,33 @@ void App::begin_sync_all() {
 }
 
 std::size_t App::batch_selected_count() const {
-  // batch_deselected_ only ever holds visible ids, and nothing rebuilds visible_saves_ while the
-  // window is open (tab switch, sort, and refresh are all suppressed), so plain subtraction holds.
-  return visible_saves_.size() - batch_deselected_.size();
+  // Counted explicitly: backups-only rows are visible but never candidates, and every guard keeps
+  // batch_deselected_ to eligible ids only, so this count and the on-screen checkboxes agree.
+  // Nothing rebuilds visible_saves_ while the window is open (tab switch, sort, and refresh are
+  // all suppressed).
+  std::size_t selected = 0;
+  for (const std::size_t index : visible_saves_) {
+    const SaveRecord &save = saves_[index];
+    if (!save.backups_only && batch_deselected_.count(save.id) == 0) {
+      ++selected;
+    }
+  }
+  return selected;
+}
+
+std::size_t App::batch_eligible_count() const {
+  std::size_t eligible = 0;
+  for (const std::size_t index : visible_saves_) {
+    if (!saves_[index].backups_only) {
+      ++eligible;
+    }
+  }
+  return eligible;
 }
 
 void App::update_sync_all_confirm_status() {
   set_status(StatusKind::Info,
-             sync_all_confirm_message(batch_selected_count(), visible_saves_.size(),
+             sync_all_confirm_message(batch_selected_count(), batch_eligible_count(),
                                       save_category_label(category_), sync_all_will_upload_));
 }
 
@@ -4335,7 +4600,12 @@ void App::batch_toggle_focused() {
   if (selected_save_ >= visible_saves_.size()) {
     return;
   }
-  const std::string &id = saves_[visible_saves_[selected_save_]].id;
+  const SaveRecord &focused = saves_[visible_saves_[selected_save_]];
+  if (focused.backups_only) {
+    // Not a candidate - the tile carries no checkbox to toggle.
+    return;
+  }
+  const std::string &id = focused.id;
   if (batch_deselected_.erase(id) == 0) {
     batch_deselected_.insert(id);
   }
@@ -4343,10 +4613,15 @@ void App::batch_toggle_focused() {
 }
 
 void App::batch_toggle_all() {
-  // A held R flips the whole tab: everything checked empties the grid, anything less fills it.
+  // A held L flips the whole tab: everything checked empties the grid, anything less fills it.
+  // Backups-only rows stay out of the set either way - the fold would otherwise write skip entries
+  // for rows that are not skippable.
   if (batch_deselected_.empty()) {
     for (const std::size_t index : visible_saves_) {
-      batch_deselected_.insert(saves_[index].id);
+      const SaveRecord &save = saves_[index];
+      if (!save.backups_only) {
+        batch_deselected_.insert(save.id);
+      }
     }
   } else {
     batch_deselected_.clear();
@@ -4361,7 +4636,13 @@ void App::run_sync_all() {
   // writing over a config that could not be read whole.
   bool picks_changed = false;
   for (const std::size_t index : visible_saves_) {
-    const std::string &id = saves_[index].id;
+    const SaveRecord &save = saves_[index];
+    // Never a candidate, so the fold neither writes a skip entry it cannot honor nor erases a
+    // stale one the game may want back once it has a live save again.
+    if (save.backups_only) {
+      continue;
+    }
+    const std::string &id = save.id;
     if (batch_deselected_.count(id) != 0) {
       picks_changed |= tracked_config_.skipped_ids.insert(id).second;
     } else {
@@ -4380,7 +4661,8 @@ void App::run_sync_all() {
   std::vector<std::size_t> targets;
   targets.reserve(visible_saves_.size());
   for (const std::size_t index : visible_saves_) {
-    if (batch_deselected_.count(saves_[index].id) == 0) {
+    const SaveRecord &save = saves_[index];
+    if (!save.backups_only && batch_deselected_.count(save.id) == 0) {
       targets.push_back(index);
     }
   }
@@ -4580,6 +4862,9 @@ int App::run() {
   // Fold the extra data folders into saves_ now that the scanner, app-database pass and index
   // are done - they run only over real savedata - and before the sort/rebuild below.
   apply_tracked_folders();
+  // Games that exist here only as card backups get their rows from the first frame - no Drive
+  // needed. A later Drive sync re-runs this with the cloud folders folded into the union.
+  synthesize_backups_only_saves();
   load_settings();
   // One pass for folders emptied by older versions, which left them behind. Deletes clean up as
   // they go now, so this never needs to run again. It sits under the "Loading saves" modal that is
@@ -4631,7 +4916,8 @@ int App::run() {
     }
     ui_.draw_busy(label, done, total);
   });
-  HttpClient::set_cancel_check([this] { return poll_batch_cancel(); });
+  HttpClient::set_cancel_check(
+      [this] { return poll_batch_cancel() || poll_transfer_cancel(); });
 
   // Follow the console's enter-button setting: western consoles confirm with Cross, Japanese
   // consoles with Circle. The primary Backup action sits on the confirm button and Cancel on the
@@ -5204,7 +5490,7 @@ int App::run() {
     ui_state.visible_saves = &visible_saves_;
     ui_state.batch_deselected = &batch_deselected_;
     ui_state.batch_selected_count = batch_selected_count();
-    ui_state.batch_total_count = visible_saves_.size();
+    ui_state.batch_total_count = batch_eligible_count();
     ui_state.active_category = category_;
     ui_state.sort_mode = sort_mode_;
     for (int i = 0; i < kSaveCategoryCount; ++i) {

@@ -200,10 +200,12 @@ int seek_multipart_body(void *userdata, curl_off_t offset, int origin) {
   return CURL_SEEKFUNC_OK;
 }
 
-// A fixed deadline cannot fit arbitrarily large uploads on Vita wifi; budget a 50 KB/s worst-case
-// sustained rate on top of the base allowance. A stalled transfer is still cancellable through the
-// progress callback, so a generous ceiling only bounds the pathological case.
-long upload_timeout_seconds(std::uint64_t total_size) {
+// A fixed deadline cannot fit arbitrarily large transfers on Vita wifi; budget a 50 KB/s
+// worst-case sustained rate on top of the base allowance. A stalled transfer is still
+// cancellable through the progress callback, so a generous ceiling only bounds the pathological
+// case. Shared by uploads and sized downloads - the 300-second fixed download deadline killed a
+// large restore at high percent, twice, before downloads learned to scale.
+long transfer_timeout_seconds(std::uint64_t total_size) {
   return 120L + static_cast<long>(total_size / (50 * 1024));
 }
 
@@ -258,7 +260,7 @@ HttpResponse send_multipart_file(const std::string &url, const std::string &meta
   curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(body.total_size()));
 
   HttpResponse response =
-      perform_with_body(curl, headers, upload_timeout_seconds(body.total_size()));
+      perform_with_body(curl, headers, transfer_timeout_seconds(body.total_size()));
   std::fclose(file);
   curl_slist_free_all(headers);
   if (!response.ok && state.file_read_failed) {
@@ -493,7 +495,8 @@ HttpResponse HttpClient::patch_multipart_file(const std::string &url,
 }
 
 HttpResponse HttpClient::download_file(const std::string &url, const std::string &file_path,
-                                       const std::string &bearer_token) const {
+                                       const std::string &bearer_token,
+                                       long long expected_size_bytes) const {
   CURL *curl = acquire_handle();
   if (!curl) {
     return transport_error("network not initialized");
@@ -509,7 +512,12 @@ HttpResponse HttpClient::download_file(const std::string &url, const std::string
   curl_slist *headers = nullptr;
   headers = append_bearer_header(headers, bearer_token);
 
-  configure_common(curl, headers, error_buffer, 300L);
+  // A known size scales the deadline like uploads do; unsized fetches (companion JSONs) keep the
+  // fixed one, which comfortably fits anything small enough not to report a size.
+  configure_common(curl, headers, error_buffer,
+                   expected_size_bytes > 0
+                       ? transfer_timeout_seconds(static_cast<std::uint64_t>(expected_size_bytes))
+                       : 300L);
   curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_file_body);
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, output);

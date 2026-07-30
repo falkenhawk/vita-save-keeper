@@ -19,9 +19,18 @@ BackupRow BackupRow::data_folders_row(std::size_t count) {
   return row;
 }
 
+BackupRow BackupRow::no_live_save_row() {
+  BackupRow row;
+  row.no_live_save = true;
+  return row;
+}
+
 std::string BackupRow::display_name() const {
   if (new_backup) {
     return "New Backup";
+  }
+  if (no_live_save) {
+    return "No save on this console";
   }
   if (data_folders) {
     // Title Case, like the "New Backup" row it sits beside.

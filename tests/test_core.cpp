@@ -3,6 +3,7 @@
 #include "core/BackupList.hpp"
 #include "core/BackupName.hpp"
 #include "core/BackupStore.hpp"
+#include "core/BackupOnlySaves.hpp"
 #include "core/GoogleAuth.hpp"
 #include "core/GoogleConfig.hpp"
 #include "core/GoogleDrive.hpp"
@@ -1435,6 +1436,56 @@ void test_build_save_index_carries_times_prunes_and_stamps() {
   EXPECT_TRUE(!no_previous.entries.at("PCSF00001").time_resolved);
 }
 
+void test_build_save_index_skips_backups_only_records() {
+  vsm::SaveRecord real;
+  real.id = "PCSG00352";
+  real.display_name = "Robotics; Notes ELITE";
+  real.fingerprint = {true, 100LL, 2LL, 300LL};
+  // A backups-only row's fingerprint describes a folder that does not exist; an indexed entry for
+  // it would outlive the Drive folder as a stale title for nothing.
+  vsm::SaveRecord cloud;
+  cloud.id = "PCSB00981";
+  cloud.display_name = "DRAGON QUEST BUILDERS";
+  cloud.backups_only = true;
+
+  const vsm::SaveIndex built = vsm::build_save_index({real, cloud}, {}, 7LL, 77LL);
+  EXPECT_EQ(built.entries.size(), static_cast<std::size_t>(1));
+  EXPECT_TRUE(built.entries.find("PCSG00352") != built.entries.end());
+  EXPECT_TRUE(built.entries.find("PCSB00981") == built.entries.end());
+}
+
+void test_backup_only_save_keys_covers_both_folder_forms() {
+  // A bare 1.0 folder and a "<key> <title>" folder are both covered by their known save; only
+  // genuinely unmatched folders yield candidates, as their leading token, in folder order.
+  const std::vector<std::string> keys = vsm::backup_only_save_keys(
+      {"PCSB00981 DRAGON QUEST BUILDERS", "PCSF00021 LittleBigPlanet PSVita", "PCSG00352",
+       "ADRBUBMAN"},
+      {"PCSF00021", "PCSG00352"});
+  EXPECT_EQ(keys.size(), static_cast<std::size_t>(2));
+  EXPECT_EQ(keys[0], "PCSB00981");
+  EXPECT_EQ(keys[1], "ADRBUBMAN");
+}
+
+void test_backup_only_save_keys_normalizes_ids_and_deduplicates() {
+  // Known ids are matched through the same normalization the Drive folder was written with, so
+  // an id carrying an unsafe character still covers its folder. Same-key folders (possible after
+  // out-of-band Drive edits) collapse to one candidate, and a spaced or empty oddity never
+  // produces an empty key.
+  const std::vector<std::string> keys = vsm::backup_only_save_keys(
+      {"Some_Game Title", "PCSE00633 A", "PCSE00633 B", " leading"},
+      {"Some:Game"});
+  EXPECT_EQ(keys.size(), static_cast<std::size_t>(1));
+  EXPECT_EQ(keys[0], "PCSE00633");
+}
+
+void test_no_live_save_row_is_an_inert_sentinel() {
+  const vsm::BackupRow row = vsm::BackupRow::no_live_save_row();
+  EXPECT_TRUE(row.is_sentinel());
+  EXPECT_TRUE(!row.has_local());
+  EXPECT_TRUE(!row.has_remote());
+  EXPECT_EQ(row.display_name(), "No save on this console");
+}
+
 void test_backup_archive_reads_bounded_sdslot_entry_without_restoring() {
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() / "save-keeper-archive-entry-test";
@@ -1952,6 +2003,30 @@ void test_backup_store_sweeps_only_empty_folders_under_the_root() {
   EXPECT_EQ(vsm::remove_empty_backup_folders(base.string()), static_cast<std::size_t>(0));
   EXPECT_EQ(vsm::remove_empty_backup_folders((base / "never-created").string()),
             static_cast<std::size_t>(0));
+
+  std::filesystem::remove_all(base);
+}
+
+void test_backup_folder_listing_reports_zip_holders_only() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-folder-list-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "PCSB00981");
+  std::filesystem::create_directories(base / "NPWR00001_ Orphan");
+  std::filesystem::create_directories(base / "PCSG00352");
+  {
+    std::ofstream(base / "PCSB00981" / "2017-08-10 17-39-02.zip") << "backup";
+    // A leftover companion is not a backup; its folder must not produce a row candidate.
+    std::ofstream(base / "NPWR00001_ Orphan" / "2026-05-21 16-14.json") << "metadata";
+    std::ofstream(base / "PCSG00352" / "2026-07-01 10-00-00 label.zip") << "backup";
+    std::ofstream(base / "stray.zip") << "root-level file, not a folder";
+  }
+
+  const std::vector<std::string> names = vsm::list_backup_folder_names(base.string());
+  EXPECT_EQ(names.size(), static_cast<std::size_t>(2));
+  EXPECT_EQ(names[0], "PCSB00981");
+  EXPECT_EQ(names[1], "PCSG00352");
+  EXPECT_TRUE(vsm::list_backup_folder_names((base / "never-created").string()).empty());
 
   std::filesystem::remove_all(base);
 }
@@ -3333,6 +3408,11 @@ int main() {
   test_save_index_rejects_bad_input_but_keeps_healthy_entries();
   test_save_index_file_roundtrip_and_size_cap();
   test_build_save_index_carries_times_prunes_and_stamps();
+  test_build_save_index_skips_backups_only_records();
+  test_backup_only_save_keys_covers_both_folder_forms();
+  test_backup_only_save_keys_normalizes_ids_and_deduplicates();
+  test_no_live_save_row_is_an_inert_sentinel();
+  test_backup_folder_listing_reports_zip_holders_only();
   test_backup_archive_reads_bounded_sdslot_entry_without_restoring();
   test_legacy_zip_metadata_can_be_recovered_without_rewriting_the_archive();
   test_backup_archive_extracts_to_isolated_inspection_directory_and_cleans_up();

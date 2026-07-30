@@ -48,6 +48,15 @@ struct SaveRecord {
   // folder (then `path` is empty). See archive_layout_for_record for how the two combine.
   // Extras are plain directories and never touch the PFS mount.
   std::vector<TrackedPath> extra_paths;
+  // No savedata on this console: the row exists because backups for it do - on Drive, on the
+  // card, or both (the game is installed but was never launched here, or its save was deleted).
+  // `path` is still set, to where a restore would land, so restore needs no special case. Backups
+  // are refused - there is nothing here to archive - and the record never enters the save index,
+  // whose fingerprints cover real folders only. Cleared the moment a restore creates the folder.
+  bool backups_only{};
+  // Meaningful only with backups_only: at least one of the backups lives on Drive. Drives the
+  // tile's cloud badge - a row whose backups are all on the card draws no badge at all.
+  bool backups_on_drive{};
 };
 
 } // namespace vsm

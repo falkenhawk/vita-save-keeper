@@ -27,6 +27,12 @@ void remove_local_backup_folder_if_empty(const std::string &backup_root,
 // backup folder outlives the game it belongs to when that game is uninstalled.
 std::size_t remove_empty_backup_folders(const std::string &backup_root);
 
+// Sorted names of the folders directly under the backup root that hold at least one ".zip":
+// each is the normalized id of a save that has local backups, whether or not the save itself
+// still exists. Feeds the backups-only row synthesis; folders holding only a leftover
+// companion JSON are not backups and are skipped.
+std::vector<std::string> list_backup_folder_names(const std::string &backup_root);
+
 std::string allocate_backup_name(const BackupTimestamp &timestamp, const std::string &suffix,
                                  const std::vector<std::string> &local_names,
                                  const std::vector<std::string> &remote_names);

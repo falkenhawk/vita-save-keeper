@@ -1692,11 +1692,42 @@ void Ui::draw_title_grid(const UiState &state) {
                               is_selected);
       }
 
+      // A backups-only entry with backups on Drive: no save on this console, and restoring one
+      // is the only action. The Drive-only glyph the backup rows already use, bottom-right (the
+      // batch checkbox owns bottom-left), outlined instead of plated: the glyph's own shape
+      // redrawn dark at eight 1px offsets, then the real glyph on top. The outline keeps it
+      // legible over any icon art - a warm-colored icon would swallow the bare amber cloud, and
+      // a background plate covered a quarter of the tile. A row whose backups are all on the
+      // card draws no badge: its data already lives here.
+      if (save.backups_only && save.backups_on_drive) {
+        const float badge_x = static_cast<float>(x + kTileSize - 28 - 3);
+        const float badge_y = static_cast<float>(y + kTileSize - 18 - 3);
+        if (cloud_drive_only_tex_) {
+          constexpr unsigned int kBadgeOutline = RGBA8(5, 10, 18, 235);
+          for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+              if (dx != 0 || dy != 0) {
+                vita2d_draw_texture_tint(cloud_drive_only_tex_, badge_x + dx, badge_y + dy,
+                                         kBadgeOutline);
+              }
+            }
+          }
+          vita2d_draw_texture(cloud_drive_only_tex_, badge_x, badge_y);
+        } else {
+          // The primitive fallback cuts its arrow out of a background color, which an outline
+          // cannot supply - it keeps a small plate instead.
+          constexpr unsigned int kBadgePlate = RGBA8(5, 10, 18, 210);
+          vita2d_draw_rectangle(x + kTileSize - 36, y + kTileSize - 24, 36, 24, kBadgePlate);
+          draw_presence_glyph(x + kTileSize - 32, y + kTileSize - 21, false, true, kBadgePlate);
+        }
+      }
+
       // While the batch confirmation window is open every tile carries a checkbox - the sweep
       // takes exactly the checked ones. Same marks as the folder picker, on a dark corner plate
       // so they stay legible over icon art. Outside the window tiles stay clean; remembered
-      // skips only surface as unchecked boxes the next time the window opens.
-      if (state.sync_all_confirmation_pending) {
+      // skips only surface as unchecked boxes the next time the window opens. Backups-only tiles
+      // carry no checkbox at all: they are not candidates, and the corner badge says why.
+      if (state.sync_all_confirmation_pending && !save.backups_only) {
         constexpr unsigned int kPlate = RGBA8(5, 10, 18, 210);
         constexpr int kPlateSize = 24;
         const bool included =
@@ -1833,6 +1864,10 @@ void Ui::draw_backup_panel(const UiState &state) {
         draw_folder_glyph(927, y + 12, selected ? kColorAccent : kColorIdleDot);
       }
       max_text_width = 300;
+    } else if (row.no_live_save) {
+      // The backups-only explainer: no glyph in the trailing slot (there is nothing on either side
+      // to report) and no action - the muted label below is the whole row.
+      max_text_width = 340;
     } else {
       max_text_width = 340;
       // The row wash is nearly transparent, so the pane behind it is what the cut-out must
@@ -1873,7 +1908,10 @@ void Ui::draw_backup_panel(const UiState &state) {
       vita2d_disable_clipping();
     } else {
       const std::string label = fit_text(kTextSizeSmall, display, max_text_width);
-      draw_text(fonts_, 546, y + 24, selected ? kColorText : kColorMuted,
+      // The backups-only explainer stays muted even when focused: it is informational, and the
+      // full text color would promise an action the row does not have.
+      draw_text(fonts_, 546, y + 24,
+                selected && !row.no_live_save ? kColorText : kColorMuted,
                 kTextSizeSmall, label.c_str());
     }
     y += 42;
@@ -2051,10 +2089,12 @@ void Ui::draw_footer(const UiState &state) {
   const BackupRow *focused_row = nullptr;
   bool data_row_focused = false;
   bool new_backup_focused = false;
+  bool no_save_row_focused = false;
   if (state.backup_rows && state.selected_backup < state.backup_rows->size()) {
     const BackupRow &row = (*state.backup_rows)[state.selected_backup];
     data_row_focused = row.data_folders;
     new_backup_focused = row.new_backup;
+    no_save_row_focused = row.no_live_save;
     // Sentinels are not snapshots, so none of the per-snapshot hints below apply to them.
     if (!row.is_sentinel()) {
       focused_row = &row;
@@ -2083,23 +2123,30 @@ void Ui::draw_footer(const UiState &state) {
   // Select moves the focused snapshot across: Upload from a card-only row, Download to the card
   // from a Drive-only row. A synced row has no tap action left, so the slot disappears rather
   // than advertise a no-op; on the New Backup entry it names the hold gesture instead, with the
-  // "(hold)" qualifier dim and small so it reads as a gesture note, not the action name.
+  // "(hold)" qualifier dim and small so it reads as a gesture note, not the action name. The
+  // cloud-only explainer skips the batch hint - its entry is not a batch candidate, and the
+  // gesture is still advertised from every other row of the tab.
   if (!focused_row) {
-    hints.push_back({ButtonSymbol::Select, "Backup & Upload All", "(hold)", nullptr});
+    if (!no_save_row_focused) {
+      hints.push_back({ButtonSymbol::Select, "Backup & Upload All", "(hold)", nullptr});
+    }
   } else if (!focused_row->has_local()) {
     hints.push_back({ButtonSymbol::Select, "Download", nullptr, nullptr});
   } else if (!focused_row->has_remote()) {
     hints.push_back({ButtonSymbol::Select, "Upload", nullptr, nullptr});
   }
   // On the "Savedata Paths" row the press opens the picker for editing the set; the row already
-  // names what it is, so the hint names the action.
-  const char *primary_label = "Restore";
-  if (data_row_focused) {
-    primary_label = "Edit";
-  } else if (new_backup_focused) {
-    primary_label = "Backup";
+  // names what it is, so the hint names the action. The backups-only explainer has no primary
+  // action at all, so the confirm hint disappears rather than advertise a dead press.
+  if (!no_save_row_focused) {
+    const char *primary_label = "Restore";
+    if (data_row_focused) {
+      primary_label = "Edit";
+    } else if (new_backup_focused) {
+      primary_label = "Backup";
+    }
+    hints.push_back({confirm, primary_label, nullptr, nullptr});
   }
-  hints.push_back({confirm, primary_label, nullptr, nullptr});
   draw_hints_right_aligned(fonts_, hints.data(), static_cast<int>(hints.size()));
 }
 
@@ -2118,6 +2165,13 @@ void Ui::clear_batch_progress() {
   batch_action_.clear();
   batch_game_.clear();
 }
+
+void Ui::set_transfer_cancel_hint(bool cancel_is_circle) {
+  transfer_cancel_hint_ = true;
+  transfer_cancel_is_circle_ = cancel_is_circle;
+}
+
+void Ui::clear_transfer_cancel_hint() { transfer_cancel_hint_ = false; }
 
 void Ui::draw_google_setup_prompt(const UiState &state) {
   vita2d_draw_rectangle(0, 0, 960, 544, RGBA8(5, 10, 18, 200));
@@ -2242,9 +2296,10 @@ void Ui::draw_busy(const std::string &label, long long done, long long total,
   // Spacing is measured in rendered ink, not cap height: the title's quotes reach above the caps
   // and its descenders below the baseline, so it occupies 18 rows while the digits occupy 12.
   // The title gets 20px of air under the accent strip and 15px down to the bar - deliberately
-  // top-heavy, since the strip is a hard edge and the bar is not - and the percent hugs the bar
-  // at 13px with 21px left to the bottom edge, so the caption reads as the bar's own value.
-  // The batch cancel hint keeps its own line.
+  // top-heavy, since the strip is a hard edge and the bar is not. A single operation's caption
+  // (percent, byte sizes, and the same-row transfer cancel hint) bonds to the bar with its cap
+  // tops 8px under it and 26px left to the bottom edge; the batch keeps its original caption
+  // line at 13px/21px, whose percent partners the separate hold-hint row below instead.
   draw_text(fonts_, kBoxX + 24, kBoxY + 38, kColorText, kTextSizeNormal, fitted_label.c_str());
   if (batch_transfer) {
     const int pw = text_width(fonts_, kTextSizeSmall, transfer_pct);
@@ -2288,7 +2343,19 @@ void Ui::draw_busy(const std::string &label, long long done, long long total,
     show_overall = true;
   }
   if (show_overall) {
-    draw_text(fonts_, bar_x, kBoxY + 90, kColorMuted, kTextSizeSmall, overall_pct);
+    std::string overall_text = overall_pct;
+    // A byte-scale total names the actual sizes: "how much is left" is the question a huge
+    // transfer raises, and a bare percent answers it poorly. The megabyte threshold keeps file
+    // and game counts (and trivial fetches) on the plain percent.
+    if (!batch_active_ && total >= (1LL << 20)) {
+      overall_text += "  -  " + format_bytes(static_cast<std::uint64_t>(std::max(0LL, done))) +
+                      " of " + format_bytes(static_cast<std::uint64_t>(total));
+    }
+    // Single operations pull the caption up to bond with the bar (cap tops 8px under it); the
+    // batch keeps its tuned original line - its percent partners the separate hold-hint row
+    // below, not a same-row cancel.
+    draw_text(fonts_, bar_x, kBoxY + (batch_active_ ? 90 : 85), kColorMuted, kTextSizeSmall,
+              overall_text.c_str());
   }
 
   if (batch_active_) {
@@ -2306,6 +2373,19 @@ void Ui::draw_busy(const std::string &label, long long done, long long total,
                       kColorMuted);
     x += 22;
     draw_text(fonts_, x, kBoxY + 94, kColorMuted, kTextSizeSmall, cancel_text);
+  } else if (transfer_cancel_hint_) {
+    // The single-transfer counterpart: a press (no hold) aborts the one in-flight download or
+    // upload. Unlike the batch hint this shares its row with the percent-and-bytes caption, so
+    // it sits on that caption's exact baseline - with both visible at once, any stagger just
+    // reads as a mistake.
+    const char *cancel_text = "cancel";
+    const int cancel_w = text_width(fonts_, kTextSizeSmall, cancel_text);
+    int x = kBoxX + kBoxW - 24 - (22 + cancel_w);
+    draw_button_shape(x, kBoxY + 71,
+                      transfer_cancel_is_circle_ ? ButtonSymbol::Circle : ButtonSymbol::Cross,
+                      kColorMuted);
+    x += 22;
+    draw_text(fonts_, x, kBoxY + 85, kColorMuted, kTextSizeSmall, cancel_text);
   }
 
   if (cancel_hint != nullptr) {

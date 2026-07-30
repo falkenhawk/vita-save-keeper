@@ -243,6 +243,11 @@ public:
   void set_batch_progress(std::string action, std::string game, std::size_t done_games,
                           std::size_t total_games, bool cancel_is_circle);
   void clear_batch_progress();
+  // While set (and no batch owns the modal), draw_busy carries a "[cancel button] cancel" hint
+  // under the bar: the single big Drive transfers arm this together with the pad poll that makes
+  // the press actually work.
+  void set_transfer_cancel_hint(bool cancel_is_circle);
+  void clear_transfer_cancel_hint();
 
 private:
   // The previous frame, dimmed, as a modal's background; null-safe against the details view's
@@ -298,6 +303,8 @@ private:
   std::size_t batch_total_{};
   bool batch_cancel_is_circle_{true};
   bool batch_active_{};
+  bool transfer_cancel_hint_{};
+  bool transfer_cancel_is_circle_{true};
   // Snapshot of the last frame's state so busy frames can repaint the UI, dimmed, behind the
   // progress modal. The embedded pointers reference App members that outlive any operation.
   UiState last_state_;

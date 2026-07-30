@@ -334,6 +334,11 @@ SaveIndex build_save_index(const std::vector<SaveRecord> &saves, const SaveIndex
   index.app_db_mtime = app_db_mtime;
   index.app_db_size = app_db_size;
   for (const SaveRecord &save : saves) {
+    // Not a save on this console: its fingerprint describes a folder that does not exist, and an
+    // indexed entry would survive into the next launch as a stale title for nothing.
+    if (save.backups_only) {
+      continue;
+    }
     SaveIndexEntry entry;
     entry.fingerprint = save.fingerprint;
     entry.from_app_db = save.title_from_app_db;

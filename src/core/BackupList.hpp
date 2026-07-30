@@ -18,13 +18,17 @@ struct BackupRow {
   bool data_folders{};
   // How many extra folders the entry has, for this row's label. Meaningless on any other row.
   std::size_t data_folder_count{};
+  // Replaces "New Backup" for a cloud-only entry: there is no save on this console to back up,
+  // and the row says so where the user would look for the backup action. Focusable but inert.
+  bool no_live_save{};
 
   static BackupRow new_backup_row();
   static BackupRow data_folders_row(std::size_t count);
+  static BackupRow no_live_save_row();
 
   // Rows that stand for an action rather than a backup. Every backup operation - restore, delete,
   // label, transfer - must refuse these, which is why the accessors return them as "no row".
-  bool is_sentinel() const { return new_backup || data_folders; }
+  bool is_sentinel() const { return new_backup || data_folders || no_live_save; }
 
   bool has_local() const { return !local_name.empty(); }
   bool has_remote() const { return !remote_name.empty(); }

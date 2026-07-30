@@ -137,6 +137,47 @@ std::size_t remove_empty_backup_folders(const std::string &backup_root) {
   return removed;
 }
 
+std::vector<std::string> list_backup_folder_names(const std::string &backup_root) {
+  std::vector<std::string> names;
+  DIR *root = opendir(backup_root.c_str());
+  if (!root) {
+    return names;
+  }
+  std::vector<std::string> folders;
+  while (dirent *entry = readdir(root)) {
+    if (!is_dot_entry(entry->d_name)) {
+      folders.push_back(entry->d_name);
+    }
+  }
+  closedir(root);
+
+  for (const std::string &folder : folders) {
+    const std::string path = join_path(backup_root, folder);
+    struct stat info {};
+    if (stat(path.c_str(), &info) != 0 || !S_ISDIR(info.st_mode)) {
+      continue;
+    }
+    DIR *dir = opendir(path.c_str());
+    if (!dir) {
+      continue;
+    }
+    bool has_zip = false;
+    while (dirent *entry = readdir(dir)) {
+      const std::size_t length = std::strlen(entry->d_name);
+      if (length > 4 && std::strcmp(entry->d_name + length - 4, ".zip") == 0) {
+        has_zip = true;
+        break;
+      }
+    }
+    closedir(dir);
+    if (has_zip) {
+      names.push_back(folder);
+    }
+  }
+  std::sort(names.begin(), names.end());
+  return names;
+}
+
 std::string allocate_backup_name(const BackupTimestamp &timestamp, const std::string &suffix,
                                  const std::vector<std::string> &local_names,
                                  const std::vector<std::string> &remote_names) {

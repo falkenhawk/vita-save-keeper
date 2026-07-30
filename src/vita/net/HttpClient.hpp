@@ -57,8 +57,12 @@ public:
                                     const std::string &file_path,
                                     const std::string &file_content_type,
                                     const std::string &bearer_token) const;
+  // expected_size_bytes, when known (the Drive listing reports it), scales the transfer deadline
+  // the same way uploads already scale theirs - a fixed timeout cannot fit arbitrarily large
+  // saves on Vita wifi. 0 keeps the legacy fixed deadline for small unsized fetches.
   HttpResponse download_file(const std::string &url, const std::string &file_path,
-                             const std::string &bearer_token) const;
+                             const std::string &bearer_token,
+                             long long expected_size_bytes = 0) const;
   HttpResponse delete_request(const std::string &url, const std::string &bearer_token) const;
 };
 

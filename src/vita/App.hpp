@@ -219,6 +219,14 @@ private:
                                           const std::string &parent_id);
   std::string resolved_drive_folder_name(const std::string &save_id) const;
   bool sync_drive_index();
+  // Rows for games that exist here only as backups - Drive folders and local backup folders
+  // matching no scanned save: installed on this console (the app database is the gate - it
+  // supplies the title, the icon, and the certainty the id belongs here) but with no savedata
+  // folder for the scan to find. Runs at startup (local backups need no Drive) and again inside
+  // sync_drive_index, so every sync converges: a restored game drops out through known-id
+  // coverage, and a folder deleted from the Drive web UI takes its row with it (unless local
+  // backups still argue for one).
+  void synthesize_backups_only_saves();
   void remove_drive_folder_if_empty(const std::string &folder_name);
   void refresh_remote_backups_view();
   std::vector<std::string> remote_backup_names() const;
@@ -271,11 +279,21 @@ private:
   // are transient until the run confirms, when this tab's picks fold into skipped_ids - so cancel
   // discards them, and other tabs' skips are never touched.
   std::size_t batch_selected_count() const;
+  // Visible saves the batch can actually take: backups-only rows are on screen but have nothing
+  // here to archive, so every batch count, seed, toggle, and fold skips them.
+  std::size_t batch_eligible_count() const;
   void update_sync_all_confirm_status();
   void batch_toggle_focused();
   void batch_toggle_all();
   void cancel_duplicate_backup_confirmation();
   bool poll_batch_cancel();
+  // Single-transfer cancel, armed around the big one-off Drive transfers (the restore download,
+  // Select's download and upload) and polled from the same HTTP cancel hook the batch uses. The
+  // batch keeps its own flag, and begin no-ops while a batch runs, so the two never trip each
+  // other. end_cancelable_transfer disarms and reports whether the cancel button was pressed.
+  void begin_cancelable_transfer();
+  bool end_cancelable_transfer();
+  bool poll_transfer_cancel();
   void set_status(StatusKind kind, std::string message);
   void clear_status();
   // compose_status_with_name for whichever screen will render it: the details footer line fits
@@ -327,6 +345,8 @@ private:
   // held cancel button can abort an in-flight upload without affecting single-file transfers.
   bool batch_running_{};
   bool batch_cancel_requested_{};
+  bool transfer_cancel_enabled_{};
+  bool transfer_cancel_requested_{};
   // Why the last credentials load failed, and the modal (if any) currently explaining it. Only
   // the user-initiated connect opens the modal; background token refreshes never do.
   GoogleSetupPrompt google_credentials_error_{GoogleSetupPrompt::None};
