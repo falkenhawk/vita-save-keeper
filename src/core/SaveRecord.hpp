@@ -57,6 +57,12 @@ struct SaveRecord {
   // Meaningful only with backups_only: at least one of the backups lives on Drive. Drives the
   // tile's cloud badge - a row whose backups are all on the card draws no badge at all.
   bool backups_on_drive{};
+  // For ordinary saves: the newest Drive backup's timestamp beats this save's own resolved time,
+  // so the Cloud holds newer progress than the console (played elsewhere, uploaded, not restored
+  // here yet). Same tile badge as a backups-only row - one meaning: the Cloud is ahead. Never set
+  // while the save's time is unknown; recomputed by refresh_drive_newer_marks wherever either
+  // side moves. Costs no IO - both times are already in memory.
+  bool drive_newer{};
 };
 
 } // namespace vsm

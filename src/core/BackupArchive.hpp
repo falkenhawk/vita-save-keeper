@@ -125,6 +125,12 @@ struct ArchiveReadResult {
 
 BackupResult create_backup_archive(const BackupRequest &request);
 RestoreResult restore_backup_archive(const RestoreRequest &request);
+
+// Recursively deletes a directory and everything in it, the folder itself included; a path that
+// does not exist counts as deleted. Refuses the unsafe roots the restore destination checks
+// refuse. The live-savedata delete uses this; restore keeps clearing contents only, because it
+// re-fills the same folder.
+bool remove_directory_tree(const std::string &path);
 // Extracts into a brand-new work directory without touching a live save. Metadata inspection uses
 // this before asking the Vita to mount an encrypted backup copy.
 RestoreResult extract_backup_archive_for_inspection(

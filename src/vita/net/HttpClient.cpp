@@ -4,6 +4,7 @@
 
 #include <curl/curl.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/power.h>
 #include <psp2/net/net.h>
 #include <psp2/net/netctl.h>
 #include <psp2/sysmodule.h>
@@ -330,6 +331,10 @@ bool HttpClient::network_startup(std::string *error_message) {
     curl_global_cleanup();
     return false;
   }
+
+  // Declare wireless use to the power manager. Together with the display ticks the busy modal
+  // sends, this keeps the radio out of its deeper power-save states while transfers run.
+  scePowerSetUsingWireless(SCE_TRUE);
 
   g_network_ready = true;
   return true;

@@ -110,6 +110,7 @@ else()
     c
     SceCtrl_stub
     SceAppMgr_stub
+    ScePower_stub
     SceAppUtil_stub
     SceCommonDialog_stub
     SceDisplay_stub

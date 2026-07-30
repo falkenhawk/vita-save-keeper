@@ -227,6 +227,11 @@ private:
   // coverage, and a folder deleted from the Drive web UI takes its row with it (unless local
   // backups still argue for one).
   void synthesize_backups_only_saves();
+  // Recomputes every record's drive_newer mark from the newest Drive backup and the record's own
+  // resolved time. No IO - both sides are already in memory - so callers run it whole-list after
+  // anything that moves either side: a Drive sync, a landed lazy time read, a restore, an
+  // upload, or a Drive-side delete.
+  void refresh_drive_newer_marks();
   void remove_drive_folder_if_empty(const std::string &folder_name);
   void refresh_remote_backups_view();
   std::vector<std::string> remote_backup_names() const;
@@ -246,6 +251,14 @@ private:
   std::string remote_file_id_for(const std::string &remote_name) const;
   long long remote_size_for(const std::string &remote_name) const;
   void perform_scoped_delete(bool delete_local, bool delete_remote);
+  // Start on the live-save ("New Backup") row: deletes the savedata itself, so a game can start
+  // over - the one save action the system UI never offers. Hard-gated: a local backup of the
+  // current content is forced first (matching-archive check, like the pre-restore snapshot), the
+  // same two-press confirm as backup deletes (the shared pending flag means every existing
+  // cancel path applies), and afterwards the row converts to backups-only - the delete is always
+  // one Restore away from undone. Only offered where the row would re-synthesize next launch
+  // (app-database-titled entries with no extra data folders).
+  void perform_savedata_delete();
   void begin_label_edit();
   bool rename_remote_backup(const SaveRecord &save, const std::string &remote_name,
                             const std::string &new_name);

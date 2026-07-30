@@ -1692,14 +1692,15 @@ void Ui::draw_title_grid(const UiState &state) {
                               is_selected);
       }
 
-      // A backups-only entry with backups on Drive: no save on this console, and restoring one
-      // is the only action. The Drive-only glyph the backup rows already use, bottom-right (the
-      // batch checkbox owns bottom-left), outlined instead of plated: the glyph's own shape
-      // redrawn dark at eight 1px offsets, then the real glyph on top. The outline keeps it
-      // legible over any icon art - a warm-colored icon would swallow the bare amber cloud, and
-      // a background plate covered a quarter of the tile. A row whose backups are all on the
-      // card draws no badge: its data already lives here.
-      if (save.backups_only && save.backups_on_drive) {
+      // One badge, one meaning: the Cloud is ahead of this console. On a backups-only entry that
+      // is Drive holding backups for a save that does not exist here; on an ordinary save it is
+      // the newest Drive backup's stamp beating the local save time (played elsewhere, uploaded,
+      // not restored here yet). The Drive-only glyph the backup rows already use, bottom-right
+      // (the batch checkbox owns bottom-left), outlined instead of plated: the glyph's own shape
+      // redrawn dark at eight 1px offsets, then the real glyph on top, legible over any icon art.
+      const bool cloud_is_ahead =
+          save.backups_only ? save.backups_on_drive : save.drive_newer;
+      if (cloud_is_ahead) {
         const float badge_x = static_cast<float>(x + kTileSize - 28 - 3);
         const float badge_y = static_cast<float>(y + kTileSize - 18 - 3);
         if (cloud_drive_only_tex_) {
@@ -1908,11 +1909,12 @@ void Ui::draw_backup_panel(const UiState &state) {
       vita2d_disable_clipping();
     } else {
       const std::string label = fit_text(kTextSizeSmall, display, max_text_width);
-      // The backups-only explainer stays muted even when focused: it is informational, and the
-      // full text color would promise an action the row does not have.
-      draw_text(fonts_, 546, y + 24,
-                selected && !row.no_live_save ? kColorText : kColorMuted,
-                kTextSizeSmall, label.c_str());
+      // The backups-only explainer stays dim even when focused - dimmer than muted, down at the
+      // idle-dot tone: it is pure information, and anything brighter promises an action the row
+      // does not have.
+      const unsigned int label_color =
+          row.no_live_save ? kColorIdleDot : (selected ? kColorText : kColorMuted);
+      draw_text(fonts_, 546, y + 24, label_color, kTextSizeSmall, label.c_str());
     }
     y += 42;
   }
@@ -1932,6 +1934,17 @@ void Ui::draw_backup_panel(const UiState &state) {
   // window's note row - so the pictogram yields.
   if (all_rows.size() > 1 && !state.sync_all_confirmation_pending) {
     draw_rstick_hint(934, 470);
+  }
+
+  // The armed savedata delete gets a second, quieter line above the prompt: the action is
+  // unusual enough to spell out. Its caps sit clear of the list's down-chevron (ends y=438),
+  // its descenders clear of the status line's caps below, and the copy is short enough for the
+  // status line's 380px budget outright - the fit_text is a guard, not a crutch; an earlier
+  // longer draft ellipsized mid-sentence.
+  if (state.savedata_delete_armed) {
+    const std::string note = fit_text(
+        kTextSizeTiny, "Current save will be backed up before wiping the state.", 380);
+    draw_text(fonts_, 532, 456, kColorMuted, kTextSizeTiny, note.c_str());
   }
 
   draw_status_line(state);
@@ -2119,6 +2132,17 @@ void Ui::draw_footer(const UiState &state) {
   }
   if (focused_row) {
     hints.push_back({ButtonSymbol::Start, "Delete", nullptr, nullptr});
+  } else if (new_backup_focused && state.saves && state.visible_saves &&
+             state.selected_save < state.visible_saves->size()) {
+    // Start keeps its meaning on the live-save row - it deletes the focused thing, which here is
+    // the savedata itself. Offered exactly where the action is (app-database-titled entries with
+    // no extra data folders), so the hint never advertises a refusal.
+    const SaveRecord &focused_save =
+        (*state.saves)[(*state.visible_saves)[state.selected_save]];
+    if (!focused_save.backups_only && focused_save.extra_paths.empty() &&
+        focused_save.title_from_app_db) {
+      hints.push_back({ButtonSymbol::Start, "Delete", "(hold)", nullptr});
+    }
   }
   // Select moves the focused snapshot across: Upload from a card-only row, Download to the card
   // from a Drive-only row. A synced row has no tap action left, so the slot disappears rather
@@ -2248,9 +2272,14 @@ void Ui::draw_busy(const std::string &label, long long done, long long total,
   // Long work runs with nobody touching a button, so the console would auto-suspend part way
   // through a transfer. Every such operation pumps this modal from its progress callback, which
   // makes this the single place that covers all of them - and only them, since ordinary browsing
-  // draws through draw() and leaves the idle timer alone. A tick rather than a lock, so an
-  // operation that fails or is cancelled cannot leave suspension disabled behind it.
+  // draws through draw() and leaves the idle timer alone. Ticks rather than locks, so an
+  // operation that fails or is cancelled cannot leave anything stuck behind it.
   sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND);
+  // The display going dark is the Vita's deeper power-save state and wifi throughput sinks with
+  // it - on hardware the screen went fully off mid-restore with only the suspend tick in place.
+  // Modal operations keep the panel lit and undimmed for as long as they pump frames.
+  sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_OLED_OFF);
+  sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_OLED_DIMMING);
   ++frame_counter_;
   vita2d_start_drawing();
   vita2d_clear_screen();
@@ -2295,11 +2324,11 @@ void Ui::draw_busy(const std::string &label, long long done, long long total,
   }
   // Spacing is measured in rendered ink, not cap height: the title's quotes reach above the caps
   // and its descenders below the baseline, so it occupies 18 rows while the digits occupy 12.
-  // The title gets 20px of air under the accent strip and 15px down to the bar - deliberately
-  // top-heavy, since the strip is a hard edge and the bar is not. A single operation's caption
-  // (percent, byte sizes, and the same-row transfer cancel hint) bonds to the bar with its cap
-  // tops 8px under it and 26px left to the bottom edge; the batch keeps its original caption
-  // line at 13px/21px, whose percent partners the separate hold-hint row below instead.
+  // The title gets 20px of air under the accent strip and 13px down to the bar - deliberately
+  // top-heavy, since the strip is a hard edge and the bar is not. The caption (percent, and for
+  // single operations the byte sizes) bonds to the bar with its cap tops 8px under it; both
+  // cancel hints share one row below it, their baselines 12px under the caption's with 16px
+  // left to the bottom edge.
   draw_text(fonts_, kBoxX + 24, kBoxY + 38, kColorText, kTextSizeNormal, fitted_label.c_str());
   if (batch_transfer) {
     const int pw = text_width(fonts_, kTextSizeSmall, transfer_pct);
@@ -2308,7 +2337,7 @@ void Ui::draw_busy(const std::string &label, long long done, long long total,
   }
 
   const int bar_x = kBoxX + 24;
-  const int bar_y = kBoxY + 57;
+  const int bar_y = kBoxY + 55;
   const int bar_w = kBoxW - 48;
   const int bar_h = 8;
   vita2d_draw_rectangle(bar_x, bar_y, bar_w, bar_h, RGBA8(255, 255, 255, 24));
@@ -2351,41 +2380,34 @@ void Ui::draw_busy(const std::string &label, long long done, long long total,
       overall_text += "  -  " + format_bytes(static_cast<std::uint64_t>(std::max(0LL, done))) +
                       " of " + format_bytes(static_cast<std::uint64_t>(total));
     }
-    // Single operations pull the caption up to bond with the bar (cap tops 8px under it); the
-    // batch keeps its tuned original line - its percent partners the separate hold-hint row
-    // below, not a same-row cancel.
-    draw_text(fonts_, bar_x, kBoxY + (batch_active_ ? 90 : 85), kColorMuted, kTextSizeSmall,
-              overall_text.c_str());
+    draw_text(fonts_, bar_x, kBoxY + 83, kColorMuted, kTextSizeSmall, overall_text.c_str());
   }
 
   if (batch_active_) {
-    // "hold (cancel) to cancel" hint, right-aligned under the bar; the percent label sits 4px
-    // higher than this line by design.
+    // "hold (cancel) to cancel", right-aligned on the shared hint row under the caption.
     const char *hold_text = "hold";
     const char *cancel_text = "to cancel";
     const int hold_w = text_width(fonts_, kTextSizeSmall, hold_text);
     const int cancel_w = text_width(fonts_, kTextSizeSmall, cancel_text);
     int x = kBoxX + kBoxW - 24 - (hold_w + 6 + 22 + cancel_w);
-    draw_text(fonts_, x, kBoxY + 94, kColorMuted, kTextSizeSmall, hold_text);
+    draw_text(fonts_, x, kBoxY + 95, kColorMuted, kTextSizeSmall, hold_text);
     x += hold_w + 6;
-    draw_button_shape(x, kBoxY + 80,
+    draw_button_shape(x, kBoxY + 81,
                       batch_cancel_is_circle_ ? ButtonSymbol::Circle : ButtonSymbol::Cross,
                       kColorMuted);
     x += 22;
-    draw_text(fonts_, x, kBoxY + 94, kColorMuted, kTextSizeSmall, cancel_text);
+    draw_text(fonts_, x, kBoxY + 95, kColorMuted, kTextSizeSmall, cancel_text);
   } else if (transfer_cancel_hint_) {
-    // The single-transfer counterpart: a press (no hold) aborts the one in-flight download or
-    // upload. Unlike the batch hint this shares its row with the percent-and-bytes caption, so
-    // it sits on that caption's exact baseline - with both visible at once, any stagger just
-    // reads as a mistake.
+    // The single-transfer counterpart, in the batch hint's exact place: a press (no hold)
+    // aborts the one in-flight download or upload.
     const char *cancel_text = "cancel";
     const int cancel_w = text_width(fonts_, kTextSizeSmall, cancel_text);
     int x = kBoxX + kBoxW - 24 - (22 + cancel_w);
-    draw_button_shape(x, kBoxY + 71,
+    draw_button_shape(x, kBoxY + 81,
                       transfer_cancel_is_circle_ ? ButtonSymbol::Circle : ButtonSymbol::Cross,
                       kColorMuted);
     x += 22;
-    draw_text(fonts_, x, kBoxY + 85, kColorMuted, kTextSizeSmall, cancel_text);
+    draw_text(fonts_, x, kBoxY + 95, kColorMuted, kTextSizeSmall, cancel_text);
   }
 
   if (cancel_hint != nullptr) {

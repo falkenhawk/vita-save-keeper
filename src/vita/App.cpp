@@ -24,6 +24,7 @@
 #include <psp2/kernel/modulemgr.h>
 #include <psp2/io/stat.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/power.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/system_param.h>
 #include <taihen.h>
@@ -901,6 +902,8 @@ void App::complete_async_read(bool wait) {
   }
   mount_work_.discard = false;
   mount_work_state_.store(0);
+  // A time just landed; the Cloud-is-ahead marks depend on it.
+  refresh_drive_newer_marks();
 }
 
 bool App::resolve_save_time(SaveRecord *save) {
@@ -1424,6 +1427,7 @@ bool App::resolve_all_save_times() {
   // to do.
   pending_time_reads_.clear();
   flush_save_index();
+  refresh_drive_newer_marks();
   return true;
 }
 
@@ -1730,6 +1734,31 @@ void App::handle_delete_button() {
   if (data_folders_row_focused()) {
     return;
   }
+  // On the live-save row Start deletes the savedata itself. Sharing delete_confirmation_pending_
+  // keeps every existing cancel path (selection moves, other actions) working unchanged; the
+  // second press still lands here with the same row focused, which is what routes it.
+  if (new_backup_row_focused() && !selected->backups_only) {
+    if (!selected->extra_paths.empty()) {
+      set_status(StatusKind::Info, "Not available for entries with extra data folders.");
+      return;
+    }
+    if (!selected->title_from_app_db) {
+      // Without an app-database row the backups-only row left behind would vanish at the next
+      // launch (the synthesis gate), stranding the backups invisibly. PSP saves land here.
+      set_status(StatusKind::Info, "Deleting savedata is only available for installed games.");
+      return;
+    }
+    if (!delete_confirmation_pending_) {
+      restore_confirmation_pending_ = false;
+      delete_confirmation_pending_ = true;
+      set_status(StatusKind::Info,
+                 status_with_name("Delete the savedata of ", selected->display_name, "?"));
+      return;
+    }
+    delete_confirmation_pending_ = false;
+    perform_savedata_delete();
+    return;
+  }
   const BackupRow *row = selected_backup_row();
   if (!row) {
     set_status(StatusKind::Info, "Select a backup to delete.");
@@ -1766,6 +1795,79 @@ void App::handle_delete_button() {
   }
   delete_confirmation_pending_ = false;
   perform_scoped_delete(row->has_local(), row->has_remote());
+}
+
+void App::perform_savedata_delete() {
+  const SaveRecord *selected = selected_save_record();
+  if (!selected || selected->backups_only || selected->path.empty()) {
+    return;
+  }
+  // The refreshes below rebuild lists and can invalidate the pointer.
+  const SaveRecord save = *selected;
+
+  // Same safety net as restore: nothing is deleted unless the current content provably exists in
+  // a local archive. An unreadable save cannot be backed up, so it cannot be deleted either.
+  ui_.draw_busy("Checking current save", 0, -1);
+  bool signature_ok = false;
+  const std::vector<ArchiveEntryInfo> entries = compute_save_entries(
+      save, &signature_ok, [this](std::uint64_t done, std::uint64_t total) {
+        ui_.draw_busy("Checking current save", static_cast<long long>(done),
+                      static_cast<long long>(total));
+      });
+  if (!signature_ok) {
+    set_status(StatusKind::Error, "Could not read the save - nothing was deleted.");
+    return;
+  }
+  if (!entries.empty() &&
+      matching_backup_name(entries, save.id, local_backups_).empty()) {
+    const LocalSnapshotResult auto_result =
+        create_local_snapshot(save, " auto", "Backing up current save");
+    if (!auto_result.ok) {
+      set_status(StatusKind::Error,
+                 "Could not back up the current save - nothing was deleted.");
+      return;
+    }
+    refresh_local_backups();
+  }
+
+  // The worker may be mid-mount of this very folder for a queued read; land it before the files
+  // disappear out from under it.
+  complete_async_read(true);
+  ui_.draw_busy("Deleting savedata", 0, -1);
+  if (!remove_directory_tree(save.path)) {
+    // Some files may already be gone; the record's time state is re-derived so the grid does not
+    // keep showing a save that is now partial.
+    invalidate_save_time(save);
+    queue_selected_save_time_read();
+    set_status(StatusKind::Error, "Could not delete the savedata.");
+    return;
+  }
+
+  // The row lives on as backups-only: same state a Drive sync would synthesize, so a restore
+  // brings everything back and the next launch converges either way.
+  for (SaveRecord &record : saves_) {
+    if (record.id == save.id && record.platform == save.platform) {
+      record.backups_only = true;
+      const std::string folder_name = resolved_drive_folder_name(record.id);
+      record.backups_on_drive =
+          !folder_name.empty() && drive_index_.find(folder_name) != drive_index_.end();
+      record.save_time_known = false;
+      record.save_time_requires_mount = false;
+      record.fingerprint = {};
+      break;
+    }
+  }
+  // The index entry describes a folder that no longer exists; the whole entry goes, not just the
+  // time half, so nothing stale survives into the next launch.
+  save_index_.entries.erase(save.id);
+  save_index_dirty_ = true;
+  flush_save_index();
+  refresh_local_backups();
+  refresh_remote_backups_view();
+  selected_backup_ = default_backup_row();
+  set_status(StatusKind::Success,
+             status_with_name("Deleted the savedata of ", save.display_name,
+                              " - backups remain."));
 }
 
 void App::perform_scoped_delete(bool delete_local, bool delete_remote) {
@@ -1865,6 +1967,9 @@ void App::perform_scoped_delete(bool delete_local, bool delete_remote) {
   if (selected_backup_ >= backup_rows_.size()) {
     selected_backup_ = backup_rows_.empty() ? 0 : backup_rows_.size() - 1;
   }
+  // Either side of the Cloud-is-ahead comparison may just have moved: a Drive delete can change
+  // the newest remote, and deleting the card copy of that newest backup re-exposes the mark.
+  refresh_drive_newer_marks();
   // A backups-only row that just lost its last backup anywhere stands for nothing - no live save,
   // no card copy, no cloud copy - so the record goes too, the way the config-only ghost row does.
   // Both lists are current here: the remote branch refreshed the Drive view, and a local copy of
@@ -2093,6 +2198,9 @@ void App::handle_restore() {
     // does not keep showing the pre-restore save time.
     invalidate_save_time(save);
     queue_selected_save_time_read();
+    // A plain save's time re-resolved inside invalidate_save_time just now; an encrypted one
+    // lost its mark with its time, until the queued read lands and recomputes it.
+    refresh_drive_newer_marks();
     if (sidecar_targets_unsafe) {
       set_status(StatusKind::Info,
                  status_with_name("Restored ", display_backup_name(backup_name),
@@ -2590,6 +2698,7 @@ bool App::sync_drive_index() {
   drive_root_folder_id_ = root_id;
   drive_synced_ = true;
   synthesize_backups_only_saves();
+  refresh_drive_newer_marks();
   return true;
 }
 
@@ -2680,6 +2789,40 @@ void App::synthesize_backups_only_saves() {
   apply_save_sort(&saves_, sort_mode_, newest_backup_by_folder());
   rebuild_visible_saves();
   refocus_selection_by_id(focused_id);
+}
+
+void App::refresh_drive_newer_marks() {
+  for (SaveRecord &save : saves_) {
+    save.drive_newer = false;
+    if (save.backups_only || !save.save_time_known) {
+      continue;
+    }
+    const std::string folder_name = resolved_drive_folder_name(save.id);
+    if (folder_name.empty()) {
+      continue;
+    }
+    const auto indexed = drive_index_.find(folder_name);
+    if (indexed == drive_index_.end() || indexed->second.empty()) {
+      continue;
+    }
+    // Lists are sorted newest first, so the front entry is the only candidate.
+    const std::string &newest_remote = indexed->second.front().name;
+    if (!backup_time_is_newer_than_save(newest_remote, save.saved_at)) {
+      continue;
+    }
+    // The badge means "the Cloud holds progress this console does not": a card copy of that same
+    // newest backup satisfies the console, however old the live save is. The directory scan runs
+    // only for the rare saves that get this far, never for the whole grid.
+    const std::string remote_identity = backup_identity(newest_remote);
+    bool on_card = false;
+    for (const std::string &local_name : scan_local_backup_names(kBackupRoot, save.id)) {
+      if (backup_identity(local_name) == remote_identity) {
+        on_card = true;
+        break;
+      }
+    }
+    save.drive_newer = !on_card;
+  }
 }
 
 void App::refresh_remote_backups_view() {
@@ -2933,6 +3076,8 @@ bool App::download_remote_backup_to_card(const SaveRecord &save, const BackupRow
   }
   refresh_local_backups();
   focus_backup_row_by_identity(row.remote_name);
+  // The downloaded copy may be the very backup the Cloud-is-ahead mark pointed at.
+  refresh_drive_newer_marks();
   if (error) {
     error->clear();
   }
@@ -3618,6 +3763,7 @@ BackupUploadResult App::upload_local_backup_impl(const SaveRecord &save,
     list.push_back({uploaded.files[0].name, uploaded.files[0].id});
     std::sort(list.begin(), list.end(),
               [](const RemoteBackup &a, const RemoteBackup &b) { return a.name > b.name; });
+    refresh_drive_newer_marks();
   } else {
     sync_drive_index();
   }
@@ -4796,6 +4942,13 @@ int App::run() {
     return -1;
   }
 
+  // TLS on the Vita CPU is the throughput ceiling for Drive transfers (and the zip/CRC work is
+  // CPU-bound too); the default app clock leaves both well under what the hardware allows.
+  // 444 MHz is the documented per-app maximum, and clock settings are per-app state the system
+  // restores when the app exits.
+  scePowerSetArmClockFrequency(444);
+  scePowerSetBusClockFrequency(222);
+
   // Slot timestamps are optional. If the mount bridge cannot load, all backup operations still
   // work and metadata falls back to save-file times as before. The result gates the kernel-bridge
   // syscall so a failed load degrades to the AppMgr mount instead of calling an unloaded module.
@@ -4975,6 +5128,8 @@ int App::run() {
   bool select_hold_consumed = false;
   int square_hold_frames = 0;
   bool square_hold_consumed = false;
+  int start_hold_frames = 0;
+  bool start_hold_consumed = false;
   int triangle_hold_frames = 0;
   bool triangle_hold_consumed = false;
   // L held inside the batch window flips the whole tab's checkboxes, with the same one-second
@@ -5369,6 +5524,8 @@ int App::run() {
       triangle_hold_consumed = false;
       square_hold_frames = 0;
       square_hold_consumed = false;
+      start_hold_frames = 0;
+      start_hold_consumed = false;
       select_hold_frames = 0;
       if ((pressed & SCE_CTRL_SELECT) != 0) {
         // A fresh Select press confirms, as an unlabeled twin of the confirm button - the finger
@@ -5426,8 +5583,26 @@ int App::run() {
         select_hold_frames = 0;
         select_hold_consumed = false;
       }
-      if ((pressed & SCE_CTRL_START) != 0) {
-        handle_delete_button();
+      // Start: on a backup row (and inside the armed confirm and the scope prompt) a press acts
+      // immediately, as ever - waiting for release would make those modal controls feel broken.
+      // On the live-save row the savedata delete arms only after a deliberate one-second hold; a
+      // tap there does nothing, which is what the footer's "(hold)" qualifier promises.
+      if ((buttons & SCE_CTRL_START) != 0) {
+        const bool immediate = delete_confirmation_pending_ || delete_scope_prompt_pending_ ||
+                               !new_backup_row_focused();
+        if ((pressed & SCE_CTRL_START) != 0 && immediate) {
+          start_hold_consumed = true;
+          handle_delete_button();
+        } else if (!immediate) {
+          ++start_hold_frames;
+          if (!start_hold_consumed && start_hold_frames >= kSelectHoldTriggerFrames) {
+            start_hold_consumed = true;
+            handle_delete_button();
+          }
+        }
+      } else {
+        start_hold_frames = 0;
+        start_hold_consumed = false;
       }
       // Square mirrors the Select tap/hold split: a tap keeps its sort meaning, a one-second hold
       // opens the label editor for the focused backup. While the delete-scope prompt is open the
@@ -5501,6 +5676,9 @@ int App::run() {
     ui_state.selected_backup = selected_backup_;
     ui_state.restore_confirmation_pending = restore_confirmation_pending_;
     ui_state.delete_confirmation_pending = delete_confirmation_pending_;
+    // The armed savedata delete draws an extra explanation line; the shared flag alone cannot
+    // tell the two delete confirms apart, but the focused row can.
+    ui_state.savedata_delete_armed = delete_confirmation_pending_ && new_backup_row_focused();
     ui_state.delete_scope_prompt_pending = delete_scope_prompt_pending_;
     ui_state.sync_all_confirmation_pending = sync_all_confirmation_pending_;
     ui_state.sync_all_will_upload = sync_all_will_upload_;
@@ -5549,6 +5727,10 @@ int App::run() {
       ui_state.hold_gauge_fraction = gauge_fraction(batch_l_hold_frames);
       ui_state.status_message = batch_deselected_.empty() ? "Keep holding to unselect all"
                                                           : "Keep holding to select all";
+      ui_state.status_kind = StatusKind::Info;
+    } else if (!start_hold_consumed && start_hold_frames >= kSelectHoldTapFrames) {
+      ui_state.hold_gauge_fraction = gauge_fraction(start_hold_frames);
+      ui_state.status_message = "Keep holding to delete this game's savedata";
       ui_state.status_kind = StatusKind::Info;
     }
     ui_.draw(ui_state);

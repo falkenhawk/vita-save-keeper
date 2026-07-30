@@ -164,6 +164,9 @@ struct UiState {
   std::size_t selected_backup{};
   bool restore_confirmation_pending{};
   bool delete_confirmation_pending{};
+  // The delete confirm is armed on the live-save row: the prompt means the savedata itself, and
+  // the panel adds a quiet line spelling out what will happen.
+  bool savedata_delete_armed{};
   bool delete_scope_prompt_pending{};
   bool sync_all_confirmation_pending{};
   // Whether the pending batch would upload; without Drive the confirm hint drops "& Upload".

@@ -1478,6 +1478,39 @@ void test_backup_only_save_keys_normalizes_ids_and_deduplicates() {
   EXPECT_EQ(keys[0], "PCSE00633");
 }
 
+void test_remove_directory_tree_deletes_recursively_and_refuses_roots() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-remove-tree-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "sce_sys");
+  std::filesystem::create_directories(base / "slot0000" / "nested");
+  {
+    std::ofstream(base / "sce_sys" / "sdslot.dat") << "x";
+    std::ofstream(base / "slot0000" / "nested" / "data.bin") << "y";
+  }
+  EXPECT_TRUE(vsm::remove_directory_tree(base.string()));
+  EXPECT_TRUE(!std::filesystem::exists(base));
+  // A path that no longer exists counts as deleted; the unsafe roots are refused outright.
+  EXPECT_TRUE(vsm::remove_directory_tree(base.string()));
+  EXPECT_TRUE(!vsm::remove_directory_tree(""));
+  EXPECT_TRUE(!vsm::remove_directory_tree("/"));
+}
+
+void test_backup_time_newer_comparison_uses_identity_with_margin() {
+  const vsm::SaveDateTime saved = {2026, 7, 30, 12, 0, 0};
+  // Clearly newer, labeled and countered names included - identity is what compares.
+  EXPECT_TRUE(vsm::backup_time_is_newer_than_save("2026-07-30 14-00-00.zip", saved));
+  EXPECT_TRUE(vsm::backup_time_is_newer_than_save("2026-07-30 14-00-00 before-boss.zip", saved));
+  EXPECT_TRUE(vsm::backup_time_is_newer_than_save("2026-07-30 14-00-00~2 auto.zip", saved));
+  // The backup this very save produced (equal stamps) and anything inside the one-minute margin
+  // must not read as newer progress; older and foreign names never do.
+  EXPECT_TRUE(!vsm::backup_time_is_newer_than_save("2026-07-30 12-00-00.zip", saved));
+  EXPECT_TRUE(!vsm::backup_time_is_newer_than_save("2026-07-30 12-00-45.zip", saved));
+  EXPECT_TRUE(!vsm::backup_time_is_newer_than_save("2026-07-30 11-00-00.zip", saved));
+  EXPECT_TRUE(!vsm::backup_time_is_newer_than_save("not-a-backup.zip", saved));
+  EXPECT_TRUE(vsm::backup_time_is_newer_than_save("2026-07-30 12-01-30.zip", saved));
+}
+
 void test_no_live_save_row_is_an_inert_sentinel() {
   const vsm::BackupRow row = vsm::BackupRow::no_live_save_row();
   EXPECT_TRUE(row.is_sentinel());
@@ -3413,6 +3446,8 @@ int main() {
   test_backup_only_save_keys_normalizes_ids_and_deduplicates();
   test_no_live_save_row_is_an_inert_sentinel();
   test_backup_folder_listing_reports_zip_holders_only();
+  test_remove_directory_tree_deletes_recursively_and_refuses_roots();
+  test_backup_time_newer_comparison_uses_identity_with_margin();
   test_backup_archive_reads_bounded_sdslot_entry_without_restoring();
   test_legacy_zip_metadata_can_be_recovered_without_rewriting_the_archive();
   test_backup_archive_extracts_to_isolated_inspection_directory_and_cleans_up();

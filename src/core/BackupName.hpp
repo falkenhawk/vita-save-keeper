@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/SaveSlotMetadata.hpp"
+
 #include <cstddef>
 #include <string>
 
@@ -54,5 +56,12 @@ std::string sanitize_backup_label(const std::string &raw_label);
 // A label ending in the word "auto" would make the renamed file indistinguishable from an
 // automatic pre-restore snapshot; such labels are rejected at edit time.
 bool backup_label_conflicts_with_auto(const std::string &label);
+
+// True when the backup name's timestamp identity is newer than the given save time by more than
+// a minute - the margin absorbs fallback-clock names and filesystem rounding, and it keeps the
+// backup a save's own content produced (equal stamps, since 1.1 names backups by the real save
+// time) from counting as "newer". False for any name without a valid timestamp prefix. Feeds
+// the "the Cloud holds newer progress" tile mark.
+bool backup_time_is_newer_than_save(const std::string &backup_name, const SaveDateTime &saved_at);
 
 } // namespace vsm

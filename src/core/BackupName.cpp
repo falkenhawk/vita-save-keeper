@@ -235,4 +235,18 @@ bool backup_label_conflicts_with_auto(const std::string &label) {
          label.compare(label.size() - kAutoLength - 1, kAutoLength + 1, " auto") == 0;
 }
 
+bool backup_time_is_newer_than_save(const std::string &backup_name,
+                                    const SaveDateTime &saved_at) {
+  BackupTimestamp timestamp;
+  if (!parse_backup_timestamp(backup_name, &timestamp)) {
+    return false;
+  }
+  const SaveDateTime backup_time = {timestamp.year, timestamp.month,  timestamp.day,
+                                    timestamp.hour, timestamp.minute, timestamp.second};
+  // Both stamps are local-time; the minute of slack is what keeps a backup made from this very
+  // save (equal stamps) or a filesystem-rounded fallback from reading as newer progress.
+  return save_datetime_to_local_epoch(backup_time) >
+         save_datetime_to_local_epoch(saved_at) + 60;
+}
+
 } // namespace vsm

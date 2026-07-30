@@ -1141,6 +1141,13 @@ ArchiveReadResult read_stored_backup_entry(const std::string &archive_path,
   return result;
 }
 
+bool remove_directory_tree(const std::string &path) {
+  if (path.empty() || path == "/") {
+    return false;
+  }
+  return remove_tree(path);
+}
+
 RestoreResult restore_backup_archive(const RestoreRequest &request) {
   const bool multi_target = !request.targets.empty();
   if (multi_target) {
