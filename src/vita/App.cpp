@@ -11,6 +11,7 @@
 #include "core/InputGesture.hpp"
 #include "core/PathUtil.hpp"
 #include "core/SaveScanner.hpp"
+#include "core/SfoParser.hpp"
 #include "core/Selection.hpp"
 #include "core/TrackedFolders.hpp"
 #include "vita/SaveAppDbMetadata.hpp"
@@ -55,6 +56,13 @@ constexpr int kFramesPerSecond = 60;
 constexpr int kAuthMaxPollFailures = 5;
 constexpr const char *kDataRoot = "ux0:data/save-keeper";
 constexpr const char *kBackupRoot = "ux0:data/save-keeper/backups";
+// Icons unpacked from PSP backups so a row whose savedata is gone keeps its art. Derived data:
+// deleting the folder only costs the next launch one re-extract per row.
+constexpr const char *kBackupIconCacheRoot = "ux0:data/save-keeper/icons";
+// A PSP PARAM.SFO is a couple of KB and an ICON0.PNG a handful; both bounds are far above what
+// the format uses and exist so a hand-made archive cannot make the app read something huge.
+constexpr std::size_t kMaxPspParamSfoSize = 64 * 1024;
+constexpr std::size_t kMaxPspIconSize = 512 * 1024;
 constexpr const char *kGoogleClientPath = "ux0:data/save-keeper/google-client.json";
 constexpr const char *kGoogleTokenPath = "ux0:data/save-keeper/google-token.json";
 constexpr const char *kSettingsPath = "ux0:data/save-keeper/settings.txt";
@@ -137,12 +145,30 @@ unsigned int buttons_pressed_since(const SceCtrlData &armed) {
 constexpr std::size_t kMaxSdslotFileSize =
     kSdslotHeaderSize + kMaxSaveSlots * kSdslotRecordSize;
 
+// Every PSP savedata root Adrenaline can be pointed at, in the order it is searched. ux0 is the
+// stock location; uma0 is the second slot (SD2VITA / a real memory card on a PS TV), imc0 the
+// 1000-model internal memory, xmc0 the alternate mount some setups expose. A root that does not
+// exist lists as empty, so naming all four costs one failed opendir each and finds saves the
+// ux0-only scan missed entirely.
+const std::vector<std::string> &psp_save_roots() {
+  static const std::vector<std::string> roots = {
+      "ux0:pspemu/PSP/SAVEDATA",
+      "uma0:pspemu/PSP/SAVEDATA",
+      "imc0:pspemu/PSP/SAVEDATA",
+      "xmc0:pspemu/PSP/SAVEDATA",
+  };
+  return roots;
+}
+
 std::vector<SaveRoot> default_save_roots() {
-  return {
+  std::vector<SaveRoot> roots = {
       {SavePlatform::Vita, "ux0:user/00/savedata"},
       {SavePlatform::GameCard, "grw0:savedata"},
-      {SavePlatform::Psp, "ux0:pspemu/PSP/SAVEDATA"},
   };
+  for (const std::string &psp_root : psp_save_roots()) {
+    roots.push_back({SavePlatform::Psp, psp_root});
+  }
+  return roots;
 }
 
 BackupTimestamp backup_timestamp_from(const SaveDateTime &value) {
@@ -486,6 +512,33 @@ std::string drive_folder_name_for(const std::string &save_id) {
 bool path_is_directory(const std::string &path) {
   struct stat info {};
   return stat(path.c_str(), &info) == 0 && S_ISDIR(info.st_mode);
+}
+
+bool path_is_regular_file(const std::string &path) {
+  struct stat info {};
+  return stat(path.c_str(), &info) == 0 && S_ISREG(info.st_mode);
+}
+
+// Writes through a temporary and renames, so an interrupted write can never leave a half PNG
+// that vita2d would then fail to decode every launch.
+bool write_file_atomic(const std::string &path, const std::vector<unsigned char> &data) {
+  const std::string temporary_path = path + ".tmp";
+  FILE *file = std::fopen(temporary_path.c_str(), "wb");
+  if (!file) {
+    return false;
+  }
+  const bool written =
+      data.empty() || std::fwrite(data.data(), 1, data.size(), file) == data.size();
+  const bool closed = std::fclose(file) == 0;
+  if (!written || !closed) {
+    std::remove(temporary_path.c_str());
+    return false;
+  }
+  if (std::rename(temporary_path.c_str(), path.c_str()) != 0) {
+    std::remove(temporary_path.c_str());
+    return false;
+  }
+  return true;
 }
 
 // Sorted names of the immediate child directories of root_path (dirs only, "." and ".." skipped).
@@ -1771,9 +1824,10 @@ void App::handle_delete_button() {
       set_status(StatusKind::Info, "Not available for entries with extra data folders.");
       return;
     }
-    if (!selected->title_from_app_db) {
-      // Without an app-database row the backups-only row left behind would vanish at the next
-      // launch (the synthesis gate), stranding the backups invisibly. PSP saves land here.
+    // Without something to re-synthesize the row from, the backups left behind would go invisible
+    // at the next launch. An app-database row covers a Vita game; a PSP save is covered by its
+    // own detection, which needs no database.
+    if (!selected->title_from_app_db && selected->platform != SavePlatform::Psp) {
       set_status(StatusKind::Info, "Deleting savedata is only available for installed games.");
       return;
     }
@@ -2790,6 +2844,95 @@ void App::queue_drive_newer_candidates() {
   }
 }
 
+bool App::backup_is_psp_save(const std::string &save_id) const {
+  // The archive itself is the authority when the card holds one. Newest first; the first archive
+  // that reads decides, since a save's layout never changes between its own backups.
+  std::vector<std::string> local_names = scan_local_backup_names(kBackupRoot, save_id);
+  std::sort(local_names.begin(), local_names.end(), std::greater<std::string>());
+  for (const std::string &name : local_names) {
+    std::vector<ArchiveEntryInfo> entries;
+    if (!read_archive_central_directory(local_backup_archive_path(kBackupRoot, save_id, name),
+                                        &entries)) {
+      continue;
+    }
+    for (const ArchiveEntryInfo &entry : entries) {
+      // A Vita save's slot metadata lives under sce_sys/; a PSP save keeps PARAM.SFO at the root.
+      if (entry.path.compare(0, 8, "sce_sys/") == 0) {
+        return false;
+      }
+      if (entry.path == "PARAM.SFO" || entry.path == "param.sfo") {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Drive-only: fall back to the id's shape.
+  return save_id_looks_like_psp(save_id);
+}
+
+std::string App::psp_restore_root() const {
+  for (const std::string &root : psp_save_roots()) {
+    if (!list_child_directories(root).empty()) {
+      return root;
+    }
+  }
+  return psp_save_roots().front();
+}
+
+void App::apply_psp_backup_identity(SaveRecord *record) const {
+  if (!record) {
+    return;
+  }
+  // Newest first: the most recent backup describes the save best if a title ever changed.
+  std::vector<std::string> local_names = scan_local_backup_names(kBackupRoot, record->id);
+  std::sort(local_names.begin(), local_names.end(), std::greater<std::string>());
+  const std::string icon_cache_path =
+      join_path(kBackupIconCacheRoot, normalize_path_component(record->id) + ".png");
+  const bool icon_cached = path_is_regular_file(icon_cache_path);
+  if (icon_cached) {
+    record->icon_path = icon_cache_path;
+  }
+  const bool need_title = record->display_name == record->id;
+  if (!need_title && icon_cached) {
+    return;
+  }
+
+  for (const std::string &name : local_names) {
+    const std::string archive_path = local_backup_archive_path(kBackupRoot, record->id, name);
+    if (need_title) {
+      // PARAM.SFO is a few KB; the reader is bounded and decompresses one stored entry.
+      const ArchiveReadResult sfo =
+          read_stored_backup_entry(archive_path, "PARAM.SFO", kMaxPspParamSfoSize);
+      if (sfo.ok) {
+        const std::string title = title_from_sfo_metadata(parse_sfo_metadata(sfo.data));
+        if (!title.empty()) {
+          record->display_name = title;
+        }
+      }
+    }
+    if (!icon_cached) {
+      const ArchiveReadResult icon =
+          read_stored_backup_entry(archive_path, "ICON0.PNG", kMaxPspIconSize);
+      if (icon.ok && ensure_parent_directory(icon_cache_path) &&
+          write_file_atomic(icon_cache_path, icon.data)) {
+        record->icon_path = icon_cache_path;
+      }
+    }
+    // The first archive that opens settles both; a second would only repeat the same answer.
+    return;
+  }
+}
+
+std::string App::drive_folder_title(const std::string &save_id) const {
+  const std::string folder_name = resolved_drive_folder_name(save_id);
+  const std::size_t space = folder_name.find(' ');
+  if (space == std::string::npos) {
+    return {};
+  }
+  return folder_name.substr(space + 1);
+}
+
 void App::synthesize_backups_only_saves() {
   const std::string focused_id = selected_save_ < visible_saves_.size()
                                      ? saves_[visible_saves_[selected_save_]].id
@@ -2839,12 +2982,33 @@ void App::synthesize_backups_only_saves() {
     return false;
   };
   std::vector<SaveRecord> candidates;
+  std::vector<bool> candidate_is_psp;
   for (const std::string &key : backup_only_save_keys(folder_names, known_ids)) {
     SaveRecord record;
     record.id = key;
     record.display_name = key;
     record.backups_only = true;
     record.backups_on_drive = key_on_drive(key);
+    // A PSP save is never in the Vita app database, so the app-db gate below would drop it: its
+    // platform is settled here instead, from its newest local archive's own layout when there is
+    // one, otherwise from the id's shape.
+    if (backup_is_psp_save(key)) {
+      candidate_is_psp.push_back(true);
+      record.platform = SavePlatform::Psp;
+      record.path = join_path(psp_restore_root(), key);
+      // No app database and no ICON0.PNG (it lived inside the deleted folder): the title comes
+      // from the Drive folder name, and the tile falls back to its placeholder art.
+      std::string title = drive_folder_title(key);
+      if (!title.empty()) {
+        record.display_name = std::move(title);
+      }
+      // A card backup carries the save's own PARAM.SFO and ICON0.PNG, so a local-only backup -
+      // which has no Drive folder name to read a title from - still yields both.
+      apply_psp_backup_identity(&record);
+      candidates.push_back(std::move(record));
+      continue;
+    }
+    candidate_is_psp.push_back(false);
     // A digital install lives in ux0:app/<id>. With a card inserted and no such install, the id
     // can only belong to the card game, whose saves live on the card partition; everything else
     // restores to the ordinary savedata root (which also covers a card-less PS TV outright).
@@ -2858,13 +3022,15 @@ void App::synthesize_backups_only_saves() {
     candidates.push_back(std::move(record));
   }
   if (!candidates.empty()) {
-    // The scope gate: only ids the app database can name get a row - a real title, a real icon,
-    // and the certainty the game is installed here. A targeted second query, run only when there
-    // are candidates at all; the common all-covered library never pays for it.
+    // The scope gate: a Vita id must be one the app database can name - a real title, a real
+    // icon, and the certainty the game belongs here. A targeted second query, run only when there
+    // are candidates at all; the common all-covered library never pays for it. PSP candidates
+    // skip the gate outright: the database never knows them, and their restore destination is
+    // unambiguous anyway.
     apply_app_db_metadata(&candidates);
-    for (SaveRecord &record : candidates) {
-      if (record.title_from_app_db) {
-        saves_.push_back(std::move(record));
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+      if (candidate_is_psp[i] || candidates[i].title_from_app_db) {
+        saves_.push_back(std::move(candidates[i]));
         changed = true;
       }
     }

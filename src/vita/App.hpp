@@ -231,6 +231,24 @@ private:
   // coverage, and a folder deleted from the Drive web UI takes its row with it (unless local
   // backups still argue for one).
   void synthesize_backups_only_saves();
+  // Whether a backups-only candidate is a PSP save. Definitive when a local archive exists - a
+  // PSP save carries PARAM.SFO at the archive root while a Vita save keeps everything under
+  // sce_sys/ - and falls back to the id's shape (a PSP game id prefix plus a save-name tail) for
+  // a candidate that lives only on Drive. Reading a central directory decompresses nothing, and
+  // only unmatched folders ever get here.
+  bool backup_is_psp_save(const std::string &save_id) const;
+  // Where a PSP save is restored: the first pspemu root that already holds savedata, so a card
+  // configured for uma0 restores beside its other saves; ux0 when none is populated yet.
+  std::string psp_restore_root() const;
+  // The title half of this save's Drive folder ("<key> <title>"), empty when the folder is bare
+  // or absent. The only title source for a save with no app-database row.
+  std::string drive_folder_title(const std::string &save_id) const;
+  // Title and icon for a PSP row whose savedata is gone, recovered from its newest card backup:
+  // a PSP save carries PARAM.SFO and ICON0.PNG at the archive root, so both survive the delete
+  // inside the very backup the row exists for. The icon is unpacked once into an on-card cache
+  // (the archive path is not something vita2d can load from) and reused from there afterwards.
+  // Nothing is written when the archive has no icon; the tile keeps its placeholder.
+  void apply_psp_backup_identity(SaveRecord *record) const;
   // Recomputes every record's drive_newer mark from the newest Drive backup and the record's own
   // resolved time. No IO - both sides are already in memory - so callers run it whole-list after
   // anything that moves either side: a Drive sync, a landed lazy time read, a restore, an

@@ -1537,6 +1537,30 @@ void test_backup_archive_cancel_aborts_and_leaves_no_partial() {
   std::filesystem::remove_all(base);
 }
 
+void test_psp_save_id_shape_separates_psp_from_vita_and_homebrew() {
+  // Real folder names off a card: a nine-character PSP game id plus a save-name tail.
+  EXPECT_TRUE(vsm::save_id_looks_like_psp("UCES00002000"));
+  EXPECT_TRUE(vsm::save_id_looks_like_psp("NPEH00130USER1"));
+  EXPECT_TRUE(vsm::save_id_looks_like_psp("ULUS10041S0"));
+  EXPECT_TRUE(vsm::save_id_looks_like_psp("ULUS10490DATA01"));
+  // A bare game id with no tail is still a PSP save - the family prefix says so.
+  EXPECT_TRUE(vsm::save_id_looks_like_psp("NPEH00143"));
+  EXPECT_TRUE(vsm::save_id_looks_like_psp("ULJM05800"));
+  EXPECT_TRUE(vsm::save_id_looks_like_psp("UCUS98645"));
+  // Vita games, Vita system apps, and homebrew are all outside the PSP families.
+  EXPECT_TRUE(!vsm::save_id_looks_like_psp("PCSB00981"));
+  EXPECT_TRUE(!vsm::save_id_looks_like_psp("PCSG00697"));
+  EXPECT_TRUE(!vsm::save_id_looks_like_psp("NPXS10015"));
+  EXPECT_TRUE(!vsm::save_id_looks_like_psp("ADRBUBMAN"));
+  EXPECT_TRUE(!vsm::save_id_looks_like_psp("RETROVITA"));
+  EXPECT_TRUE(!vsm::save_id_looks_like_psp("BHBB00001"));
+  // Shape without a PSP family, and malformed names, stay out.
+  EXPECT_TRUE(!vsm::save_id_looks_like_psp("ABCD12345TAIL"));
+  EXPECT_TRUE(!vsm::save_id_looks_like_psp("some-random-folder"));
+  EXPECT_TRUE(!vsm::save_id_looks_like_psp("ULUS1004"));
+  EXPECT_TRUE(!vsm::save_id_looks_like_psp(""));
+}
+
 void test_backup_time_newer_comparison_uses_identity_with_margin() {
   const vsm::SaveDateTime saved = {2026, 7, 30, 12, 0, 0};
   // Clearly newer, labeled and countered names included - identity is what compares.
@@ -3493,6 +3517,7 @@ int main() {
   test_backup_time_newer_comparison_uses_identity_with_margin();
   test_entry_walk_cancel_aborts_and_reports_not_ok();
   test_backup_archive_cancel_aborts_and_leaves_no_partial();
+  test_psp_save_id_shape_separates_psp_from_vita_and_homebrew();
   test_backup_archive_reads_bounded_sdslot_entry_without_restoring();
   test_legacy_zip_metadata_can_be_recovered_without_rewriting_the_archive();
   test_backup_archive_extracts_to_isolated_inspection_directory_and_cleans_up();

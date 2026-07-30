@@ -2135,12 +2135,13 @@ void Ui::draw_footer(const UiState &state) {
   } else if (new_backup_focused && state.saves && state.visible_saves &&
              state.selected_save < state.visible_saves->size()) {
     // Start keeps its meaning on the live-save row - it deletes the focused thing, which here is
-    // the savedata itself. Offered exactly where the action is (app-database-titled entries with
-    // no extra data folders), so the hint never advertises a refusal.
+    // the savedata itself. Offered exactly where the action is, so the hint never advertises a
+    // refusal: entries with no extra data folders whose row can come back as a backups-only row,
+    // which means an app-database title for a Vita game, or simply being a PSP save.
     const SaveRecord &focused_save =
         (*state.saves)[(*state.visible_saves)[state.selected_save]];
     if (!focused_save.backups_only && focused_save.extra_paths.empty() &&
-        focused_save.title_from_app_db) {
+        (focused_save.title_from_app_db || focused_save.platform == SavePlatform::Psp)) {
       hints.push_back({ButtonSymbol::Start, "Delete", "(hold)", nullptr});
     }
   }
