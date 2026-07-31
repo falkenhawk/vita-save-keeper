@@ -249,11 +249,18 @@ private:
   // (the archive path is not something vita2d can load from) and reused from there afterwards.
   // Nothing is written when the archive has no icon; the tile keeps its placeholder.
   void apply_psp_backup_identity(SaveRecord *record) const;
-  // Recomputes every record's drive_newer mark from the newest Drive backup and the record's own
-  // resolved time. No IO - both sides are already in memory - so callers run it whole-list after
-  // anything that moves either side: a Drive sync, a landed lazy time read, a restore, an
-  // upload, or a Drive-side delete.
-  void refresh_drive_newer_marks();
+  // Recomputes the Cloud-is-ahead mark on every record - backups_on_drive for a backups-only row,
+  // drive_newer for an ordinary save - so the one badge they share can never come to mean two
+  // different things. Callers run it whole-list after anything that moves either side: a Drive
+  // sync, a landed lazy time read, a restore, an upload, a download, or a delete.
+  void refresh_cloud_ahead_marks();
+  // True when the newest backup in this save's Drive folder has no card copy of the same
+  // timestamp identity - the shared half of the badge rule. Downloading that backup makes it
+  // false, because the console then holds everything the Cloud does.
+  bool newest_drive_backup_missing_from_card(const std::string &save_id) const;
+  // The other half, for an ordinary save only: the newest Drive backup is stamped later than the
+  // save currently on the console. Meaningless for a backups-only row, which has no live save.
+  bool drive_backup_is_newer_than(const SaveRecord &save) const;
   // The mark can only be as informed as the grid: an encrypted save with no cached time shows no
   // badge until its first mount read. Rather than wait for the user to focus it, the few games
   // whose newest Drive backup beats their newest card backup (decided from names alone) join the

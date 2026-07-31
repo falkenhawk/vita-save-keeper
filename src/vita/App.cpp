@@ -974,7 +974,7 @@ void App::complete_async_read(bool wait) {
   mount_work_.discard = false;
   mount_work_state_.store(0);
   // A time just landed; the Cloud-is-ahead marks depend on it.
-  refresh_drive_newer_marks();
+  refresh_cloud_ahead_marks();
 }
 
 bool App::resolve_save_time(SaveRecord *save) {
@@ -1498,7 +1498,7 @@ bool App::resolve_all_save_times() {
   // to do.
   pending_time_reads_.clear();
   flush_save_index();
-  refresh_drive_newer_marks();
+  refresh_cloud_ahead_marks();
   return true;
 }
 
@@ -1942,9 +1942,7 @@ void App::perform_savedata_delete() {
   for (SaveRecord &record : saves_) {
     if (record.id == save.id && record.platform == save.platform) {
       record.backups_only = true;
-      const std::string folder_name = resolved_drive_folder_name(record.id);
-      record.backups_on_drive =
-          !folder_name.empty() && drive_index_.find(folder_name) != drive_index_.end();
+      record.backups_on_drive = newest_drive_backup_missing_from_card(record.id);
       record.save_time_known = false;
       record.save_time_requires_mount = false;
       record.fingerprint = {};
@@ -2063,7 +2061,7 @@ void App::perform_scoped_delete(bool delete_local, bool delete_remote) {
   }
   // Either side of the Cloud-is-ahead comparison may just have moved: a Drive delete can change
   // the newest remote, and deleting the card copy of that newest backup re-exposes the mark.
-  refresh_drive_newer_marks();
+  refresh_cloud_ahead_marks();
   // A backups-only row that just lost its last backup anywhere stands for nothing - no live save,
   // no card copy, no cloud copy - so the record goes too, the way the config-only ghost row does.
   // Both lists are current here: the remote branch refreshed the Drive view, and a local copy of
@@ -2306,7 +2304,7 @@ void App::handle_restore() {
     queue_selected_save_time_read();
     // A plain save's time re-resolved inside invalidate_save_time just now; an encrypted one
     // lost its mark with its time, until the queued read lands and recomputes it.
-    refresh_drive_newer_marks();
+    refresh_cloud_ahead_marks();
     if (sidecar_targets_unsafe) {
       set_status(StatusKind::Info,
                  status_with_name("Restored ", display_backup_name(backup_name),
@@ -2804,7 +2802,7 @@ bool App::sync_drive_index() {
   drive_root_folder_id_ = root_id;
   drive_synced_ = true;
   synthesize_backups_only_saves();
-  refresh_drive_newer_marks();
+  refresh_cloud_ahead_marks();
   queue_drive_newer_candidates();
   return true;
 }
@@ -2972,15 +2970,6 @@ void App::synthesize_backups_only_saves() {
     }
   }
   const bool card_present = path_is_directory(card_root);
-  // Whether any Drive folder covers this key - the tile badge follows where the backups live.
-  const auto key_on_drive = [this](const std::string &key) {
-    for (const auto &entry : drive_index_) {
-      if (drive_folder_matches_save(entry.first, key)) {
-        return true;
-      }
-    }
-    return false;
-  };
   std::vector<SaveRecord> candidates;
   std::vector<bool> candidate_is_psp;
   for (const std::string &key : backup_only_save_keys(folder_names, known_ids)) {
@@ -2988,7 +2977,7 @@ void App::synthesize_backups_only_saves() {
     record.id = key;
     record.display_name = key;
     record.backups_only = true;
-    record.backups_on_drive = key_on_drive(key);
+    record.backups_on_drive = newest_drive_backup_missing_from_card(key);
     // A PSP save is never in the Vita app database, so the app-db gate below would drop it: its
     // platform is settled here instead, from its newest local archive's own layout when there is
     // one, otherwise from the id's shape.
@@ -3045,38 +3034,51 @@ void App::synthesize_backups_only_saves() {
   refocus_selection_by_id(focused_id);
 }
 
-void App::refresh_drive_newer_marks() {
-  for (SaveRecord &save : saves_) {
-    save.drive_newer = false;
-    if (save.backups_only || !save.save_time_known) {
-      continue;
-    }
-    const std::string folder_name = resolved_drive_folder_name(save.id);
-    if (folder_name.empty()) {
-      continue;
-    }
-    const auto indexed = drive_index_.find(folder_name);
-    if (indexed == drive_index_.end() || indexed->second.empty()) {
-      continue;
-    }
-    // Lists are sorted newest first, so the front entry is the only candidate.
-    const std::string &newest_remote = indexed->second.front().name;
-    if (!backup_time_is_newer_than_save(newest_remote, save.saved_at)) {
-      continue;
-    }
-    // The badge means "the Cloud holds progress this console does not": a card copy of that same
-    // newest backup satisfies the console, however old the live save is. The directory scan runs
-    // only for the rare saves that get this far, never for the whole grid.
-    const std::string remote_identity = backup_identity(newest_remote);
-    bool on_card = false;
-    for (const std::string &local_name : scan_local_backup_names(kBackupRoot, save.id)) {
-      if (backup_identity(local_name) == remote_identity) {
-        on_card = true;
-        break;
-      }
-    }
-    save.drive_newer = !on_card;
+bool App::newest_drive_backup_missing_from_card(const std::string &save_id) const {
+  const std::string folder_name = resolved_drive_folder_name(save_id);
+  if (folder_name.empty()) {
+    return false;
   }
+  const auto indexed = drive_index_.find(folder_name);
+  if (indexed == drive_index_.end() || indexed->second.empty()) {
+    return false;
+  }
+  // Lists are sorted newest first, so the front entry is the only one that can be ahead.
+  const std::string remote_identity = backup_identity(indexed->second.front().name);
+  for (const std::string &local_name : scan_local_backup_names(kBackupRoot, save_id)) {
+    if (backup_identity(local_name) == remote_identity) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void App::refresh_cloud_ahead_marks() {
+  for (SaveRecord &save : saves_) {
+    // One rule for both kinds of row, so the badge cannot mean two things: it appears only while
+    // the Cloud holds a backup this console does not have on its card. Downloading that backup
+    // clears it, whether or not the save itself exists here.
+    if (save.backups_only) {
+      save.backups_on_drive = newest_drive_backup_missing_from_card(save.id);
+      continue;
+    }
+    // An ordinary save needs the extra test that the Cloud copy is actually newer than what is
+    // on the console right now; a backups-only row has no live save to compare against.
+    save.drive_newer = save.save_time_known && drive_backup_is_newer_than(save) &&
+                       newest_drive_backup_missing_from_card(save.id);
+  }
+}
+
+bool App::drive_backup_is_newer_than(const SaveRecord &save) const {
+  const std::string folder_name = resolved_drive_folder_name(save.id);
+  if (folder_name.empty()) {
+    return false;
+  }
+  const auto indexed = drive_index_.find(folder_name);
+  if (indexed == drive_index_.end() || indexed->second.empty()) {
+    return false;
+  }
+  return backup_time_is_newer_than_save(indexed->second.front().name, save.saved_at);
 }
 
 void App::refresh_remote_backups_view() {
@@ -3094,7 +3096,8 @@ void App::refresh_remote_backups_view() {
   // delete moves where its backups live without a fresh sync. Only with a synced index - before
   // the first sync an empty listing means "not looked" rather than "not there".
   if (save && save->backups_only && drive_synced_) {
-    saves_[visible_saves_[selected_save_]].backups_on_drive = !remote_backups_.empty();
+    saves_[visible_saves_[selected_save_]].backups_on_drive =
+        newest_drive_backup_missing_from_card(save->id);
   }
   rebuild_backup_rows();
   if (selected_backup_ >= backup_rows_.size()) {
@@ -3331,7 +3334,7 @@ bool App::download_remote_backup_to_card(const SaveRecord &save, const BackupRow
   refresh_local_backups();
   focus_backup_row_by_identity(row.remote_name);
   // The downloaded copy may be the very backup the Cloud-is-ahead mark pointed at.
-  refresh_drive_newer_marks();
+  refresh_cloud_ahead_marks();
   if (error) {
     error->clear();
   }
@@ -4020,7 +4023,7 @@ BackupUploadResult App::upload_local_backup_impl(const SaveRecord &save,
     list.push_back({uploaded.files[0].name, uploaded.files[0].id});
     std::sort(list.begin(), list.end(),
               [](const RemoteBackup &a, const RemoteBackup &b) { return a.name > b.name; });
-    refresh_drive_newer_marks();
+    refresh_cloud_ahead_marks();
   } else {
     sync_drive_index();
   }
