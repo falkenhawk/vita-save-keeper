@@ -3967,10 +3967,13 @@ BackupUploadResult App::upload_local_backup_impl(const SaveRecord &save,
     drive_folder_ids_[folder_name] = folder_id;
   }
 
-  // Opportunistic upgrade: a bare-key folder gains the game title once it is known, so old
-  // uploads become browsable on Drive too. A failed rename is harmless - the bare name keeps
-  // matching by key prefix and the next upload retries.
-  if (folder_name == save_key && desired_name != save_key) {
+  // Opportunistic upgrade: a bare-key folder gains the game title once it is known, and a folder
+  // this app named under the older rule (unsafe characters masked as '_') moves to the readable
+  // one, so existing libraries become browsable on Drive too. Strictly limited to names the app
+  // generated itself - a folder the user renamed matches neither form and is left alone. A failed
+  // rename is harmless: every form keeps matching by key prefix and the next upload retries.
+  const std::string legacy_name = legacy_drive_save_folder_name(save_key, save.display_name);
+  if ((folder_name == save_key || folder_name == legacy_name) && desired_name != folder_name) {
     const std::string rename_url = std::string(kDriveFilesEndpoint) + "/" +
                                    form_url_encode(folder_id) + "?fields=id%2Cname";
     const HttpResponse renamed = drive_request([&](const std::string &token) {

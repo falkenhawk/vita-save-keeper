@@ -76,6 +76,15 @@ bool find_json_string_from(const std::string &json, std::size_t start, const std
 
 std::string drive_save_folder_name(const std::string &save_key,
                                    const std::string &display_name) {
+  const std::string title = normalize_folder_title(display_name);
+  if (title.empty() || title == save_key) {
+    return save_key;
+  }
+  return save_key + " " + title;
+}
+
+std::string legacy_drive_save_folder_name(const std::string &save_key,
+                                          const std::string &display_name) {
   const std::string title = normalize_path_component(display_name);
   if (title.empty() || title == save_key) {
     return save_key;

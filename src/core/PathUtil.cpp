@@ -52,6 +52,32 @@ std::string normalize_path_component(const std::string &input) {
   return std::string(first, last);
 }
 
+std::string normalize_folder_title(const std::string &title) {
+  std::string collapsed;
+  collapsed.reserve(title.size());
+  bool pending_space = false;
+  for (const char value : title) {
+    // An apostrophe or quote is inside a word; anything else unsafe stands between words, so it
+    // yields a space. is_ascii_space folds the newlines some titles carry as well.
+    const bool drops = value == '\'' || value == '"';
+    const bool separates = !drops && (is_unsafe_path_character(value) || is_ascii_space(value));
+    if (drops) {
+      continue;
+    }
+    if (separates) {
+      // Held rather than appended, so runs collapse and a trailing run never reaches the result.
+      pending_space = !collapsed.empty();
+      continue;
+    }
+    if (pending_space) {
+      collapsed.push_back(' ');
+      pending_space = false;
+    }
+    collapsed.push_back(value);
+  }
+  return collapsed;
+}
+
 std::string join_path(const std::string &parent, const std::string &child) {
   if (parent.empty() || parent.back() == '/') {
     return parent + child;

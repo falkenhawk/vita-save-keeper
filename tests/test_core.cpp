@@ -1537,6 +1537,35 @@ void test_backup_archive_cancel_aborts_and_leaves_no_partial() {
   std::filesystem::remove_all(base);
 }
 
+void test_folder_title_normalization_reads_back_as_the_title() {
+  // Separators become spaces, so the words stay apart.
+  EXPECT_EQ(vsm::normalize_folder_title("GTA: Liberty City Stories"), "GTA Liberty City Stories");
+  EXPECT_EQ(vsm::normalize_folder_title("IA/VT -COLORFUL-"), "IA VT -COLORFUL-");
+  EXPECT_EQ(vsm::normalize_folder_title("-BC*AD- Xe"), "-BC AD- Xe");
+  // Apostrophes and quotes sit inside a word, so they vanish instead of splitting it.
+  EXPECT_EQ(vsm::normalize_folder_title("Everybody's Golf"), "Everybodys Golf");
+  EXPECT_EQ(vsm::normalize_folder_title("Fill-a-Pix: Phil's Epic Adventure"),
+            "Fill-a-Pix Phils Epic Adventure");
+  // Trailing punctuation leaves no trailing space, and runs never double up.
+  EXPECT_EQ(vsm::normalize_folder_title("Amnesia:"), "Amnesia");
+  EXPECT_EQ(vsm::normalize_folder_title("A :  B"), "A B");
+  // A title with nothing unsafe is returned untouched, trademark signs included, and the newlines
+  // some app-database titles carry fold into the same single space.
+  EXPECT_EQ(vsm::normalize_folder_title("Robotics;Notes ELITE"), "Robotics;Notes ELITE");
+  EXPECT_EQ(vsm::normalize_folder_title("Shakedown Hawaii™"), "Shakedown Hawaii™");
+  EXPECT_EQ(vsm::normalize_folder_title("Amnesia:\nMemories"), "Amnesia Memories");
+  EXPECT_EQ(vsm::normalize_folder_title("   "), "");
+  // The whole point: the folder name reads back as the title with no un-escaping.
+  const std::string folder = vsm::drive_save_folder_name("PCSB01063", "Amnesia: Memories");
+  EXPECT_EQ(folder, "PCSB01063 Amnesia Memories");
+  EXPECT_TRUE(vsm::drive_folder_matches_save(folder, "PCSB01063"));
+  // An older folder this app named is still recognized, so it can be migrated rather than
+  // duplicated; both forms keep matching the save.
+  const std::string legacy = vsm::legacy_drive_save_folder_name("PCSB01063", "Amnesia: Memories");
+  EXPECT_EQ(legacy, "PCSB01063 Amnesia_ Memories");
+  EXPECT_TRUE(vsm::drive_folder_matches_save(legacy, "PCSB01063"));
+}
+
 void test_psp_save_id_shape_separates_psp_from_vita_and_homebrew() {
   // Real folder names off a card: a nine-character PSP game id plus a save-name tail.
   EXPECT_TRUE(vsm::save_id_looks_like_psp("UCES00002000"));
@@ -3446,8 +3475,12 @@ void test_drive_save_folder_names_carry_the_game_title() {
   // No usable title: the folder stays the bare key, as older versions created it.
   EXPECT_EQ(vsm::drive_save_folder_name("PCSB00456", ""), "PCSB00456");
   EXPECT_EQ(vsm::drive_save_folder_name("PCSB00456", "PCSB00456"), "PCSB00456");
-  // Titles are sanitized the same way local paths are.
+  // Unsafe characters resolve into readable text rather than '_' masks, so the folder name reads
+  // as the title (see test_folder_title_normalization_reads_back_as_the_title).
   EXPECT_EQ(vsm::drive_save_folder_name("PCSE00120", "Persona/4? Golden"),
+            "PCSE00120 Persona 4 Golden");
+  // The form older versions wrote stays computable, which is what lets it be migrated.
+  EXPECT_EQ(vsm::legacy_drive_save_folder_name("PCSE00120", "Persona/4? Golden"),
             "PCSE00120 Persona_4_ Golden");
 }
 
@@ -3518,6 +3551,7 @@ int main() {
   test_entry_walk_cancel_aborts_and_reports_not_ok();
   test_backup_archive_cancel_aborts_and_leaves_no_partial();
   test_psp_save_id_shape_separates_psp_from_vita_and_homebrew();
+  test_folder_title_normalization_reads_back_as_the_title();
   test_backup_archive_reads_bounded_sdslot_entry_without_restoring();
   test_legacy_zip_metadata_can_be_recovered_without_rewriting_the_archive();
   test_backup_archive_extracts_to_isolated_inspection_directory_and_cleans_up();

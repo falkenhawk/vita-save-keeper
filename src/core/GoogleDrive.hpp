@@ -27,6 +27,12 @@ struct DriveFileList {
 // matcher accepts both forms, so folders created by older versions (bare key) keep working and
 // can be renamed opportunistically later.
 std::string drive_save_folder_name(const std::string &save_key, const std::string &display_name);
+// The name earlier versions built for the same save, with unsafe characters masked as '_'.
+// Recognizing it is what lets an existing folder be migrated to the readable name while a folder
+// the user renamed themselves - which matches neither form - is left exactly as they left it.
+std::string legacy_drive_save_folder_name(const std::string &save_key,
+                                          const std::string &display_name);
+
 bool drive_folder_matches_save(const std::string &folder_name, const std::string &save_key);
 std::string build_drive_rename_metadata_json(const std::string &name);
 
