@@ -4,6 +4,14 @@ All notable changes to Save Keeper are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.3.0-test3] - 2026-07-31
+
+### Fixed
+- the cloud badge no longer shows once the newer backup is downloaded to the console
+- Drive folders are named with readable game titles instead of underscores
+- PSP games whose save folder name is just the game id are recognized too
+- PSP games show their name and icon even when their local savedata is gone
+
 ## [1.3.0-test2] - 2026-07-31
 
 ### Fixed
