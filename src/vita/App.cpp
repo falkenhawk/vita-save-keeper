@@ -1,5 +1,6 @@
 #include "vita/App.hpp"
 
+#include "core/AdrenalineConfig.hpp"
 #include "core/AppSettings.hpp"
 #include "core/BackupArchive.hpp"
 #include "core/BackupName.hpp"
@@ -145,17 +146,18 @@ unsigned int buttons_pressed_since(const SceCtrlData &armed) {
 constexpr std::size_t kMaxSdslotFileSize =
     kSdslotHeaderSize + kMaxSaveSlots * kSdslotRecordSize;
 
-// Every PSP savedata root Adrenaline can be pointed at, in the order it is searched. ux0 is the
-// stock location; uma0 is the second slot (SD2VITA / a real memory card on a PS TV), imc0 the
-// 1000-model internal memory, xmc0 the alternate mount some setups expose. A root that does not
-// exist lists as empty, so naming all four costs one failed opendir each and finds saves the
+// Every pspemu root Adrenaline's own settings menu can point at (its ms_location options, in its
+// order): ux0 is stock, ur0 the system partition, imc0 the 1000-model internal memory, xmc0 the
+// alternate mount, uma0 the second slot (SD2VITA / a USB drive on a PS TV). A root that does not
+// exist lists as empty, so naming all five costs one failed opendir each and finds saves the
 // ux0-only scan missed entirely.
 const std::vector<std::string> &psp_save_roots() {
   static const std::vector<std::string> roots = {
       "ux0:pspemu/PSP/SAVEDATA",
-      "uma0:pspemu/PSP/SAVEDATA",
+      "ur0:pspemu/PSP/SAVEDATA",
       "imc0:pspemu/PSP/SAVEDATA",
       "xmc0:pspemu/PSP/SAVEDATA",
+      "uma0:pspemu/PSP/SAVEDATA",
   };
   return roots;
 }
@@ -2870,6 +2872,21 @@ bool App::backup_is_psp_save(const std::string &save_id) const {
 }
 
 std::string App::psp_restore_root() const {
+  // Adrenaline's own setting is the authority: its Memory Stick location decides which pspemu
+  // tree the emulator actually reads, so restoring anywhere else creates a save it never sees.
+  // The settings file is a ~60-byte struct; a missing or invalid one (Adrenaline not installed,
+  // or an old version) falls through to probing.
+  FILE *config = std::fopen("ux0:app/PSPEMUCFW/adrenaline.bin", "rb");
+  if (config) {
+    std::vector<unsigned char> blob(256);
+    blob.resize(std::fread(blob.data(), 1, blob.size(), config));
+    std::fclose(config);
+    const std::string location = adrenaline_ms_location(blob);
+    if (!location.empty()) {
+      return location + "/PSP/SAVEDATA";
+    }
+  }
+  // No readable setting: the first root that already holds savedata, ux0 when none does.
   for (const std::string &root : psp_save_roots()) {
     if (!list_child_directories(root).empty()) {
       return root;

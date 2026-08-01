@@ -21,6 +21,7 @@ function(save_keeper_escape_definition OUTPUT_NAME VALUE)
 endfunction()
 
 add_library(vsm_core
+  src/core/AdrenalineConfig.cpp
   src/core/AppSettings.cpp
   src/core/BackupArchive.cpp
   src/core/BackupList.cpp

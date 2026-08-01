@@ -1,3 +1,4 @@
+#include "core/AdrenalineConfig.hpp"
 #include "core/AppSettings.hpp"
 #include "core/BackupArchive.hpp"
 #include "core/BackupList.hpp"
@@ -1564,6 +1565,31 @@ void test_folder_title_normalization_reads_back_as_the_title() {
   const std::string legacy = vsm::legacy_drive_save_folder_name("PCSB01063", "Amnesia: Memories");
   EXPECT_EQ(legacy, "PCSB01063 Amnesia_ Memories");
   EXPECT_TRUE(vsm::drive_folder_matches_save(legacy, "PCSB01063"));
+}
+
+void test_adrenaline_config_yields_ms_location_only_when_trustworthy() {
+  // A valid blob: both magics, four ints of other settings, ms_location = 4 (uma0).
+  const auto blob = [](std::uint32_t magic1, std::uint32_t magic2, std::uint32_t location) {
+    std::vector<unsigned char> data(60, 0);
+    const auto put = [&data](std::size_t offset, std::uint32_t value) {
+      for (int i = 0; i < 4; ++i) {
+        data[offset + static_cast<std::size_t>(i)] =
+            static_cast<unsigned char>((value >> (8 * i)) & 0xffU);
+      }
+    };
+    put(0, magic1);
+    put(4, magic2);
+    put(24, location);
+    return data;
+  };
+  EXPECT_EQ(vsm::adrenaline_ms_location(blob(0x31483943u, 0x334F4E33u, 4)), "uma0:pspemu");
+  EXPECT_EQ(vsm::adrenaline_ms_location(blob(0x31483943u, 0x334F4E33u, 0)), "ux0:pspemu");
+  EXPECT_EQ(vsm::adrenaline_ms_location(blob(0x31483943u, 0x334F4E33u, 1)), "ur0:pspemu");
+  // Wrong magic, out-of-range index, and a truncated blob all refuse rather than guess.
+  EXPECT_EQ(vsm::adrenaline_ms_location(blob(0x11111111u, 0x334F4E33u, 4)), "");
+  EXPECT_EQ(vsm::adrenaline_ms_location(blob(0x31483943u, 0x334F4E33u, 5)), "");
+  EXPECT_EQ(vsm::adrenaline_ms_location(std::vector<unsigned char>(20, 0)), "");
+  EXPECT_EQ(vsm::adrenaline_ms_location({}), "");
 }
 
 void test_psp_save_id_shape_separates_psp_from_vita_and_homebrew() {
@@ -3551,6 +3577,7 @@ int main() {
   test_entry_walk_cancel_aborts_and_reports_not_ok();
   test_backup_archive_cancel_aborts_and_leaves_no_partial();
   test_psp_save_id_shape_separates_psp_from_vita_and_homebrew();
+  test_adrenaline_config_yields_ms_location_only_when_trustworthy();
   test_folder_title_normalization_reads_back_as_the_title();
   test_backup_archive_reads_bounded_sdslot_entry_without_restoring();
   test_legacy_zip_metadata_can_be_recovered_without_rewriting_the_archive();
