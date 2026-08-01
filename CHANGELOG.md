@@ -4,6 +4,12 @@ All notable changes to Save Keeper are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.3.0-test4] - 2026-08-01
+
+### Fixed
+- PSP restores follow Adrenaline's own Memory Stick location setting instead of assuming `ux0`
+- PSP saves on `ur0` are found too
+
 ## [1.3.0-test3] - 2026-07-31
 
 ### Fixed
