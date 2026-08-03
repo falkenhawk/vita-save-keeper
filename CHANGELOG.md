@@ -4,38 +4,23 @@ All notable changes to Save Keeper are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [1.3.0-test4] - 2026-08-01
-
-### Fixed
-- PSP restores follow Adrenaline's own Memory Stick location setting instead of assuming `ux0`
-- PSP saves on `ur0` are found too
-
-## [1.3.0-test3] - 2026-07-31
-
-### Fixed
-- the cloud badge no longer shows once the newer backup is downloaded to the console
-- Drive folders are named with readable game titles instead of underscores
-- PSP games whose save folder name is just the game id are recognized too
-- PSP games show their name and icon even when their local savedata is gone
-
-## [1.3.0-test2] - 2026-07-31
-
-### Fixed
-- PSP saves stored outside `ux0` are found now - `uma0`, `imc0` and `xmc0` are searched too
-- a PSP game whose savedata was deleted now shows its backups, like Vita games already did
-- backup creation can be canceled
-
-## [1.3.0-test1] - 2026-07-30
+## [1.3.0] - 2026-08-03
 
 ### Added
 - initialize savedata from a backup for games that have never been played on this device - they
   now show in the overview
 - delete a game's savedata to start it from scratch (hold Start on "New Backup") - a backup is
   made first, so it stays restorable
-- a cloud badge on games whose newest Drive backup is newer than the local save (or when local save does not exist)
-- transfers show file sizes and can be canceled
+- a cloud badge on games whose newest Drive backup is newer than the local save (or when local
+  save does not exist) - it disappears once that backup is on the console
+- transfers and backup creation show real file sizes and can be canceled
 
 ### Fixed
+- PSP saves stored outside `ux0` are found now - `uma0`, `imc0`, `xmc0` and `ur0` are searched too
+- PSP restores follow Adrenaline's own Memory Stick location setting instead of assuming `ux0`
+- a PSP game whose savedata was deleted now shows its backups, with its name and icon
+- game titles in Drive folder names are no longer littered with underscores - folder-invalid
+  characters are dropped for readability
 - big downloads no longer fail partway - the time limit now grows with the file size
 - faster transfers and faster backup checks and creation
 - wifi no longer slows down or drops mid-transfer
