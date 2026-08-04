@@ -14,6 +14,7 @@
 #include "core/InputGesture.hpp"
 #include "core/MultipartUpload.hpp"
 #include "core/PathUtil.hpp"
+#include "core/PspGameScan.hpp"
 #include "core/SaveCategory.hpp"
 #include "core/SaveScanner.hpp"
 #include "core/SaveSlotMetadata.hpp"
@@ -2448,7 +2449,7 @@ void test_backup_time_newer_comparison_uses_identity_with_margin() {
 }
 
 void test_no_live_save_row_is_an_inert_sentinel() {
-  const vsm::BackupRow row = vsm::BackupRow::no_live_save_row();
+  const vsm::BackupRow row = vsm::BackupRow::no_live_save_row(false);
   EXPECT_TRUE(row.is_sentinel());
   EXPECT_TRUE(!row.has_local());
   EXPECT_TRUE(!row.has_remote());
@@ -4596,6 +4597,137 @@ void test_content_signature_is_order_independent_and_pinned() {
   EXPECT_EQ(static_cast<std::size_t>(empty_totals.file_count), std::size_t{0});
 }
 
+// One Adrenaline isocache2.bin record: 448 bytes, iso path at offset 40, disc id at offset 296
+// (the VirtualPbp layout its vshctrl writes to disk verbatim).
+std::vector<unsigned char> make_isocache_record(const std::string &isofile,
+                                                const std::string &discid) {
+  std::vector<unsigned char> record(448, 0);
+  std::copy(isofile.begin(), isofile.end(), record.begin() + 40);
+  std::copy(discid.begin(), discid.end(), record.begin() + 296);
+  return record;
+}
+
+std::vector<unsigned char> make_pbp_with_sfo(const std::vector<unsigned char> &sfo) {
+  std::vector<unsigned char> pbp;
+  append_le32(&pbp, 0x50425000); // "\0PBP"
+  append_le32(&pbp, 0x00010001);
+  append_le32(&pbp, 40);
+  append_le32(&pbp, static_cast<std::uint32_t>(40 + sfo.size())); // ICON0.PNG offset = SFO end
+  pbp.resize(40, 0);
+  pbp.insert(pbp.end(), sfo.begin(), sfo.end());
+  return pbp;
+}
+
+void test_pbp_header_locates_the_param_sfo_span() {
+  const std::vector<unsigned char> sfo = build_sfo_with_strings({{"DISC_ID", "NPEZ00104"}});
+  const std::vector<unsigned char> pbp = make_pbp_with_sfo(sfo);
+
+  const vsm::PbpSfoSpan span = vsm::pbp_param_sfo_span(pbp);
+  EXPECT_TRUE(span.ok);
+  EXPECT_EQ(static_cast<std::size_t>(span.offset), static_cast<std::size_t>(40));
+  EXPECT_EQ(static_cast<std::size_t>(span.size), sfo.size());
+
+  std::vector<unsigned char> bad_magic = pbp;
+  bad_magic[0] = 'X';
+  EXPECT_TRUE(!vsm::pbp_param_sfo_span(bad_magic).ok);
+
+  // An SFO offset inside the header, or a next-file offset that does not follow the SFO, is a
+  // header from some other file format that happens to start with the magic.
+  std::vector<unsigned char> before_header;
+  append_le32(&before_header, 0x50425000);
+  append_le32(&before_header, 0x00010001);
+  append_le32(&before_header, 16);
+  append_le32(&before_header, 600);
+  EXPECT_TRUE(!vsm::pbp_param_sfo_span(before_header).ok);
+
+  std::vector<unsigned char> inverted;
+  append_le32(&inverted, 0x50425000);
+  append_le32(&inverted, 0x00010001);
+  append_le32(&inverted, 632);
+  append_le32(&inverted, 40);
+  EXPECT_TRUE(!vsm::pbp_param_sfo_span(inverted).ok);
+
+  EXPECT_TRUE(!vsm::pbp_param_sfo_span({0x00, 'P', 'B', 'P'}).ok);
+}
+
+void test_isocache_records_yield_unique_valid_disc_ids() {
+  std::vector<unsigned char> blob;
+  const auto append_record = [&blob](const std::vector<unsigned char> &record) {
+    blob.insert(blob.end(), record.begin(), record.end());
+  };
+  append_record(make_isocache_record("ms0:/ISO/ridge racer.cso", "UCES00002"));
+  // A freed slot: Adrenaline zeroes the whole record, so an empty iso path means skip.
+  append_record(make_isocache_record("", "ULES99999"));
+  // The same game cached twice (category copy) lists once.
+  append_record(make_isocache_record("ms0:/ISO/CAT_Racing/ridge racer.cso", "UCES00002"));
+  // Garbage disc ids - lowercase or truncated - mark corrupt records, not games.
+  append_record(make_isocache_record("ms0:/ISO/odd.iso", "uces00002"));
+  append_record(make_isocache_record("ms0:/ISO/short.iso", "UCES02"));
+  append_record(make_isocache_record("ms0:/ISO/patapon.iso", "NPUG80086"));
+  // A trailing partial record (interrupted write) must not derail the parse.
+  blob.resize(blob.size() + 100, 0x41);
+
+  const std::vector<std::string> ids = vsm::isocache_disc_ids(blob);
+  EXPECT_EQ(ids.size(), static_cast<std::size_t>(2));
+  EXPECT_EQ(ids[0], "UCES00002");
+  EXPECT_EQ(ids[1], "NPUG80086");
+}
+
+void test_psp_save_ownership_is_a_game_code_prefix_match() {
+  const std::vector<std::string> games = {"UCES00002", "NPEH00130"};
+  EXPECT_TRUE(vsm::psp_save_matches_installed_game("UCES00002000", games));
+  EXPECT_TRUE(vsm::psp_save_matches_installed_game("NPEH00130USER1", games));
+  // A bare game-code folder with no save-name tail still belongs to its game.
+  EXPECT_TRUE(vsm::psp_save_matches_installed_game("NPEH00130", games));
+  EXPECT_TRUE(!vsm::psp_save_matches_installed_game("UCES00003000", games));
+  EXPECT_TRUE(!vsm::psp_save_matches_installed_game("UCES0000", games));
+  // An id shorter than a 9-char game code can never own a save, however it got into the list.
+  EXPECT_TRUE(!vsm::psp_save_matches_installed_game("UCES00002000", {"UCES"}));
+  EXPECT_TRUE(!vsm::psp_save_matches_installed_game("UCES00002000", {}));
+}
+
+void test_installed_psp_game_scan_reads_eboots_and_isocache() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-psp-game-scan-test";
+  std::filesystem::remove_all(base);
+
+  // A PSN install: the eboot's SFO names the game, and the folder name repeats it.
+  std::filesystem::create_directories(base / "PSP" / "GAME" / "NPEZ00104");
+  const std::vector<unsigned char> pbp = make_pbp_with_sfo(build_sfo_with_strings({
+      {"DISC_ID", "NPEZ00104"},
+      {"TITLE", "BIGHEADSNOOKER"},
+  }));
+  std::ofstream(base / "PSP" / "GAME" / "NPEZ00104" / "EBOOT.PBP", std::ios::binary)
+      .write(reinterpret_cast<const char *>(pbp.data()), static_cast<std::streamsize>(pbp.size()));
+
+  // A homebrew folder without a readable eboot: its name is the only id there is.
+  std::filesystem::create_directories(base / "PSP" / "GAME" / "RETROARCH1");
+  // A name outside the game-code alphabet is dropped rather than guessed at.
+  std::filesystem::create_directories(base / "PSP" / "GAME" / "retroarch");
+
+  std::filesystem::create_directories(base / "PSP" / "SYSTEM");
+  const std::vector<unsigned char> cache =
+      make_isocache_record("ms0:/ISO/ridge racer.cso", "UCES00002");
+  std::ofstream(base / "PSP" / "SYSTEM" / "isocache2.bin", std::ios::binary)
+      .write(reinterpret_cast<const char *>(cache.data()),
+             static_cast<std::streamsize>(cache.size()));
+
+  // A root that does not exist scans as empty, like the four absent ms locations on a console.
+  const std::vector<std::string> ids = vsm::scan_installed_psp_game_ids(
+      {base.string(), (base / "missing-root").string()});
+  EXPECT_EQ(ids.size(), static_cast<std::size_t>(3));
+  EXPECT_EQ(ids[0], "NPEZ00104");
+  EXPECT_EQ(ids[1], "RETROARCH1");
+  EXPECT_EQ(ids[2], "UCES00002");
+
+  std::filesystem::remove_all(base);
+}
+
+void test_no_live_save_row_names_the_missing_game() {
+  EXPECT_EQ(vsm::BackupRow::no_live_save_row(false).display_name(), "No save on this console");
+  EXPECT_EQ(vsm::BackupRow::no_live_save_row(true).display_name(), "Game not on this console");
+}
+
 } // namespace
 
 int main() {
@@ -4746,6 +4878,11 @@ int main() {
   test_dir_walk_lists_entries_and_supports_early_stop();
   test_walk_entry_cap_poisons_fingerprint_and_time_falls_to_backup_clock();
   test_content_signature_is_order_independent_and_pinned();
+  test_pbp_header_locates_the_param_sfo_span();
+  test_isocache_records_yield_unique_valid_disc_ids();
+  test_psp_save_ownership_is_a_game_code_prefix_match();
+  test_installed_psp_game_scan_reads_eboots_and_isocache();
+  test_no_live_save_row_names_the_missing_game();
 
   std::cout << "vsm_core_tests passed\n";
   return 0;

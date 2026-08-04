@@ -21,10 +21,13 @@ struct BackupRow {
   // Replaces "New Backup" for a cloud-only entry: there is no save on this console to back up,
   // and the row says so where the user would look for the backup action. Focusable but inert.
   bool no_live_save{};
+  // Sharpens the no_live_save row for a PSP entry whose game the install scan could not find:
+  // the row then names the stronger fact - the game itself is not on this console.
+  bool game_missing{};
 
   static BackupRow new_backup_row();
   static BackupRow data_folders_row(std::size_t count);
-  static BackupRow no_live_save_row();
+  static BackupRow no_live_save_row(bool game_missing);
 
   // Rows that stand for an action rather than a backup. Every backup operation - restore, delete,
   // label, transfer - must refuse these, which is why the accessors return them as "no row".

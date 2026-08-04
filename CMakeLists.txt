@@ -36,6 +36,7 @@ add_library(vsm_core
   src/core/GridWindow.cpp
   src/core/MultipartUpload.cpp
   src/core/PathUtil.cpp
+  src/core/PspGameScan.cpp
   src/core/SaveCategory.cpp
   src/core/SaveScanner.cpp
   src/core/SaveSlotMetadata.cpp

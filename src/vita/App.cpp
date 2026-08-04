@@ -13,6 +13,7 @@
 #include "core/GoogleDrive.hpp"
 #include "core/InputGesture.hpp"
 #include "core/PathUtil.hpp"
+#include "core/PspGameScan.hpp"
 #include "core/SaveScanner.hpp"
 #include "core/SfoParser.hpp"
 #include "core/Selection.hpp"
@@ -164,14 +165,21 @@ constexpr std::size_t kMaxSdslotFileSize =
 // alternate mount, uma0 the second slot (SD2VITA / a USB drive on a PS TV). A root that does not
 // exist lists as empty, so naming all five costs one failed opendir each and finds saves the
 // ux0-only scan missed entirely.
-const std::vector<std::string> &psp_save_roots() {
+const std::vector<std::string> &pspemu_ms_roots() {
   static const std::vector<std::string> roots = {
-      "ux0:pspemu/PSP/SAVEDATA",
-      "ur0:pspemu/PSP/SAVEDATA",
-      "imc0:pspemu/PSP/SAVEDATA",
-      "xmc0:pspemu/PSP/SAVEDATA",
-      "uma0:pspemu/PSP/SAVEDATA",
+      "ux0:pspemu", "ur0:pspemu", "imc0:pspemu", "xmc0:pspemu", "uma0:pspemu",
   };
+  return roots;
+}
+
+const std::vector<std::string> &psp_save_roots() {
+  static const std::vector<std::string> roots = [] {
+    std::vector<std::string> paths;
+    for (const std::string &root : pspemu_ms_roots()) {
+      paths.push_back(root + "/PSP/SAVEDATA");
+    }
+    return paths;
+  }();
   return roots;
 }
 
@@ -2264,6 +2272,11 @@ void App::rebuild_visible_saves() {
       visible_saves_.push_back(i);
     }
   }
+  // Cloud-only PSP rows whose game the install scan could not find sink below everything else in
+  // their tab, keeping the sort-mode order within each group. Only PSP rows ever carry the flag,
+  // so the other tabs pass through untouched.
+  std::stable_partition(visible_saves_.begin(), visible_saves_.end(),
+                        [this](std::size_t i) { return !saves_[i].psp_game_missing; });
   if (selected_save_ >= visible_saves_.size()) {
     selected_save_ = 0;
   }
@@ -2638,6 +2651,12 @@ void App::perform_savedata_delete() {
     if (record.id == save.id && record.platform == save.platform) {
       record.backups_only = true;
       record.backups_on_drive = newest_drive_backup_missing_from_card(record.id);
+      // Same mark a sync would compute: usually clear (the game outlives its deleted save), but
+      // a save deleted for a game that was already gone labels honestly right away.
+      record.psp_game_missing =
+          record.platform == SavePlatform::Psp &&
+          !psp_save_matches_installed_game(record.id,
+                                           scan_installed_psp_game_ids(pspemu_ms_roots()));
       record.save_time_known = false;
       record.save_time_requires_mount = false;
       record.fingerprint = {};
@@ -3460,6 +3479,9 @@ void App::handle_restore() {
       for (SaveRecord &record : saves_) {
         if (record.id == save.id && record.backups_only) {
           record.backups_only = false;
+          // The missing-game mark rode the backups-only state; an ordinary save must not stay
+          // demoted below its tab or the next rebuild_visible_saves would sink a real row.
+          record.psp_game_missing = false;
           break;
         }
       }
@@ -4192,6 +4214,10 @@ void App::synthesize_backups_only_saves() {
   const bool card_present = path_is_directory(card_root);
   std::vector<SaveRecord> candidates;
   std::vector<bool> candidate_is_psp;
+  // One install scan per synthesis, and only when a PSP candidate exists at all - the common
+  // all-Vita library never touches the pspemu trees.
+  std::vector<std::string> installed_psp_games;
+  bool psp_games_scanned = false;
   for (const std::string &key : backup_only_save_keys(folder_names, known_ids)) {
     SaveRecord record;
     record.id = key;
@@ -4205,6 +4231,14 @@ void App::synthesize_backups_only_saves() {
       candidate_is_psp.push_back(true);
       record.platform = SavePlatform::Psp;
       record.path = join_path(psp_restore_root(), key);
+      if (!psp_games_scanned) {
+        psp_games_scanned = true;
+        installed_psp_games = scan_installed_psp_game_ids(pspemu_ms_roots());
+      }
+      // Positive-only: a found game clears the mark, an unfound one only demotes and labels the
+      // row. Detection has honest blind spots (an ISO Adrenaline has never listed), so this flag
+      // must never decide whether the row exists.
+      record.psp_game_missing = !psp_save_matches_installed_game(key, installed_psp_games);
       // No app database and no ICON0.PNG (it lived inside the deleted folder): the title comes
       // from the Drive folder name, and the tile falls back to its placeholder art.
       std::string title = drive_folder_title(key);
@@ -4342,7 +4376,7 @@ void App::rebuild_backup_rows() {
   // row either: a restore-only row must never grow a folder set (apps that need one arrive
   // through the settings sync as proper config rows).
   if (save && save->backups_only && !backup_rows_.empty()) {
-    backup_rows_.front() = BackupRow::no_live_save_row();
+    backup_rows_.front() = BackupRow::no_live_save_row(save->psp_game_missing);
     return;
   }
   // A homebrew entry gets a "Savedata Paths" row right above "New Backup". Putting the picker in the
@@ -5007,9 +5041,15 @@ void App::open_save_details() {
       // Nothing on this console to inspect or size; the row exists for its Drive backups. Skip
       // the resolve outright - mounting a folder that does not exist only buys a busy flash.
       slot_details_.snapshot_name = "Current Save";
-      slot_details_.unavailable_message = "No save on this console";
+      slot_details_.unavailable_message =
+          save.psp_game_missing ? "Game not on this console" : "No save on this console";
+      // Restoring ahead of the game is fine on PSP - savedata is a plain folder Adrenaline picks
+      // up whenever the game arrives - so the missing-game text invites it rather than warns.
       slot_details_.warning_message =
-          "Local savedata does not exist yet. Restore a backup to recreate it.";
+          save.psp_game_missing
+              ? "No installed PSP game matches this save. A restored backup will wait in "
+                "PSP/SAVEDATA until the game is installed."
+              : "Local savedata does not exist yet. Restore a backup to recreate it.";
       slot_details_.open = true;
       return;
     }

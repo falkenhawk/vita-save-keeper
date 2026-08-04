@@ -57,6 +57,11 @@ struct SaveRecord {
   // Meaningful only with backups_only: at least one of the backups lives on Drive. Drives the
   // tile's cloud badge - a row whose backups are all on the card draws no badge at all.
   bool backups_on_drive{};
+  // Meaningful only with backups_only on a PSP row: the install scan (PSP/GAME eboots plus
+  // Adrenaline's isocache) found no game this save belongs to. Presentation only - the scan
+  // cannot see an ISO Adrenaline has never listed, so a set flag demotes and labels the row
+  // but never hides it.
+  bool psp_game_missing{};
   // For ordinary saves: the newest Drive backup's timestamp beats this save's own resolved time,
   // so the Cloud holds newer progress than the console (played elsewhere, uploaded, not restored
   // here yet). Same tile badge as a backups-only row - one meaning: the Cloud is ahead. Never set

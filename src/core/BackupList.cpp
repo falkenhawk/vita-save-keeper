@@ -19,9 +19,10 @@ BackupRow BackupRow::data_folders_row(std::size_t count) {
   return row;
 }
 
-BackupRow BackupRow::no_live_save_row() {
+BackupRow BackupRow::no_live_save_row(bool game_missing) {
   BackupRow row;
   row.no_live_save = true;
+  row.game_missing = game_missing;
   return row;
 }
 
@@ -30,7 +31,8 @@ std::string BackupRow::display_name() const {
     return "New Backup";
   }
   if (no_live_save) {
-    return "No save on this console";
+    // The stronger fact wins the one line: a missing game implies the missing save.
+    return game_missing ? "Game not on this console" : "No save on this console";
   }
   if (data_folders) {
     // Title Case, like the "New Backup" row it sits beside.
