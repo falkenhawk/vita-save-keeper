@@ -1,5 +1,6 @@
 #include "core/DiagTrace.hpp"
 
+#include <chrono>
 #include <cstdio>
 
 namespace vsm {
@@ -7,12 +8,24 @@ namespace {
 
 // empty path means disabled; there is exactly one trace per run so a single global is enough
 std::string g_trace_path;
+std::chrono::steady_clock::time_point g_trace_start;
 
 bool append_line(const std::string &line) {
   FILE *file = std::fopen(g_trace_path.c_str(), "ab");
   if (!file) {
     return false;
   }
+  // elapsed seconds since diag_open with millisecond resolution: the gap to the previous line
+  // is how long that line's operation took, so a slow-but-finite walk and a hang read apart.
+  // unsigned long instead of long long because newlib can be built without long long printf
+  // support; a boot trace never gets anywhere near the 49-day wrap.
+  const unsigned long elapsed_ms = static_cast<unsigned long>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                            g_trace_start)
+          .count());
+  char prefix[32];
+  std::snprintf(prefix, sizeof(prefix), "%lu.%03lu ", elapsed_ms / 1000, elapsed_ms % 1000);
+  std::fputs(prefix, file);
   std::fwrite(line.data(), 1, line.size(), file);
   std::fputc('\n', file);
   // fclose flushes to the filesystem; that commit per line is what makes the trace readable
@@ -34,6 +47,7 @@ bool diag_open(const std::string &path, const std::string &header) {
     return false;
   }
   std::fclose(file);
+  g_trace_start = std::chrono::steady_clock::now();
   g_trace_path = path;
   diag_log(header);
   return true;

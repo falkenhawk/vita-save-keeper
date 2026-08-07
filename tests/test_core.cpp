@@ -3551,10 +3551,25 @@ void test_diag_trace_gates_writes_and_spaces_walk_progress_lines() {
   EXPECT_TRUE(!vsm::diag_enabled());
   vsm::diag_log("dropped - closed");
 
-  std::ifstream input(path);
-  const std::string content((std::istreambuf_iterator<char>(input)),
-                            std::istreambuf_iterator<char>());
-  EXPECT_EQ(content, "header\nline one\nfooter\n");
+  // every line is "<seconds>.<ms> <text>"; strip the elapsed prefix before comparing
+  const auto read_lines_without_elapsed = [](const std::string &file_path) {
+    std::vector<std::string> lines;
+    std::ifstream input(file_path);
+    std::string line;
+    while (std::getline(input, line)) {
+      const std::size_t space = line.find(' ');
+      const std::size_t dot = line.find('.');
+      const bool stamped = space != std::string::npos && dot != std::string::npos &&
+                           dot < space && dot > 0 && space == dot + 4;
+      lines.push_back(stamped ? line.substr(space + 1) : "BAD-STAMP: " + line);
+    }
+    return lines;
+  };
+  const std::vector<std::string> lines = read_lines_without_elapsed(path);
+  EXPECT_EQ(lines.size(), std::size_t{3});
+  EXPECT_EQ(lines[0], "header");
+  EXPECT_EQ(lines[1], "line one");
+  EXPECT_EQ(lines[2], "footer");
   std::filesystem::remove(path);
 
   // a reopened trace truncates the previous boot's log rather than appending to it
@@ -3562,10 +3577,10 @@ void test_diag_trace_gates_writes_and_spaces_walk_progress_lines() {
   vsm::diag_close("");
   EXPECT_TRUE(vsm::diag_open(path, "second"));
   vsm::diag_close("");
-  std::ifstream reopened(path);
-  const std::string second((std::istreambuf_iterator<char>(reopened)),
-                           std::istreambuf_iterator<char>());
-  EXPECT_EQ(second, "second\n\n");
+  const std::vector<std::string> reopened = read_lines_without_elapsed(path);
+  EXPECT_EQ(reopened.size(), std::size_t{2});
+  EXPECT_EQ(reopened[0], "second");
+  EXPECT_EQ(reopened[1], "");
   std::filesystem::remove(path);
 
   EXPECT_EQ(vsm::diag_safe("a\nb\tc"), "a b c");

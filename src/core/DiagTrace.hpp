@@ -11,6 +11,8 @@ namespace vsm {
 // Each line is written with its own open-append-close cycle. That is deliberately slow: the
 // reporter's console hangs and gets powered off by force, so every line must already be on the
 // card when that happens. The last line in the log names the operation that never returned.
+// Lines carry an elapsed-seconds prefix ("12.345 ") counted from diag_open, so a completed
+// trace also shows how long every stage took.
 bool diag_enabled();
 bool diag_open(const std::string &path, const std::string &header);
 void diag_log(const std::string &line);
