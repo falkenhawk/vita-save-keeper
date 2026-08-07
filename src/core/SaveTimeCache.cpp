@@ -1,5 +1,6 @@
 #include "core/SaveTimeCache.hpp"
 
+#include "core/DiagTrace.hpp"
 #include "core/PathUtil.hpp"
 
 #include <picojson.h>
@@ -40,8 +41,19 @@ bool add_fingerprint(const std::string &path, SaveFingerprint *fingerprint) {
   if (!directory) {
     return false;
   }
+  if (diag_enabled()) {
+    diag_log("      walk dir " + path);
+  }
   bool ok = true;
+  long long listed = 0;
   while (dirent *entry = readdir(directory)) {
+    // a directory that keeps producing entries past every threshold is a looping readdir - the
+    // repeated lines under one dir are the diagnosis
+    ++listed;
+    if (diag_enabled() && diag_should_log_count(listed)) {
+      diag_log("      walk dir " + path + " still listing: " + std::to_string(listed) +
+               " entries");
+    }
     if (!is_dot_entry(entry->d_name) &&
         !add_fingerprint(join_path(path, entry->d_name), fingerprint)) {
       ok = false;

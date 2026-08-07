@@ -28,6 +28,7 @@ add_library(vsm_core
   src/core/BackupName.cpp
   src/core/BackupStore.cpp
   src/core/BackupOnlySaves.cpp
+  src/core/DiagTrace.cpp
   src/core/GoogleAuth.cpp
   src/core/GoogleConfig.cpp
   src/core/GoogleDrive.cpp

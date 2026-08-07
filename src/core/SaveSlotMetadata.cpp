@@ -5,6 +5,7 @@
 #include "core/SaveSlotMetadata.hpp"
 
 #include "core/CalendarUtil.hpp"
+#include "core/DiagTrace.hpp"
 #include "core/PathUtil.hpp"
 
 #include <picojson.h>
@@ -155,7 +156,16 @@ void find_newest_file_mtime(const std::string &path, std::time_t *newest, bool *
   if (!directory) {
     return;
   }
+  if (diag_enabled()) {
+    diag_log("      time-walk dir " + path);
+  }
+  long long listed = 0;
   while (dirent *entry = readdir(directory)) {
+    ++listed;
+    if (diag_enabled() && diag_should_log_count(listed)) {
+      diag_log("      time-walk dir " + path + " still listing: " + std::to_string(listed) +
+               " entries");
+    }
     if (!is_dot_entry(entry->d_name)) {
       find_newest_file_mtime(join_path(path, entry->d_name), newest, found);
     }

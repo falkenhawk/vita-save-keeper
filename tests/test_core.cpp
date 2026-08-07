@@ -5,6 +5,7 @@
 #include "core/BackupName.hpp"
 #include "core/BackupStore.hpp"
 #include "core/BackupOnlySaves.hpp"
+#include "core/DiagTrace.hpp"
 #include "core/GoogleAuth.hpp"
 #include "core/GoogleConfig.hpp"
 #include "core/GoogleDrive.hpp"
@@ -3524,6 +3525,52 @@ void test_drive_rename_metadata_json_escapes_the_name() {
             "{\"name\":\"PCSB00456 \\\"FEZ\\\"\"}");
 }
 
+void test_diag_trace_gates_writes_and_spaces_walk_progress_lines() {
+  // the sparse walk schedule fires at 1000 and every doubling after, nowhere else
+  EXPECT_TRUE(!vsm::diag_should_log_count(0));
+  EXPECT_TRUE(!vsm::diag_should_log_count(999));
+  EXPECT_TRUE(vsm::diag_should_log_count(1000));
+  EXPECT_TRUE(!vsm::diag_should_log_count(1001));
+  EXPECT_TRUE(vsm::diag_should_log_count(2000));
+  EXPECT_TRUE(!vsm::diag_should_log_count(3000));
+  EXPECT_TRUE(vsm::diag_should_log_count(4000));
+  EXPECT_TRUE(vsm::diag_should_log_count(1024000));
+  EXPECT_TRUE(!vsm::diag_should_log_count(1024001));
+
+  const std::string path =
+      (std::filesystem::temp_directory_path() / "vsm-diag-trace-test.log").string();
+  std::filesystem::remove(path);
+  EXPECT_TRUE(!vsm::diag_enabled());
+  vsm::diag_log("dropped - not open");
+  EXPECT_TRUE(!std::filesystem::exists(path));
+
+  EXPECT_TRUE(vsm::diag_open(path, "header"));
+  EXPECT_TRUE(vsm::diag_enabled());
+  vsm::diag_log("line one");
+  vsm::diag_close("footer");
+  EXPECT_TRUE(!vsm::diag_enabled());
+  vsm::diag_log("dropped - closed");
+
+  std::ifstream input(path);
+  const std::string content((std::istreambuf_iterator<char>(input)),
+                            std::istreambuf_iterator<char>());
+  EXPECT_EQ(content, "header\nline one\nfooter\n");
+  std::filesystem::remove(path);
+
+  // a reopened trace truncates the previous boot's log rather than appending to it
+  EXPECT_TRUE(vsm::diag_open(path, "first"));
+  vsm::diag_close("");
+  EXPECT_TRUE(vsm::diag_open(path, "second"));
+  vsm::diag_close("");
+  std::ifstream reopened(path);
+  const std::string second((std::istreambuf_iterator<char>(reopened)),
+                           std::istreambuf_iterator<char>());
+  EXPECT_EQ(second, "second\n\n");
+  std::filesystem::remove(path);
+
+  EXPECT_EQ(vsm::diag_safe("a\nb\tc"), "a b c");
+}
+
 } // namespace
 
 int main() {
@@ -3652,6 +3699,7 @@ int main() {
   test_drive_save_folder_names_carry_the_game_title();
   test_drive_folder_matching_accepts_bare_and_titled_names();
   test_drive_rename_metadata_json_escapes_the_name();
+  test_diag_trace_gates_writes_and_spaces_walk_progress_lines();
 
   std::cout << "vsm_core_tests passed\n";
   return 0;

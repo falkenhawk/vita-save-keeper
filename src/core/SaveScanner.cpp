@@ -2,6 +2,7 @@
 
 #include "core/SaveTimeCache.hpp"
 
+#include "core/DiagTrace.hpp"
 #include "core/PathUtil.hpp"
 #include "core/SaveSlotMetadata.hpp"
 #include "core/SfoParser.hpp"
@@ -71,6 +72,30 @@ std::vector<std::string> list_direct_child_directories(const std::string &root_p
   return directories;
 }
 
+const char *diag_platform_name(SavePlatform platform) {
+  switch (platform) {
+  case SavePlatform::Vita:
+    return "vita";
+  case SavePlatform::GameCard:
+    return "card";
+  case SavePlatform::Psp:
+    return "psp";
+  }
+  return "?";
+}
+
+const char *diag_time_source_name(SaveTimeSource source) {
+  switch (source) {
+  case SaveTimeSource::VitaSlot:
+    return "vita-slot";
+  case SaveTimeSource::Filesystem:
+    return "filesystem";
+  case SaveTimeSource::BackupClock:
+    return "backup-clock";
+  }
+  return "?";
+}
+
 void apply_sfo_metadata(SaveRecord *save) {
   const std::string vita_sfo = first_existing_file({
       join_path(join_path(save->path, "sce_sys"), "param.sfo"),
@@ -82,6 +107,9 @@ void apply_sfo_metadata(SaveRecord *save) {
   });
   const std::string sfo_path = save->platform == SavePlatform::Psp ? psp_sfo : vita_sfo;
   if (!sfo_path.empty()) {
+    if (diag_enabled()) {
+      diag_log("      sfo file " + sfo_path);
+    }
     const SfoMetadata metadata = parse_sfo_metadata_file(sfo_path);
     const auto title_id = metadata.strings.find("TITLE_ID");
     if (title_id != metadata.strings.end() && !title_id->second.empty()) {
@@ -110,6 +138,9 @@ void apply_sfo_metadata(SaveRecord *save) {
           join_path(join_path("ux0:appmeta", metadata_title_id), "PARAM.SFO"),
       });
       if (!appmeta_sfo.empty()) {
+        if (diag_enabled()) {
+          diag_log("      appmeta sfo " + appmeta_sfo);
+        }
         const SfoMetadata metadata = parse_sfo_metadata_file(appmeta_sfo);
         const std::string title = title_from_sfo_metadata(metadata);
         if (!title.empty()) {
@@ -261,7 +292,14 @@ std::vector<SaveRecord> scan_save_roots(
   };
   std::vector<PendingSave> pending;
   for (const SaveRoot &root : roots) {
-    for (const std::string &child : list_direct_child_directories(root.path)) {
+    if (diag_enabled()) {
+      diag_log("root " + root.path);
+    }
+    const std::vector<std::string> children = list_direct_child_directories(root.path);
+    if (diag_enabled()) {
+      diag_log("root " + root.path + ": " + std::to_string(children.size()) + " children");
+    }
+    for (const std::string &child : children) {
       pending.push_back({root.platform, child, join_path(root.path, child)});
     }
   }
@@ -276,10 +314,23 @@ std::vector<SaveRecord> scan_save_roots(
     save.id = item.id;
     save.display_name = item.id;
     save.path = std::move(item.path);
+    // the save line lands before any of its work: after a hang, the last such line names the
+    // folder the scan never finished
+    if (diag_enabled()) {
+      diag_log("[" + std::to_string(done + 1) + "/" + std::to_string(total) + "] " +
+               diag_platform_name(save.platform) + " " + save.id + " " + save.path);
+      diag_log("    fingerprint begin");
+    }
     // One stat-only walk per save. It is the freshness check for both halves of the index:
     // mount-resolved times for encrypted saves, resolver results for plain ones, and sfo-derived
     // titles.
     save.fingerprint = compute_save_fingerprint(save.path);
+    if (diag_enabled()) {
+      diag_log("    fingerprint ok=" + std::string(save.fingerprint.ok ? "1" : "0") +
+               " files=" + std::to_string(save.fingerprint.file_count) +
+               " bytes=" + std::to_string(save.fingerprint.total_bytes) +
+               " newest-mtime=" + std::to_string(save.fingerprint.newest_mtime));
+    }
     save.save_time_requires_mount =
         save.platform != SavePlatform::Psp && save_directory_has_pfs_metadata(save.path);
     const SaveIndexEntry *cached = nullptr;
@@ -291,6 +342,13 @@ std::vector<SaveRecord> scan_save_roots(
     }
     const bool fingerprint_fresh =
         cached && save.fingerprint.ok && cached->fingerprint.matches(save.fingerprint);
+    if (diag_enabled()) {
+      diag_log(std::string("    pfs=") + (save.save_time_requires_mount ? "1" : "0") +
+               (cached ? std::string(" index-hit fresh=") + (fingerprint_fresh ? "1" : "0") +
+                             " time-resolved=" + (cached->time_resolved ? "1" : "0") +
+                             " from-app-db=" + (cached->from_app_db ? "1" : "0")
+                       : std::string(" index-miss")));
+    }
     if (!save.save_time_requires_mount) {
       // A resolved time is trusted only while the folder is unchanged. A never-resolved entry
       // is not a time even when the fingerprint matches (a restore can recreate identical
@@ -301,11 +359,21 @@ std::vector<SaveRecord> scan_save_roots(
           save.saved_at_epoch = save_datetime_to_local_epoch(cached->saved_at);
           save.save_time_known = true;
         }
+        if (diag_enabled()) {
+          diag_log("    time cached");
+        }
       } else {
+        if (diag_enabled()) {
+          diag_log("    time resolve begin");
+        }
         const SaveMetadata metadata = metadata_resolver(save.path, current_local_datetime());
         save.saved_at = metadata.saved_at;
         save.saved_at_epoch = save_datetime_to_local_epoch(metadata.saved_at);
         save.save_time_known = metadata.source != SaveTimeSource::BackupClock;
+        if (diag_enabled()) {
+          diag_log(std::string("    time source=") + diag_time_source_name(metadata.source) +
+                   " " + format_save_datetime(metadata.saved_at));
+        }
       }
     }
     if (cached && (cached->from_app_db || fingerprint_fresh)) {
@@ -315,14 +383,27 @@ std::vector<SaveRecord> scan_save_roots(
       save.icon_path = cached->icon_path;
       save.title_from_cache = true;
       save.title_from_app_db = cached->from_app_db;
+      if (diag_enabled()) {
+        diag_log("    title cached \"" + diag_safe(save.display_name) + "\"");
+      }
     } else {
+      if (diag_enabled()) {
+        diag_log("    sfo begin");
+      }
       apply_sfo_metadata(&save);
+      if (diag_enabled()) {
+        diag_log("    sfo done title=\"" + diag_safe(save.display_name) + "\" title-id=" +
+                 save.title_id + " icon=" + save.icon_path);
+      }
     }
     saves.push_back(std::move(save));
     ++done;
     if (on_progress) {
       on_progress(done, total);
     }
+  }
+  if (diag_enabled()) {
+    diag_log("scan loop end: " + std::to_string(saves.size()) + " saves");
   }
 
   return saves;

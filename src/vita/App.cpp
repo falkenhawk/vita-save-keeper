@@ -6,6 +6,7 @@
 #include "core/BackupName.hpp"
 #include "core/BackupStore.hpp"
 #include "core/BackupOnlySaves.hpp"
+#include "core/DiagTrace.hpp"
 #include "core/GoogleAuth.hpp"
 #include "core/GoogleConfig.hpp"
 #include "core/GoogleDrive.hpp"
@@ -69,6 +70,8 @@ constexpr const char *kGoogleTokenPath = "ux0:data/save-keeper/google-token.json
 constexpr const char *kSettingsPath = "ux0:data/save-keeper/settings.txt";
 // Version 2 of save-titles.json is the merged index: times and titles in one file.
 constexpr const char *kSaveIndexPath = "ux0:data/save-keeper/save-titles.json";
+// diagnostic boot trace for github issue #7 (startup hang mid-scan); see core/DiagTrace.hpp
+constexpr const char *kScanTraceLogPath = "ux0:data/save-keeper/scan-trace.log";
 // The retired times half of the old two-file layout, removed at every boot.
 constexpr const char *kLegacySaveTimesPath = "ux0:data/save-keeper/save-times.json";
 // Backup-shaping settings (data folder overrides + the skip list) - the file other devices sync;
@@ -990,9 +993,15 @@ bool App::resolve_save_time(SaveRecord *save) {
     save->save_time_requires_mount = false;
     return save->save_time_known;
   }
+  if (diag_enabled()) {
+    diag_log("  mount read begin " + save->id + " " + save->path);
+  }
   const SaveMetadata metadata =
       resolve_live_save_metadata(save->path, {}, true, mount_bridge_ready_);
   const bool resolved = apply_mounted_save_time(save, metadata);
+  if (diag_enabled()) {
+    diag_log(std::string("  mount read done resolved=") + (resolved ? "1" : "0"));
+  }
   // Cache every outcome reached with a healthy mount bridge - an exact slot time, a filesystem
   // fallback (games with no slot table), and even "no readable time at all" - so none of them is
   // re-derived every launch. Skip caching when the bridge is down: that is the one failure that
@@ -5226,13 +5235,23 @@ int App::run() {
   scePowerSetArmClockFrequency(444);
   scePowerSetBusClockFrequency(222);
 
+  // diag build: the trace opens before the first call that can block, so whatever never returns
+  // is the last line in the file. It closes right before the main loop; a log that ends with
+  // "startup complete" means the hang is not a boot hang.
+  ensure_directory(kDataRoot);
+  diag_open(kScanTraceLogPath, "save keeper 1.3.0-diag1 boot trace (issue #7)");
+  diag_log("boot " + format_save_datetime(current_local_datetime()));
+
   // Slot timestamps are optional. If the mount bridge cannot load, all backup operations still
   // work and metadata falls back to save-file times as before. The result gates the kernel-bridge
   // syscall so a failed load degrades to the AppMgr mount instead of calling an unloaded module.
+  diag_log("mount bridge init");
   mount_bridge_ready_ = initialize_save_data_mount_bridge();
+  diag_log(std::string("mount bridge ready=") + (mount_bridge_ready_ ? "1" : "0"));
   // Started right after the bridge so every mount from here on - queued reads, the batch read,
   // backups, details - goes through the one worker thread.
   start_mount_worker();
+  diag_log("mount worker started");
 
   // Scanning storage and reading the system app database (titles, icons) blocks for a moment on a
   // full library; draw a frame first so the screen is not blank while it runs. Start at a
@@ -5243,16 +5262,24 @@ int App::run() {
   // The index loads before the scan so it can consume it: times and sfo-derived titles are
   // trusted while each save folder's fingerprint is unchanged, app-database titles while the
   // database stamp is, so a warm start skips the sdslot/sfo reads and the sqlite query entirely.
+  diag_log("read save index");
   save_index_ = read_save_index(kSaveIndexPath);
+  diag_log("index entries=" + std::to_string(save_index_.entries.size()) +
+           " app-db-mtime=" + std::to_string(save_index_.app_db_mtime) +
+           " app-db-size=" + std::to_string(save_index_.app_db_size));
   // Version 2 folded save-times.json into the index; on an upgraded card the old file is dead
   // weight. Unconditional removal costs one failed unlink per boot once it is gone.
   std::remove(kLegacySaveTimesPath);
+  diag_log("load tracked folders");
   load_tracked_folders();
   long long app_db_mtime = 0;
   long long app_db_size = 0;
   const bool app_db_stamped = stat_file_stamp(kSystemAppDbPath, &app_db_mtime, &app_db_size);
   const bool titles_fresh = app_db_stamped && app_db_mtime == save_index_.app_db_mtime &&
                             app_db_size == save_index_.app_db_size;
+  diag_log(std::string("app-db stamp ok=") + (app_db_stamped ? "1" : "0") +
+           " titles-fresh=" + (titles_fresh ? "1" : "0"));
+  diag_log("scan begin");
 
   // Scan once at startup for the foundation build. Later actions that create, restore, or delete a
   // save will refresh this list explicitly so the UI does not rescan storage every frame.
@@ -5278,39 +5305,57 @@ int App::run() {
       break;
     }
   }
+  diag_log(std::string("app-db query needed=") + (need_app_db ? "1" : "0"));
   if (need_app_db) {
     const AppDbMetadataResult metadata_result =
         apply_app_db_metadata(&saves_, [this] { ui_.draw_busy("Loading saves", 0, -1); });
+    diag_log(std::string("app-db query ok=") + (metadata_result.ok ? "1" : "0") +
+             (metadata_result.error.empty() ? std::string()
+                                            : " error=" + diag_safe(metadata_result.error)));
     if (!metadata_result.ok && !metadata_result.error.empty()) {
       set_status(StatusKind::Info, "Using save-folder metadata: " + metadata_result.error);
     }
   }
   // Cached times for encrypted saves must apply before the rebuild: records still carrying
   // valid times get written back instead of being reset to "never resolved" and re-mounted.
+  diag_log("apply cached save times");
   apply_cached_save_times();
+  diag_log("rebuild save index");
   rebuild_save_index(app_db_stamped ? app_db_mtime : 0, app_db_stamped ? app_db_size : 0);
   // Fold the extra data folders into saves_ now that the scanner, app-database pass and index
   // are done - they run only over real savedata - and before the sort/rebuild below.
+  diag_log("apply tracked folders");
   apply_tracked_folders();
   // Games that exist here only as card backups get their rows from the first frame - no Drive
   // needed. A later Drive sync re-runs this with the cloud folders folded into the union.
+  diag_log("synthesize backups-only rows");
   synthesize_backups_only_saves();
+  diag_log("load settings");
   load_settings();
+  diag_log("settings sort=" + save_sort_mode_to_string(sort_mode_) +
+           " cleaned-empty=" + (cleaned_empty_backup_folders_ ? "1" : "0"));
   // One pass for folders emptied by older versions, which left them behind. Deletes clean up as
   // they go now, so this never needs to run again. It sits under the "Loading saves" modal that is
   // already on screen - no extra stage, no extra label. Marked done even when some folder resists
   // removal: a read-only card fails identically on every boot, and retrying forever buys nothing.
   if (!cleaned_empty_backup_folders_) {
+    diag_log("empty-folder cleanup begin");
     remove_empty_backup_folders(kBackupRoot);
     cleaned_empty_backup_folders_ = true;
     save_settings();
+    diag_log("empty-folder cleanup done");
+  }
+  if (save_sort_requires_all_times(sort_mode_)) {
+    diag_log("startup batch time read begin (sort=saved)");
   }
   if (save_sort_requires_all_times(sort_mode_) && !resolve_all_save_times()) {
     // Canceled the startup read (the saved sort was Last Saved); fall back to name.
     sort_mode_ = SaveSortMode::Name;
     save_settings();
+    diag_log("startup batch time read canceled");
   }
   // Local backups rank here already; Drive additions re-sort after the index syncs.
+  diag_log("apply sort");
   apply_save_sort(&saves_, sort_mode_, newest_backup_by_folder());
   // Open on the first tab that actually has saves; with none anywhere the pick is arbitrary and
   // the grid just shows its "No saves found" state.
@@ -5323,18 +5368,24 @@ int App::run() {
   }
   rebuild_visible_saves();
   queue_selected_save_time_read();
+  diag_log("refresh local backups begin");
   refresh_local_backups();
+  diag_log("refresh local backups done");
   load_google_token_cache();
+  diag_log(std::string("token cache loaded connected=") + (google_connected_ ? "1" : "0"));
 
   // Bring the network stack up once for the whole run. Doing this per request was fragile: a
   // second initialization of an already-running stack fails and every request after that failed.
   // It blocks for a beat, so keep a frame on screen while it happens.
+  diag_log("network startup begin");
   ui_.draw_busy("Starting network", 0, -1);
   std::string network_error;
   if (!HttpClient::network_startup(&network_error)) {
     set_status(StatusKind::Error, network_error);
+    diag_log("network startup failed: " + diag_safe(network_error));
   }
   network_connected_ = HttpClient::network_reachable();
+  diag_log(std::string("network reachable=") + (network_connected_ ? "1" : "0"));
   HttpClient::set_progress_hook([this](const std::string &label, long long done, long long total) {
     if (g_transfer_budget_total > 0) {
       // One continuous bar per operation: payload requests advance it, metadata requests hold it.
@@ -5376,6 +5427,7 @@ int App::run() {
   // With a stored sign-in, load the Drive index right away so every game shows its Drive backups
   // without a manual refresh; the progress overlay covers the wait.
   if (google_connected_) {
+    diag_log("startup drive sync begin");
     if (sync_drive_index()) {
       refresh_remote_backups_view();
       if (sort_mode_ == SaveSortMode::LastBackup) {
@@ -5383,7 +5435,12 @@ int App::run() {
       }
       sync_backup_settings();
     }
+    diag_log("startup drive sync done");
   }
+
+  // startup is over: close the trace so the log stays a boot trace, and so background mount
+  // reads driven by the main loop never write to it
+  diag_close("startup complete");
 
   // Set last, not inside load_tracked_folders() itself: that call runs at the very start of
   // startup, and the app-database metadata warning, a network-startup failure, or a Drive sync
