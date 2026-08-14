@@ -28,6 +28,7 @@ add_library(vsm_core
   src/core/BackupName.cpp
   src/core/BackupStore.cpp
   src/core/BackupOnlySaves.cpp
+  src/core/ContentSignature.cpp
   src/core/DirWalk.cpp
   src/core/GoogleAuth.cpp
   src/core/GoogleConfig.cpp
@@ -49,6 +50,8 @@ target_include_directories(vsm_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/picojson
 )
+# zlib: raw deflate for backup archive entries. VITASDK ships libz.a; hosts use the system zlib.
+target_link_libraries(vsm_core PUBLIC z)
 if(SAVE_KEEPER_GOOGLE_CLIENT_ID AND SAVE_KEEPER_GOOGLE_CLIENT_SECRET)
   save_keeper_escape_definition(SAVE_KEEPER_ESCAPED_GOOGLE_CLIENT_ID
                                 "${SAVE_KEEPER_GOOGLE_CLIENT_ID}")

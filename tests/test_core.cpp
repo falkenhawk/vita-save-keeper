@@ -5,6 +5,7 @@
 #include "core/BackupName.hpp"
 #include "core/BackupStore.hpp"
 #include "core/BackupOnlySaves.hpp"
+#include "core/ContentSignature.hpp"
 #include "core/DirWalk.hpp"
 #include "core/GoogleAuth.hpp"
 #include "core/GoogleConfig.hpp"
@@ -3603,6 +3604,27 @@ void test_walk_entry_cap_poisons_fingerprint_and_time_falls_to_backup_clock() {
   std::filesystem::remove_all(root);
 }
 
+void test_content_signature_is_order_independent_and_pinned() {
+  const std::vector<vsm::ArchiveEntryInfo> forward = {
+      {"data.bin", 0x11223344u, 9u},
+      {"sce_sys/icon0.png", 0xdeadbeefu, 1234u},
+  };
+  const std::vector<vsm::ArchiveEntryInfo> reversed = {
+      {"sce_sys/icon0.png", 0xdeadbeefu, 1234u},
+      {"data.bin", 0x11223344u, 9u},
+  };
+  // Golden value pins the byte-exact spec: for each entry sorted by path,
+  // path + '\0' + lowercase 8-hex crc32 + '\0' + decimal size + '\n', hashed with FNV-1a 64.
+  EXPECT_EQ(vsm::compute_content_signature(forward), std::string("40c441899c0a29bd"));
+  EXPECT_EQ(vsm::compute_content_signature(reversed), std::string("40c441899c0a29bd"));
+  // An empty list hashes to the FNV offset basis.
+  EXPECT_EQ(vsm::compute_content_signature({}), std::string("cbf29ce484222325"));
+
+  const vsm::ContentTotals totals = vsm::compute_content_totals(forward);
+  EXPECT_EQ(static_cast<std::size_t>(totals.total_bytes), static_cast<std::size_t>(1243));
+  EXPECT_EQ(static_cast<std::size_t>(totals.file_count), static_cast<std::size_t>(2));
+}
+
 } // namespace
 
 int main() {
@@ -3733,6 +3755,7 @@ int main() {
   test_drive_rename_metadata_json_escapes_the_name();
   test_dir_walk_lists_entries_and_supports_early_stop();
   test_walk_entry_cap_poisons_fingerprint_and_time_falls_to_backup_clock();
+  test_content_signature_is_order_independent_and_pinned();
 
   std::cout << "vsm_core_tests passed\n";
   return 0;
