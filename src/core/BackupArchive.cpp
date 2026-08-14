@@ -4,6 +4,7 @@
 
 #include "core/BackupArchive.hpp"
 
+#include "core/DirWalk.hpp"
 #include "core/PathUtil.hpp"
 
 #include <algorithm>
@@ -702,35 +703,28 @@ bool extract_archive_to_directory(
 
 // Recursively sums the byte size of every regular file under a directory. Returns false when the
 // directory (or a subdirectory) could not be opened, but still adds whatever it did read.
+// No entry cap here: the details view must report the folder's true size however large it is,
+// and with d_stat-backed listing (DirWalk) even a many-thousand-file folder walks linearly.
 bool add_directory_size(const std::string &path, std::uint64_t *total, std::size_t *files) {
-  DIR *dir = opendir(path.c_str());
-  if (!dir) {
-    return false;
-  }
   bool ok = true;
-  while (dirent *entry = readdir(dir)) {
-    if (is_dot_entry(entry->d_name)) {
-      continue;
-    }
-    const std::string child = join_path(path, entry->d_name);
-    struct stat info;
-    if (!stat_path(child, &info)) {
+  const bool opened = for_each_dir_entry(path, [&](const DirEntryInfo &entry) {
+    if (!entry.stat_ok) {
       ok = false;
-      continue;
+      return true;
     }
-    if (S_ISDIR(info.st_mode)) {
-      if (!add_directory_size(child, total, files)) {
+    if (entry.is_directory) {
+      if (!add_directory_size(join_path(path, entry.name), total, files)) {
         ok = false;
       }
-    } else if (S_ISREG(info.st_mode)) {
-      *total += static_cast<std::uint64_t>(info.st_size);
+    } else if (entry.is_regular) {
+      *total += static_cast<std::uint64_t>(entry.size);
       if (files) {
         ++*files;
       }
     }
-  }
-  closedir(dir);
-  return ok;
+    return true;
+  });
+  return opened && ok;
 }
 
 } // namespace

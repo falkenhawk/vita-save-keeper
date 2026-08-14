@@ -5237,10 +5237,13 @@ int App::run() {
 
   // diag build: the trace opens before the first call that can block, so whatever never returns
   // is the last line in the file. It closes right before the main loop; a log that ends with
-  // "startup complete" means the hang is not a boot hang.
+  // "startup complete" means the hang is not a boot hang. Regular builds never open the trace,
+  // which leaves every diag hook in this file and in the walks a no-op.
+#ifdef SAVE_KEEPER_DIAG_TRACE
   ensure_directory(kDataRoot);
-  diag_open(kScanTraceLogPath, "save keeper 1.3.0-diag1 boot trace (issue #7)");
+  diag_open(kScanTraceLogPath, "save keeper 1.3.1-diag boot trace (issue #7)");
   diag_log("boot " + format_save_datetime(current_local_datetime()));
+#endif
 
   // Slot timestamps are optional. If the mount bridge cannot load, all backup operations still
   // work and metadata falls back to save-file times as before. The result gates the kernel-bridge

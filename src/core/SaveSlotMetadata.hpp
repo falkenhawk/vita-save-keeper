@@ -78,8 +78,12 @@ bool save_metadata_is_usable(const SaveMetadataJsonResult &metadata,
 // True only when the time came from save contents: exact Vita slots or the newest save file.
 // A backup-clock fallback must not be published as if it were the game's save time.
 bool save_metadata_has_observed_time(const SaveMetadata &metadata);
+// The default caps the file walk at kMaxSaveWalkEntries (DirWalk.hpp); a capped walk reports
+// BackupClock rather than a partial newest-file time. The explicit-limit overload is for tests.
 SaveMetadata resolve_save_metadata(const std::string &save_path,
                                    const SaveDateTime &backup_clock);
+SaveMetadata resolve_save_metadata(const std::string &save_path,
+                                   const SaveDateTime &backup_clock, long long max_entries);
 SaveDateTime current_local_datetime();
 std::string format_save_datetime(const SaveDateTime &value);
 // Strict "YYYY-MM-DDTHH:MM:SS" with calendar validation; the format format_save_datetime writes.

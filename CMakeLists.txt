@@ -13,6 +13,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(SAVE_KEEPER_GOOGLE_CLIENT_ID "" CACHE STRING "Google OAuth client ID to embed in the Vita app")
 set(SAVE_KEEPER_GOOGLE_CLIENT_SECRET "" CACHE STRING "Google OAuth client secret to embed in the Vita app")
+# Diagnostic builds (issue #7 workflow): ON writes a boot trace to
+# ux0:data/save-keeper/scan-trace.log. The trace hooks stay compiled in either way but are
+# no-ops until the trace is opened, which only happens under this flag.
+option(SAVE_KEEPER_DIAG_TRACE "Write a startup diagnostic trace on the Vita" OFF)
 
 function(save_keeper_escape_definition OUTPUT_NAME VALUE)
   string(REPLACE "\\" "\\\\" ESCAPED_VALUE "${VALUE}")
@@ -29,6 +33,7 @@ add_library(vsm_core
   src/core/BackupStore.cpp
   src/core/BackupOnlySaves.cpp
   src/core/DiagTrace.cpp
+  src/core/DirWalk.cpp
   src/core/GoogleAuth.cpp
   src/core/GoogleConfig.cpp
   src/core/GoogleDrive.cpp
@@ -49,6 +54,9 @@ target_include_directories(vsm_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/picojson
 )
+if(SAVE_KEEPER_DIAG_TRACE)
+  target_compile_definitions(vsm_core PUBLIC SAVE_KEEPER_DIAG_TRACE)
+endif()
 if(SAVE_KEEPER_GOOGLE_CLIENT_ID AND SAVE_KEEPER_GOOGLE_CLIENT_SECRET)
   save_keeper_escape_definition(SAVE_KEEPER_ESCAPED_GOOGLE_CLIENT_ID
                                 "${SAVE_KEEPER_GOOGLE_CLIENT_ID}")

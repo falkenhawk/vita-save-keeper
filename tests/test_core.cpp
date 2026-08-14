@@ -6,6 +6,7 @@
 #include "core/BackupStore.hpp"
 #include "core/BackupOnlySaves.hpp"
 #include "core/DiagTrace.hpp"
+#include "core/DirWalk.hpp"
 #include "core/GoogleAuth.hpp"
 #include "core/GoogleConfig.hpp"
 #include "core/GoogleDrive.hpp"
@@ -3525,6 +3526,79 @@ void test_drive_rename_metadata_json_escapes_the_name() {
             "{\"name\":\"PCSB00456 \\\"FEZ\\\"\"}");
 }
 
+void test_dir_walk_lists_entries_and_supports_early_stop() {
+  const std::filesystem::path root =
+      std::filesystem::temp_directory_path() / "vsm-dirwalk-test";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root / "sub");
+  std::ofstream(root / "a.bin") << "12345";
+  std::ofstream(root / "b.bin") << "12";
+
+  std::vector<std::string> names;
+  long long total_bytes = 0;
+  int directories = 0;
+  EXPECT_TRUE(vsm::for_each_dir_entry(root.string(), [&](const vsm::DirEntryInfo &entry) {
+    names.emplace_back(entry.name);
+    EXPECT_TRUE(entry.stat_ok);
+    if (entry.is_regular) {
+      total_bytes += entry.size;
+      EXPECT_TRUE(entry.mtime > 0);
+    }
+    if (entry.is_directory) {
+      ++directories;
+    }
+    return true;
+  }));
+  std::sort(names.begin(), names.end());
+  EXPECT_EQ(names.size(), std::size_t{3});
+  EXPECT_EQ(names[0], "a.bin");
+  EXPECT_EQ(names[1], "b.bin");
+  EXPECT_EQ(names[2], "sub");
+  EXPECT_EQ(total_bytes, 7LL);
+  EXPECT_EQ(directories, 1);
+
+  // fn returning false stops the listing after the first entry
+  int seen = 0;
+  EXPECT_TRUE(vsm::for_each_dir_entry(root.string(), [&](const vsm::DirEntryInfo &) {
+    ++seen;
+    return false;
+  }));
+  EXPECT_EQ(seen, 1);
+
+  EXPECT_TRUE(!vsm::for_each_dir_entry((root / "missing").string(),
+                                       [](const vsm::DirEntryInfo &) { return true; }));
+  std::filesystem::remove_all(root);
+}
+
+void test_walk_entry_cap_poisons_fingerprint_and_time_falls_to_backup_clock() {
+  const std::filesystem::path root =
+      std::filesystem::temp_directory_path() / "vsm-walkcap-test";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root / "nested");
+  for (int i = 0; i < 6; ++i) {
+    std::ofstream(root / "nested" / ("file" + std::to_string(i))) << "x";
+  }
+
+  // 8 entries total (nested + 6 files, entry 8 never reached): a budget below that poisons the
+  // fingerprint, a comfortable budget keeps it whole with identical counts
+  const vsm::SaveFingerprint full = vsm::compute_save_fingerprint(root.string());
+  EXPECT_TRUE(full.ok);
+  EXPECT_EQ(full.file_count, 6LL);
+  const vsm::SaveFingerprint capped = vsm::compute_save_fingerprint(root.string(), 3);
+  EXPECT_TRUE(!capped.ok);
+  // a capped fingerprint must never match anything, itself included
+  EXPECT_TRUE(!capped.matches(capped));
+  EXPECT_TRUE(!capped.matches(full));
+
+  // the resolver reports the honest "no trustworthy time" source instead of a partial newest
+  const vsm::SaveDateTime clock{2026, 8, 10, 12, 0, 0};
+  const vsm::SaveMetadata capped_time = vsm::resolve_save_metadata(root.string(), clock, 3);
+  EXPECT_TRUE(capped_time.source == vsm::SaveTimeSource::BackupClock);
+  const vsm::SaveMetadata full_time = vsm::resolve_save_metadata(root.string(), clock);
+  EXPECT_TRUE(full_time.source == vsm::SaveTimeSource::Filesystem);
+  std::filesystem::remove_all(root);
+}
+
 void test_diag_trace_gates_writes_and_spaces_walk_progress_lines() {
   // the sparse walk schedule fires at 1000 and every doubling after, nowhere else
   EXPECT_TRUE(!vsm::diag_should_log_count(0));
@@ -3714,6 +3788,8 @@ int main() {
   test_drive_save_folder_names_carry_the_game_title();
   test_drive_folder_matching_accepts_bare_and_titled_names();
   test_drive_rename_metadata_json_escapes_the_name();
+  test_dir_walk_lists_entries_and_supports_early_stop();
+  test_walk_entry_cap_poisons_fingerprint_and_time_falls_to_backup_clock();
   test_diag_trace_gates_writes_and_spaces_walk_progress_lines();
 
   std::cout << "vsm_core_tests passed\n";

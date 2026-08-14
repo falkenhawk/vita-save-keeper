@@ -24,7 +24,11 @@ struct SaveFingerprint {
   }
 };
 
+// The default walks at most kMaxSaveWalkEntries entries (DirWalk.hpp); past that the
+// fingerprint comes back not-ok, which never matches and degrades that save to per-boot
+// re-reads instead of freezing the scan. The explicit-limit overload exists for tests.
 SaveFingerprint compute_save_fingerprint(const std::string &save_path);
+SaveFingerprint compute_save_fingerprint(const std::string &save_path, long long max_entries);
 
 // One index entry per save: the folder fingerprint, with the save time and the title metadata
 // hanging off it. Each half has its own freshness rule - see SaveIndex.

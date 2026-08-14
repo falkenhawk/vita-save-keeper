@@ -6,6 +6,7 @@
 
 #include "core/CalendarUtil.hpp"
 #include "core/DiagTrace.hpp"
+#include "core/DirWalk.hpp"
 #include "core/PathUtil.hpp"
 
 #include <picojson.h>
@@ -18,7 +19,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <ctime>
-#include <dirent.h>
 #include <string>
 #include <sys/stat.h>
 #include <vector>
@@ -132,45 +132,43 @@ void read_fixed_string(const std::vector<unsigned char> &data, std::size_t offse
   *value = sanitize_utf8(data.data() + offset, length);
 }
 
-bool is_dot_entry(const char *name) {
-  return std::string(name) == "." || std::string(name) == "..";
-}
-
-void find_newest_file_mtime(const std::string &path, std::time_t *newest, bool *found) {
-  struct stat info {};
-  if (stat(path.c_str(), &info) != 0) {
-    return;
-  }
-  if (S_ISREG(info.st_mode)) {
-    if (!*found || info.st_mtime > *newest) {
-      *newest = info.st_mtime;
-      *found = true;
+// The budget counts down across the whole recursive walk. When it runs out the walk stops and
+// capped is set; callers must then treat the time as unknown - a newest-so-far from a partial
+// walk could be older than the real save time, and a wrong "last saved" is worse than none.
+void find_newest_file_mtime(const std::string &path, std::time_t *newest, bool *found,
+                            long long *budget, bool *capped) {
+  const bool opened = for_each_dir_entry(
+      path,
+      [&](const DirEntryInfo &entry) {
+        if (--*budget < 0) {
+          *capped = true;
+          return false;
+        }
+        if (entry.is_regular) {
+          if (!*found || entry.mtime > static_cast<long long>(*newest)) {
+            *newest = static_cast<std::time_t>(entry.mtime);
+            *found = true;
+          }
+        } else if (entry.is_directory) {
+          find_newest_file_mtime(join_path(path, entry.name), newest, found, budget, capped);
+          if (*capped) {
+            return false;
+          }
+        }
+        return true;
+      },
+      "time-walk");
+  if (!opened) {
+    // not openable as a directory: a tracked path can point at a plain file, whose own mtime
+    // is the answer (the pre-DirWalk walk statted the top path first for exactly this case)
+    struct stat info {};
+    if (stat(path.c_str(), &info) == 0 && S_ISREG(info.st_mode)) {
+      if (!*found || info.st_mtime > *newest) {
+        *newest = info.st_mtime;
+        *found = true;
+      }
     }
-    return;
   }
-  if (!S_ISDIR(info.st_mode)) {
-    return;
-  }
-
-  DIR *directory = opendir(path.c_str());
-  if (!directory) {
-    return;
-  }
-  if (diag_enabled()) {
-    diag_log("      time-walk dir " + path);
-  }
-  long long listed = 0;
-  while (dirent *entry = readdir(directory)) {
-    ++listed;
-    if (diag_enabled() && diag_should_log_count(listed)) {
-      diag_log("      time-walk dir " + path + " still listing: " + std::to_string(listed) +
-               " entries");
-    }
-    if (!is_dot_entry(entry->d_name)) {
-      find_newest_file_mtime(join_path(path, entry->d_name), newest, found);
-    }
-  }
-  closedir(directory);
 }
 
 bool read_sdslot_file(const std::string &path, std::vector<unsigned char> *data) {
@@ -424,6 +422,11 @@ bool save_metadata_has_observed_time(const SaveMetadata &metadata) {
 
 SaveMetadata resolve_save_metadata(const std::string &save_path,
                                    const SaveDateTime &backup_clock) {
+  return resolve_save_metadata(save_path, backup_clock, kMaxSaveWalkEntries);
+}
+
+SaveMetadata resolve_save_metadata(const std::string &save_path,
+                                   const SaveDateTime &backup_clock, long long max_entries) {
   std::vector<unsigned char> sdslot;
   if (read_sdslot_file(join_path(join_path(save_path, "sce_sys"), "sdslot.dat"), &sdslot)) {
     SaveMetadata parsed = parse_sdslot_data(sdslot);
@@ -434,9 +437,14 @@ SaveMetadata resolve_save_metadata(const std::string &save_path,
 
   std::time_t newest = 0;
   bool found = false;
-  find_newest_file_mtime(save_path, &newest, &found);
+  bool capped = false;
+  long long budget = max_entries;
+  find_newest_file_mtime(save_path, &newest, &found, &budget, &capped);
   SaveMetadata result;
-  if (found) {
+  // a capped walk falls through to the backup clock even when it found something: its
+  // newest-so-far may predate the real save time, and BackupClock is the one source callers
+  // already treat as "no trustworthy time"
+  if (found && !capped) {
     result.saved_at = datetime_from_time(newest);
     result.source = SaveTimeSource::Filesystem;
   } else {

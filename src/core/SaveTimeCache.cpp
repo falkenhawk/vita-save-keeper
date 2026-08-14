@@ -1,12 +1,12 @@
 #include "core/SaveTimeCache.hpp"
 
 #include "core/DiagTrace.hpp"
+#include "core/DirWalk.hpp"
 #include "core/PathUtil.hpp"
 
 #include <picojson.h>
 
 #include <cstdio>
-#include <dirent.h>
 #include <string>
 #include <sys/stat.h>
 #include <utility>
@@ -14,60 +14,59 @@
 namespace vsm {
 namespace {
 
-bool is_dot_entry(const char *name) {
-  return std::string(name) == "." || std::string(name) == "..";
-}
-
 // Any unreadable file or directory poisons the fingerprint (ok = false): a partial reading could
 // match a complete one taken earlier and wrongly validate a cache entry. Not-ok fingerprints
 // never match, which degrades to reading the time through a mount - correct, just slower.
-bool add_fingerprint(const std::string &path, SaveFingerprint *fingerprint) {
-  struct stat info {};
-  if (stat(path.c_str(), &info) != 0) {
-    return false;
-  }
-  if (S_ISREG(info.st_mode)) {
-    ++fingerprint->file_count;
-    fingerprint->total_bytes += static_cast<long long>(info.st_size);
-    if (static_cast<long long>(info.st_mtime) > fingerprint->newest_mtime) {
-      fingerprint->newest_mtime = static_cast<long long>(info.st_mtime);
-    }
-    return true;
-  }
-  if (!S_ISDIR(info.st_mode)) {
-    return true;
-  }
-  DIR *directory = opendir(path.c_str());
-  if (!directory) {
-    return false;
-  }
-  if (diag_enabled()) {
-    diag_log("      walk dir " + path);
-  }
+// The budget counts down across the whole recursive walk; running out also poisons the
+// fingerprint and stops the walk, so a data-hoard folder (issue #7) costs a bounded scan per
+// boot instead of freezing it.
+bool add_fingerprint(const std::string &path, SaveFingerprint *fingerprint, long long *budget) {
   bool ok = true;
-  long long listed = 0;
-  while (dirent *entry = readdir(directory)) {
-    // a directory that keeps producing entries past every threshold is a looping readdir - the
-    // repeated lines under one dir are the diagnosis
-    ++listed;
-    if (diag_enabled() && diag_should_log_count(listed)) {
-      diag_log("      walk dir " + path + " still listing: " + std::to_string(listed) +
-               " entries");
-    }
-    if (!is_dot_entry(entry->d_name) &&
-        !add_fingerprint(join_path(path, entry->d_name), fingerprint)) {
-      ok = false;
-    }
-  }
-  closedir(directory);
-  return ok;
+  const bool opened = for_each_dir_entry(
+      path,
+      [&](const DirEntryInfo &entry) {
+        if (--*budget < 0) {
+          ok = false;
+          return false;
+        }
+        if (!entry.stat_ok) {
+          ok = false;
+          return true;
+        }
+        if (entry.is_regular) {
+          ++fingerprint->file_count;
+          fingerprint->total_bytes += entry.size;
+          if (entry.mtime > fingerprint->newest_mtime) {
+            fingerprint->newest_mtime = entry.mtime;
+          }
+        } else if (entry.is_directory) {
+          if (!add_fingerprint(join_path(path, entry.name), fingerprint, budget)) {
+            ok = false;
+          }
+          if (*budget < 0) {
+            return false;
+          }
+        }
+        return true;
+      },
+      "walk");
+  return opened && ok;
 }
 
 } // namespace
 
 SaveFingerprint compute_save_fingerprint(const std::string &save_path) {
+  return compute_save_fingerprint(save_path, kMaxSaveWalkEntries);
+}
+
+SaveFingerprint compute_save_fingerprint(const std::string &save_path, long long max_entries) {
   SaveFingerprint fingerprint;
-  fingerprint.ok = add_fingerprint(save_path, &fingerprint) && fingerprint.file_count > 0;
+  long long budget = max_entries;
+  fingerprint.ok =
+      add_fingerprint(save_path, &fingerprint, &budget) && fingerprint.file_count > 0;
+  if (budget < 0 && diag_enabled()) {
+    diag_log("      walk capped at " + std::to_string(max_entries) + " entries: " + save_path);
+  }
   return fingerprint;
 }
 

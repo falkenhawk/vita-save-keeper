@@ -3,6 +3,7 @@
 #include "core/SaveTimeCache.hpp"
 
 #include "core/DiagTrace.hpp"
+#include "core/DirWalk.hpp"
 #include "core/PathUtil.hpp"
 #include "core/SaveSlotMetadata.hpp"
 #include "core/SfoParser.hpp"
@@ -16,18 +17,6 @@
 
 namespace vsm {
 namespace {
-
-bool is_dot_entry(const char *name) {
-  return std::string(name) == "." || std::string(name) == "..";
-}
-
-bool is_directory(const std::string &path) {
-  struct stat info {};
-  if (stat(path.c_str(), &info) != 0) {
-    return false;
-  }
-  return S_ISDIR(info.st_mode);
-}
 
 bool is_regular_file(const std::string &path) {
   struct stat info {};
@@ -48,26 +37,14 @@ std::string first_existing_file(const std::vector<std::string> &paths) {
 
 std::vector<std::string> list_direct_child_directories(const std::string &root_path) {
   std::vector<std::string> directories;
-  DIR *dir = opendir(root_path.c_str());
-  if (!dir) {
-    // Save roots vary by model, storage setup, and installed plugins. Treating missing roots as an
-    // empty list keeps the UI usable on systems without Adrenaline or without a mounted partition.
-    return directories;
-  }
-
-  while (dirent *entry = readdir(dir)) {
-    if (is_dot_entry(entry->d_name)) {
-      continue;
+  // A missing root simply lists as empty: save roots vary by model, storage setup, and
+  // installed plugins, and the UI must stay usable without Adrenaline or a mounted partition.
+  for_each_dir_entry(root_path, [&](const DirEntryInfo &entry) {
+    if (entry.is_directory) {
+      directories.emplace_back(entry.name);
     }
-
-    const std::string child_name = entry->d_name;
-    const std::string child_path = join_path(root_path, child_name);
-    if (is_directory(child_path)) {
-      directories.push_back(child_name);
-    }
-  }
-  closedir(dir);
-
+    return true;
+  });
   std::sort(directories.begin(), directories.end());
   return directories;
 }
@@ -279,8 +256,13 @@ SaveSortMode save_sort_mode_from_string(const std::string &value) {
 std::vector<SaveRecord> scan_save_roots(
     const std::vector<SaveRoot> &roots, const SaveScanProgress &on_progress,
     const SaveMetadataResolver &resolve_metadata, const SaveIndex *index) {
+  // the cast picks the default-cap overload; the bare name became ambiguous when the
+  // explicit-limit variant was added
   const SaveMetadataResolver metadata_resolver =
-      resolve_metadata ? resolve_metadata : resolve_save_metadata;
+      resolve_metadata
+          ? resolve_metadata
+          : static_cast<SaveMetadata (*)(const std::string &, const SaveDateTime &)>(
+                resolve_save_metadata);
 
   // List every save directory up front so progress is a real fraction of a known total instead of
   // an indeterminate pulse. Only direct children are treated as saves; descending into save
