@@ -204,30 +204,39 @@ bool move_directory_contents(const std::string &source_path, const std::string &
 
 bool collect_files(const std::string &directory_path, const std::string &relative_path,
                    std::vector<ZipEntry> *entries) {
-  DIR *dir = opendir(directory_path.c_str());
-  if (!dir) {
+  // Entry types come from the same listing pass (d_stat on the Vita, see DirWalk) instead of a
+  // stat per child - the per-path lookups made enumerating a many-thousand-file folder
+  // quadratic, the same pattern that froze the issue #7 boot scan. The names are then sorted
+  // and recursed in that order, so archive entry order is unchanged.
+  struct Child {
+    std::string name;
+    bool is_directory;
+    bool is_regular;
+  };
+  std::vector<Child> children;
+  const bool opened =
+      for_each_dir_entry(directory_path, [&](const DirEntryInfo &entry) {
+        // an unreadable entry lists as neither type and drops out below, matching the old
+        // walk's silent skip when its stat failed
+        children.push_back({entry.name, entry.is_directory, entry.is_regular});
+        return true;
+      });
+  if (!opened) {
     return false;
   }
+  std::sort(children.begin(), children.end(),
+            [](const Child &a, const Child &b) { return a.name < b.name; });
 
-  std::vector<std::string> child_names;
-  while (dirent *entry = readdir(dir)) {
-    if (!is_dot_entry(entry->d_name)) {
-      child_names.emplace_back(entry->d_name);
-    }
-  }
-  closedir(dir);
-  std::sort(child_names.begin(), child_names.end());
-
-  for (const std::string &child_name : child_names) {
-    const std::string child_source_path = join_path(directory_path, child_name);
+  for (const Child &child : children) {
+    const std::string child_source_path = join_path(directory_path, child.name);
     const std::string child_zip_path =
-        relative_path.empty() ? child_name : relative_path + "/" + child_name;
+        relative_path.empty() ? child.name : relative_path + "/" + child.name;
 
-    if (is_directory(child_source_path)) {
+    if (child.is_directory) {
       if (!collect_files(child_source_path, child_zip_path, entries)) {
         return false;
       }
-    } else if (is_regular_file(child_source_path)) {
+    } else if (child.is_regular) {
       entries->push_back({child_source_path, child_zip_path});
     }
   }
