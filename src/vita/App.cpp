@@ -2597,6 +2597,21 @@ bool App::refresh_google_access_token() {
       kGoogleTokenEndpoint,
       build_refresh_token_request_body(google_credentials_.client_id, google_credentials_.client_secret,
                                        google_token_cache_.refresh_token));
+  if (!response.ok && response.body.empty()) {
+    // Transport-level failure (Wi-Fi drop, DNS timeout, TLS trouble): Google was never reached,
+    // so the stored token is not to blame and must survive for the next attempt. Name the
+    // network problem - the empty body used to fall through to the parser and get reported as
+    // "invalid token response", pointing every slow-hotel-wifi failure at the token instead of
+    // the network. A rejection with a body (invalid_grant and friends) still parses below.
+    google_connected_ = false;
+    drive_synced_ = false;
+    set_status(StatusKind::Error,
+               "Google unreachable: " + (response.error.empty()
+                                             ? "no response (HTTP " +
+                                                   std::to_string(response.status) + ")"
+                                             : response.error));
+    return false;
+  }
   const TokenResponse token = parse_token_response(response.body);
   if (!token.ok) {
     google_connected_ = false;
