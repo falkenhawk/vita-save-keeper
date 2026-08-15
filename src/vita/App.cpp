@@ -492,10 +492,25 @@ std::string token_error_text(const TokenResponse &response) {
 // Name of the local archive whose contents equal the given folder signature, or empty. Content is
 // compared against every archive, not just the newest: matching an older one still means the
 // bytes are preserved, and a new zip of them would only duplicate it under another timestamp.
+// Comparison prefers the sidecar-recorded triple (the on-disk walk at creation time), which is
+// the only valid source for a plain-content archive whose central directory holds decrypted
+// data; archives without a recorded triple fall back to the central-directory comparison.
 std::string matching_backup_name(const std::vector<ArchiveEntryInfo> &entries,
                                  const std::string &save_id,
                                  const std::vector<std::string> &backup_names) {
+  const std::string signature = compute_content_signature(entries);
   for (const std::string &existing : backup_names) {
+    // Identity-gated but not save_metadata_is_usable: that helper also demands a trusted time
+    // source, which has nothing to do with whether the recorded triple is valid here.
+    const SaveMetadataJsonResult sidecar =
+        read_save_metadata_json(local_backup_metadata_path(kBackupRoot, save_id, existing));
+    if (sidecar.ok && sidecar.archive_identity == backup_identity(existing) &&
+        sidecar.metadata.content_known) {
+      if (sidecar.metadata.content_signature == signature) {
+        return existing;
+      }
+      continue;
+    }
     if (entries_match_backup_archive(entries,
                                      local_backup_archive_path(kBackupRoot, save_id, existing))) {
       return existing;
@@ -1783,6 +1798,15 @@ void App::create_new_backup() {
                                                 "."));
         return;
       }
+      const std::string remote_match = matching_remote_backup_name(save, entries);
+      if (!remote_match.empty()) {
+        duplicate_backup_confirmation_pending_ = true;
+        // Cloud-only match: the content is durably on Drive already, same escape hatch applies.
+        set_status(StatusKind::Info,
+                   status_with_name("No changes since ", display_backup_name(remote_match),
+                                                "."));
+        return;
+      }
     }
   }
   duplicate_backup_confirmation_pending_ = false;
@@ -1927,7 +1951,8 @@ void App::perform_savedata_delete() {
     return;
   }
   if (!entries.empty() &&
-      matching_backup_name(entries, save.id, local_backups_).empty()) {
+      matching_backup_name(entries, save.id, local_backups_).empty() &&
+      matching_remote_backup_name(save, entries).empty()) {
     const LocalSnapshotResult auto_result =
         create_local_snapshot(save, " auto", "Backing up current save");
     if (!auto_result.ok) {
@@ -2189,7 +2214,8 @@ void App::handle_restore() {
   }
   if (signature_ok && !current_entries.empty()) {
     const bool already_backed_up =
-        !matching_backup_name(current_entries, save.id, local_backups_).empty();
+        !matching_backup_name(current_entries, save.id, local_backups_).empty() ||
+        !matching_remote_backup_name(save, current_entries).empty();
     if (!already_backed_up) {
       ui_.draw_busy("Backing up current save", 0, -1);
       const LocalSnapshotResult auto_result =
@@ -3285,6 +3311,29 @@ long long App::remote_size_for(const std::string &remote_name) const {
     }
   }
   return 0;
+}
+
+// Name of a Drive backup of the given save whose recorded content triple equals the live
+// folder's signature, or empty. Rows come from the synced drive index for THIS save (looked up
+// by its own folder name), never the selection-coupled remote_backups_ - so the check stays
+// correct during batch runs where the selected save is unrelated to the one being checked. Only
+// meaningful for rows without a local zip - local archives are compared directly. Rows uploaded
+// before the triple existed have an empty signature and never match; the check then behaves
+// exactly as before for them.
+std::string App::matching_remote_backup_name(const SaveRecord &save,
+                                             const std::vector<ArchiveEntryInfo> &entries) const {
+  const std::string folder_name = resolved_drive_folder_name(save.id);
+  const auto indexed = drive_index_.find(folder_name);
+  if (indexed == drive_index_.end()) {
+    return {};
+  }
+  const std::string signature = compute_content_signature(entries);
+  for (const RemoteBackup &backup : indexed->second) {
+    if (!backup.content_signature.empty() && backup.content_signature == signature) {
+      return backup.name;
+    }
+  }
+  return {};
 }
 
 bool App::compute_raw_archive_content_triple(const std::string &archive_path,
@@ -5218,7 +5267,8 @@ void App::run_sync_all() {
     const std::vector<ArchiveEntryInfo> entries = compute_save_entries(save, &input.entries_ok);
     input.folder_empty = entries.empty();
     if (input.entries_ok && !entries.empty()) {
-      input.matches_existing = !matching_backup_name(entries, save.id, backups).empty();
+      input.matches_existing = !matching_backup_name(entries, save.id, backups).empty() ||
+                               !matching_remote_backup_name(save, entries).empty();
     }
     if (!backups.empty()) {
       input.newest_local = backups[0];

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/AppSettings.hpp"
+#include "core/BackupArchive.hpp"
 #include "core/BackupList.hpp"
 #include "core/GoogleAuth.hpp"
 #include "core/GoogleConfig.hpp"
@@ -302,6 +303,15 @@ private:
   void focus_backup_row_by_identity(const std::string &backup_name);
   std::string remote_file_id_for(const std::string &remote_name) const;
   long long remote_size_for(const std::string &remote_name) const;
+  // Name of a Drive backup of the given save whose recorded content triple equals the live
+  // folder's signature, or empty. Rows come from the synced drive index for THIS save (looked up
+  // by its own folder name), never the selection-coupled remote_backups_ - so the check stays
+  // correct during batch runs where the selected save is unrelated to the one being checked. Only
+  // meaningful for rows without a local zip - local archives are compared directly. Rows uploaded
+  // before the triple existed have an empty signature and never match; the check then behaves
+  // exactly as before for them.
+  std::string matching_remote_backup_name(const SaveRecord &save,
+                                          const std::vector<ArchiveEntryInfo> &entries) const;
   // Content triple of a local archive, derived from its central directory. Only valid for
   // archives whose entries hold the on-disk bytes: refused (returns false) when the archive
   // carries the plain-content marker entry, whose CD describes decrypted data, or when the CD is
