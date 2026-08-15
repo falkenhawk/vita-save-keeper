@@ -112,6 +112,13 @@ private:
   SaveMetadata resolve_live_save_metadata(const std::string &save_path,
                                           const SaveDateTime &backup_clock,
                                           bool allow_pfs_mount, bool bridge_available);
+  // Acquires and HOLDS a decrypting PFS mount over save_path so the caller can read plaintext from
+  // the normal path; release_held_save_mount must follow on every exit path. Refuses when a mount
+  // is already held (one at a time by design). Empty result string = mount failed. Mount/unmount
+  // themselves run on the mount worker, preserving the single-thread rule; only the waiting
+  // happens here.
+  std::string acquire_held_save_mount(const std::string &save_path);
+  void release_held_save_mount(const std::string &mount_name);
   // Hands one queued save to the worker (mount + metadata + post-mount fingerprint) and returns
   // immediately; complete_async_read applies the result on the main thread when it lands.
   void submit_async_save_time_read(const SaveRecord &save);
@@ -464,6 +471,10 @@ private:
   // The single mount-work slot. The worker only touches it in state 1 and the main thread only in
   // states 0 and 2, so the atomic is the entire handshake; one request is in flight at a time.
   struct MountWork {
+    // Which request the worker should service; ResolveMetadata is the long-standing default so
+    // every existing call site (which never sets kind) keeps behaving exactly as before.
+    enum class Kind { ResolveMetadata, AcquireMount, ReleaseMount };
+    Kind kind{Kind::ResolveMetadata};
     std::string save_path;
     SaveDateTime backup_clock;
     bool allow_pfs_mount{};
@@ -479,6 +490,10 @@ private:
     std::string async_save_id;
     SaveMetadata metadata;
     SaveFingerprint fingerprint;
+    // AcquireMount out-params / ReleaseMount in-param: the mount name sceAppMgrUmount needs, and
+    // whether AcquireMount's mount actually succeeded.
+    std::string mount_name;
+    bool mount_ok{};
   };
   MountWork mount_work_;
   // 0 idle, 1 submitted, 2 done.
@@ -486,6 +501,9 @@ private:
   std::atomic<bool> mount_worker_stop_{false};
   int mount_worker_thread_{-1};
   int mount_worker_wake_{-1};
+  // Non-empty while acquire_held_save_mount's mount is open, so release_held_save_mount knows
+  // what to unmount and a second acquire before release is refused (one hold at a time).
+  std::string held_mount_name_;
   // Extra data folders per homebrew entry plus the batch-skip list, loaded once at startup and
   // applied to saves_ after each scan.
   TrackedFoldersConfig tracked_config_;

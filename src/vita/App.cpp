@@ -241,20 +241,11 @@ void resolve_data_folder_time(SaveRecord *record) {
   apply_mounted_save_time(record, metadata);
 }
 
-// The one function that mounts. Called from the mount worker thread only (or inline when the
-// worker failed to start): every mount and unmount staying on a single thread is the structural
-// guard against the AppMgr mount-slot leak that killed the earlier mixed-thread attempt. Main
-// thread code goes through App::resolve_live_save_metadata, which hands the work over.
-SaveMetadata resolve_live_metadata_on_mount_thread(const std::string &save_path,
-                                                   const SaveDateTime &backup_clock,
-                                                   bool allow_pfs_mount, bool bridge_available) {
-  // PSP and other plain save folders must never be handed to AppMgr's PFS mount routine: mounting
-  // a plain folder creates sce_pfs bookkeeping in the user's save. If PFS metadata is absent, its
-  // ordinary file times are already the authoritative information we need.
-  if (!allow_pfs_mount || !save_directory_has_pfs_metadata(save_path)) {
-    return resolve_save_metadata(save_path, backup_clock);
-  }
-
+// Mounts a retail save's PFS view over its own path for reading. On success fills *mount_name
+// with the name sceAppMgrUmount needs and returns true. Must only run on the mount worker (or
+// inline when the worker never started) - see the single-thread rule below.
+bool mount_save_for_read(const std::string &save_path, bool bridge_available,
+                         std::string *mount_name) {
   char mount_point[16] {};
   char key[16] {};
   SaveKeeperMountArgs args {};
@@ -265,7 +256,7 @@ SaveMetadata resolve_live_metadata_on_mount_thread(const std::string &save_path,
 
   // Retail Vita saves are PFS-encrypted on disk. Try the mount IDs VitaShell knows, then retain
   // AppMgr's public read-only fallback for unusual setups. A successful mount decrypts the same
-  // save path; the returned name is used only to unmount immediately after reading metadata.
+  // save path; the returned name is used only to unmount once the caller is done reading.
   int mount_result = -1;
   if (bridge_available) {
     // Only call the kernel bridge syscall when its modules actually loaded. Otherwise skip
@@ -290,13 +281,40 @@ SaveMetadata resolve_live_metadata_on_mount_thread(const std::string &save_path,
   if (mount_result < 0) {
     mount_result = sceAppMgrGameDataMount(save_path.c_str(), nullptr, nullptr, mount_point);
   }
+  if (mount_result < 0) {
+    return false;
+  }
+  *mount_name = mount_point;
+  return true;
+}
+
+void unmount_save(const std::string &mount_name) {
+  sceAppMgrUmount(mount_name.c_str());
+}
+
+// The one function that mounts. Called from the mount worker thread only (or inline when the
+// worker failed to start): every mount and unmount staying on a single thread is the structural
+// guard against the AppMgr mount-slot leak that killed the earlier mixed-thread attempt. Main
+// thread code goes through App::resolve_live_save_metadata, which hands the work over.
+SaveMetadata resolve_live_metadata_on_mount_thread(const std::string &save_path,
+                                                   const SaveDateTime &backup_clock,
+                                                   bool allow_pfs_mount, bool bridge_available) {
+  // PSP and other plain save folders must never be handed to AppMgr's PFS mount routine: mounting
+  // a plain folder creates sce_pfs bookkeeping in the user's save. If PFS metadata is absent, its
+  // ordinary file times are already the authoritative information we need.
+  if (!allow_pfs_mount || !save_directory_has_pfs_metadata(save_path)) {
+    return resolve_save_metadata(save_path, backup_clock);
+  }
+
+  std::string mount_name;
+  const bool mounted = mount_save_for_read(save_path, bridge_available, &mount_name);
   // Whether or not the mount succeeded, resolve_save_metadata falls back to the newest file's
   // modification time when there are no readable Vita slots. Mounting decrypts file *contents*, not
   // their timestamps, so that time is the same approximate "last written" moment either way - a
   // useful fallback for saves whose mount fails, rather than showing nothing.
   SaveMetadata metadata = resolve_save_metadata(save_path, backup_clock);
-  if (mount_result >= 0) {
-    sceAppMgrUmount(mount_point);
+  if (mounted) {
+    unmount_save(mount_name);
   }
   return metadata;
 }
@@ -871,6 +889,12 @@ void App::start_mount_worker() {
 }
 
 void App::stop_mount_worker() {
+  // Safety net only: every proper caller of acquire_held_save_mount releases on all its exit
+  // paths, so this fires only if one leaked a hold. Release before the worker thread and
+  // semaphore are torn down, since release_held_save_mount still needs both when one is running.
+  if (!held_mount_name_.empty()) {
+    release_held_save_mount(held_mount_name_);
+  }
   if (mount_worker_thread_ < 0) {
     return;
   }
@@ -894,16 +918,28 @@ int App::mount_worker_entry(unsigned int, void *argp) {
       continue;
     }
     MountWork &work = app->mount_work_;
-    work.metadata =
-        work.tracked_paths.empty()
-            ? resolve_live_metadata_on_mount_thread(work.save_path, work.backup_clock,
-                                                    work.allow_pfs_mount,
-                                                    app->mount_bridge_ready_)
-            : resolve_tracked_metadata(work.tracked_paths, work.backup_clock);
-    if (work.want_fingerprint) {
-      // After the unmount, so bookkeeping the mount touched is part of the stored state and the
-      // next scan sees an unchanged folder. Blocking here is free - this is not the main thread.
-      work.fingerprint = compute_save_fingerprint(work.save_path);
+    switch (work.kind) {
+    case MountWork::Kind::AcquireMount:
+      work.mount_ok =
+          mount_save_for_read(work.save_path, app->mount_bridge_ready_, &work.mount_name);
+      break;
+    case MountWork::Kind::ReleaseMount:
+      unmount_save(work.mount_name);
+      break;
+    case MountWork::Kind::ResolveMetadata:
+    default:
+      work.metadata =
+          work.tracked_paths.empty()
+              ? resolve_live_metadata_on_mount_thread(work.save_path, work.backup_clock,
+                                                      work.allow_pfs_mount,
+                                                      app->mount_bridge_ready_)
+              : resolve_tracked_metadata(work.tracked_paths, work.backup_clock);
+      if (work.want_fingerprint) {
+        // After the unmount, so bookkeeping the mount touched is part of the stored state and the
+        // next scan sees an unchanged folder. Blocking here is free - this is not the main thread.
+        work.fingerprint = compute_save_fingerprint(work.save_path);
+      }
+      break;
     }
     app->mount_work_state_.store(2);
   }
@@ -935,6 +971,74 @@ SaveMetadata App::resolve_live_save_metadata(const std::string &save_path,
   const SaveMetadata metadata = mount_work_.metadata;
   mount_work_state_.store(0);
   return metadata;
+}
+
+std::string App::acquire_held_save_mount(const std::string &save_path) {
+  if (!held_mount_name_.empty()) {
+    // One hold at a time by design; a caller that forgot to release must fix its own bug rather
+    // than have this silently steal the mount out from under the existing hold.
+    return {};
+  }
+  if (mount_worker_thread_ < 0) {
+    // Worker never started: degrade to the inline helper. Still single-threaded - nothing else
+    // can be mounting.
+    std::string mount_name;
+    if (!mount_save_for_read(save_path, mount_bridge_ready_, &mount_name)) {
+      return {};
+    }
+    held_mount_name_ = mount_name;
+    return mount_name;
+  }
+  // A queued read may be in flight; land and apply it first so this request gets the slot.
+  complete_async_read(true);
+  mount_work_.kind = MountWork::Kind::AcquireMount;
+  mount_work_.save_path = save_path;
+  mount_work_.mount_name.clear();
+  mount_work_.mount_ok = false;
+  mount_work_.async = false;
+  mount_work_.discard = false;
+  mount_work_state_.store(1);
+  sceKernelSignalSema(mount_worker_wake_, 1);
+  while (mount_work_state_.load() != 2) {
+    sceKernelDelayThread(1000);
+  }
+  const bool ok = mount_work_.mount_ok;
+  const std::string mount_name = mount_work_.mount_name;
+  mount_work_state_.store(0);
+  // Back to the long-standing default so the next fill of mount_work_ (resolve_live_save_metadata
+  // or submit_async_save_time_read, neither of which sets kind) behaves as it always has.
+  mount_work_.kind = MountWork::Kind::ResolveMetadata;
+  if (!ok) {
+    return {};
+  }
+  held_mount_name_ = mount_name;
+  return mount_name;
+}
+
+void App::release_held_save_mount(const std::string &mount_name) {
+  if (mount_name.empty()) {
+    return;
+  }
+  if (mount_worker_thread_ < 0) {
+    unmount_save(mount_name);
+    held_mount_name_.clear();
+    return;
+  }
+  // A queued read may be in flight; land and apply it first so this request gets the slot.
+  complete_async_read(true);
+  mount_work_.kind = MountWork::Kind::ReleaseMount;
+  mount_work_.mount_name = mount_name;
+  mount_work_.async = false;
+  mount_work_.discard = false;
+  mount_work_state_.store(1);
+  sceKernelSignalSema(mount_worker_wake_, 1);
+  while (mount_work_state_.load() != 2) {
+    sceKernelDelayThread(1000);
+  }
+  mount_work_state_.store(0);
+  // Back to the long-standing default - see the matching comment in acquire_held_save_mount.
+  mount_work_.kind = MountWork::Kind::ResolveMetadata;
+  held_mount_name_.clear();
 }
 
 void App::submit_async_save_time_read(const SaveRecord &save) {
