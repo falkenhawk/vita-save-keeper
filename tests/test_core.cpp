@@ -2879,6 +2879,32 @@ void test_only_last_saved_sort_requires_all_save_times() {
   EXPECT_TRUE(!vsm::save_sort_requires_all_times(vsm::SaveSortMode::LastBackup));
 }
 
+void test_app_settings_backup_compression_level_round_trip() {
+  // Absent key means the default; the default is never serialized, so a future default change
+  // reaches every install that did not deliberately override it.
+  EXPECT_EQ(static_cast<std::size_t>(vsm::parse_app_settings("sort=name\n").backup_compression_level),
+            static_cast<std::size_t>(vsm::kDefaultBackupCompressionLevel));
+  EXPECT_TRUE(vsm::serialize_app_settings({}).find("backup_compression_level") == std::string::npos);
+
+  vsm::AppSettings settings;
+  settings.backup_compression_level = 0;
+  const std::string text = vsm::serialize_app_settings(settings);
+  EXPECT_TRUE(text.find("backup_compression_level=0\n") != std::string::npos);
+  EXPECT_EQ(static_cast<std::size_t>(vsm::parse_app_settings(text).backup_compression_level),
+            static_cast<std::size_t>(0));
+
+  // Out-of-range and junk values clamp or fall back instead of poisoning the writer.
+  EXPECT_EQ(static_cast<std::size_t>(
+                vsm::parse_app_settings("backup_compression_level=12\n").backup_compression_level),
+            static_cast<std::size_t>(9));
+  EXPECT_EQ(static_cast<std::size_t>(
+                vsm::parse_app_settings("backup_compression_level=-3\n").backup_compression_level),
+            static_cast<std::size_t>(0));
+  EXPECT_EQ(static_cast<std::size_t>(
+                vsm::parse_app_settings("backup_compression_level=abc\n").backup_compression_level),
+            static_cast<std::size_t>(vsm::kDefaultBackupCompressionLevel));
+}
+
 void test_app_settings_roundtrip_and_unknown_keys() {
   vsm::AppSettings settings;
   settings.sort_mode = vsm::SaveSortMode::LastBackup;
@@ -3997,6 +4023,7 @@ int main() {
   test_only_last_saved_sort_requires_all_save_times();
   test_utf8_truncation_and_system_font_detection();
   test_auto_backup_suffix_display_and_content_matching();
+  test_app_settings_backup_compression_level_round_trip();
   test_app_settings_roundtrip_and_unknown_keys();
   test_tracked_folders_json_roundtrip_and_rejects_bad_input();
   test_backup_settings_sync_decision_table();

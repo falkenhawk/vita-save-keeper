@@ -1,5 +1,6 @@
 #include "core/AppSettings.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 
 namespace vsm {
@@ -26,6 +27,13 @@ AppSettings parse_app_settings(const std::string &text) {
         settings.cleaned_empty_backup_folders = value == "1";
       } else if (key == "backup_settings_synced") {
         settings.backup_settings_synced = std::strtoll(value.c_str(), nullptr, 10);
+      } else if (key == "backup_compression_level") {
+        char *end = nullptr;
+        const long parsed = std::strtol(value.c_str(), &end, 10);
+        if (end != value.c_str() && *end == '\0') {
+          settings.backup_compression_level =
+              static_cast<int>(std::max(0L, std::min(parsed, 9L)));
+        }
       }
     }
     start = end + 1;
@@ -40,6 +48,10 @@ std::string serialize_app_settings(const AppSettings &settings) {
   }
   if (settings.backup_settings_synced != 0) {
     text += "backup_settings_synced=" + std::to_string(settings.backup_settings_synced) + "\n";
+  }
+  if (settings.backup_compression_level != kDefaultBackupCompressionLevel) {
+    text += "backup_compression_level=" +
+            std::to_string(settings.backup_compression_level) + "\n";
   }
   return text;
 }
