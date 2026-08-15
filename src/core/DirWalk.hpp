@@ -32,10 +32,8 @@ struct DirEntryInfo {
 // O(N^2), and a several-thousand-file folder takes minutes to hours. Everywhere else (desktop
 // tests) it falls back to one stat() per entry.
 // fn returning false stops the listing early. Returns false when path could not be opened as a
-// directory. diag_label, when set, writes "<label> dir <path>" and sparse still-listing lines
-// to the diagnostic trace (see DiagTrace.hpp).
+// directory.
 bool for_each_dir_entry(const std::string &path,
-                        const std::function<bool(const DirEntryInfo &)> &fn,
-                        const char *diag_label = nullptr);
+                        const std::function<bool(const DirEntryInfo &)> &fn);
 
 } // namespace vsm

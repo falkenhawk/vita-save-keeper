@@ -1,6 +1,5 @@
 #include "core/SaveTimeCache.hpp"
 
-#include "core/DiagTrace.hpp"
 #include "core/DirWalk.hpp"
 #include "core/PathUtil.hpp"
 
@@ -48,8 +47,7 @@ bool add_fingerprint(const std::string &path, SaveFingerprint *fingerprint, long
           }
         }
         return true;
-      },
-      "walk");
+      });
   return opened && ok;
 }
 
@@ -64,9 +62,6 @@ SaveFingerprint compute_save_fingerprint(const std::string &save_path, long long
   long long budget = max_entries;
   fingerprint.ok =
       add_fingerprint(save_path, &fingerprint, &budget) && fingerprint.file_count > 0;
-  if (budget < 0 && diag_enabled()) {
-    diag_log("      walk capped at " + std::to_string(max_entries) + " entries: " + save_path);
-  }
   return fingerprint;
 }
 

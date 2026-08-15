@@ -5,7 +5,6 @@
 #include "core/SaveSlotMetadata.hpp"
 
 #include "core/CalendarUtil.hpp"
-#include "core/DiagTrace.hpp"
 #include "core/DirWalk.hpp"
 #include "core/PathUtil.hpp"
 
@@ -156,8 +155,7 @@ void find_newest_file_mtime(const std::string &path, std::time_t *newest, bool *
           }
         }
         return true;
-      },
-      "time-walk");
+      });
   if (!opened) {
     // not openable as a directory: a tracked path can point at a plain file, whose own mtime
     // is the answer (the pre-DirWalk walk statted the top path first for exactly this case)

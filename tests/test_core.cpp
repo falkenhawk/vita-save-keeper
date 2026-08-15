@@ -5,7 +5,6 @@
 #include "core/BackupName.hpp"
 #include "core/BackupStore.hpp"
 #include "core/BackupOnlySaves.hpp"
-#include "core/DiagTrace.hpp"
 #include "core/DirWalk.hpp"
 #include "core/GoogleAuth.hpp"
 #include "core/GoogleConfig.hpp"
@@ -3599,67 +3598,6 @@ void test_walk_entry_cap_poisons_fingerprint_and_time_falls_to_backup_clock() {
   std::filesystem::remove_all(root);
 }
 
-void test_diag_trace_gates_writes_and_spaces_walk_progress_lines() {
-  // the sparse walk schedule fires at 1000 and every doubling after, nowhere else
-  EXPECT_TRUE(!vsm::diag_should_log_count(0));
-  EXPECT_TRUE(!vsm::diag_should_log_count(999));
-  EXPECT_TRUE(vsm::diag_should_log_count(1000));
-  EXPECT_TRUE(!vsm::diag_should_log_count(1001));
-  EXPECT_TRUE(vsm::diag_should_log_count(2000));
-  EXPECT_TRUE(!vsm::diag_should_log_count(3000));
-  EXPECT_TRUE(vsm::diag_should_log_count(4000));
-  EXPECT_TRUE(vsm::diag_should_log_count(1024000));
-  EXPECT_TRUE(!vsm::diag_should_log_count(1024001));
-
-  const std::string path =
-      (std::filesystem::temp_directory_path() / "vsm-diag-trace-test.log").string();
-  std::filesystem::remove(path);
-  EXPECT_TRUE(!vsm::diag_enabled());
-  vsm::diag_log("dropped - not open");
-  EXPECT_TRUE(!std::filesystem::exists(path));
-
-  EXPECT_TRUE(vsm::diag_open(path, "header"));
-  EXPECT_TRUE(vsm::diag_enabled());
-  vsm::diag_log("line one");
-  vsm::diag_close("footer");
-  EXPECT_TRUE(!vsm::diag_enabled());
-  vsm::diag_log("dropped - closed");
-
-  // every line is "<seconds>.<ms> <text>"; strip the elapsed prefix before comparing
-  const auto read_lines_without_elapsed = [](const std::string &file_path) {
-    std::vector<std::string> lines;
-    std::ifstream input(file_path);
-    std::string line;
-    while (std::getline(input, line)) {
-      const std::size_t space = line.find(' ');
-      const std::size_t dot = line.find('.');
-      const bool stamped = space != std::string::npos && dot != std::string::npos &&
-                           dot < space && dot > 0 && space == dot + 4;
-      lines.push_back(stamped ? line.substr(space + 1) : "BAD-STAMP: " + line);
-    }
-    return lines;
-  };
-  const std::vector<std::string> lines = read_lines_without_elapsed(path);
-  EXPECT_EQ(lines.size(), std::size_t{3});
-  EXPECT_EQ(lines[0], "header");
-  EXPECT_EQ(lines[1], "line one");
-  EXPECT_EQ(lines[2], "footer");
-  std::filesystem::remove(path);
-
-  // a reopened trace truncates the previous boot's log rather than appending to it
-  EXPECT_TRUE(vsm::diag_open(path, "first"));
-  vsm::diag_close("");
-  EXPECT_TRUE(vsm::diag_open(path, "second"));
-  vsm::diag_close("");
-  const std::vector<std::string> reopened = read_lines_without_elapsed(path);
-  EXPECT_EQ(reopened.size(), std::size_t{2});
-  EXPECT_EQ(reopened[0], "second");
-  EXPECT_EQ(reopened[1], "");
-  std::filesystem::remove(path);
-
-  EXPECT_EQ(vsm::diag_safe("a\nb\tc"), "a b c");
-}
-
 } // namespace
 
 int main() {
@@ -3790,7 +3728,6 @@ int main() {
   test_drive_rename_metadata_json_escapes_the_name();
   test_dir_walk_lists_entries_and_supports_early_stop();
   test_walk_entry_cap_poisons_fingerprint_and_time_falls_to_backup_clock();
-  test_diag_trace_gates_writes_and_spaces_walk_progress_lines();
 
   std::cout << "vsm_core_tests passed\n";
   return 0;

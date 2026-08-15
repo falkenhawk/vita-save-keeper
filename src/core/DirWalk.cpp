@@ -1,6 +1,5 @@
 #include "core/DirWalk.hpp"
 
-#include "core/DiagTrace.hpp"
 #include "core/PathUtil.hpp"
 
 #include <cstring>
@@ -22,10 +21,8 @@ bool is_dot_entry(const char *name) {
 #ifdef __vita__
 long long sce_datetime_to_epoch(const SceDateTime &value) {
   // SceIoStat carries local calendar fields; mktime is the same local-fields-to-epoch
-  // conversion save_datetime_to_local_epoch uses. Whether this matches newlib's stat() exactly
-  // is verified on hardware by diffing fingerprint newest-mtime values in the diagnostic trace
-  // between a stat()-based build and this one - a mismatch would only cost a one-time index
-  // re-resolve, but it must be known, not assumed.
+  // conversion save_datetime_to_local_epoch uses. Hardware-verified against newlib's stat():
+  // fingerprints computed this way matched a stat()-built index byte-for-byte (issue #7).
   std::tm local {};
   local.tm_year = value.year - 1900;
   local.tm_mon = value.month - 1;
@@ -41,16 +38,11 @@ long long sce_datetime_to_epoch(const SceDateTime &value) {
 } // namespace
 
 bool for_each_dir_entry(const std::string &path,
-                        const std::function<bool(const DirEntryInfo &)> &fn,
-                        const char *diag_label) {
+                        const std::function<bool(const DirEntryInfo &)> &fn) {
   DIR *directory = opendir(path.c_str());
   if (!directory) {
     return false;
   }
-  if (diag_label != nullptr && diag_enabled()) {
-    diag_log(std::string("      ") + diag_label + " dir " + path);
-  }
-  long long listed = 0;
   bool keep_going = true;
   while (keep_going) {
     dirent *entry = readdir(directory);
@@ -59,11 +51,6 @@ bool for_each_dir_entry(const std::string &path,
     }
     if (is_dot_entry(entry->d_name)) {
       continue;
-    }
-    ++listed;
-    if (diag_label != nullptr && diag_enabled() && diag_should_log_count(listed)) {
-      diag_log(std::string("      ") + diag_label + " dir " + path +
-               " still listing: " + std::to_string(listed) + " entries");
     }
     DirEntryInfo info {};
     info.name = entry->d_name;
