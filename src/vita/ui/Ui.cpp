@@ -1118,6 +1118,10 @@ void Ui::draw_slot_details(const SlotDetailsState &state, bool enter_is_cross,
   if (state.archive_bytes_known) {
     stats.push_back({"BACKUP FILE SIZE", format_bytes(state.archive_bytes)});
   }
+  if (state.content_known) {
+    stats.push_back({"SAVE DATA SIZE", format_bytes(state.content_bytes)});
+    stats.push_back({"FILES", std::to_string(state.content_file_count)});
+  }
 
   const int card_right = 18 + kLeftCardWidth - 16;
   const int card_h = stats.empty() ? 68 : 76 + static_cast<int>(stats.size()) * 24;

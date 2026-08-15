@@ -3927,10 +3927,9 @@ void App::open_save_details() {
   slot_details_.snapshot_in_cloud = row.has_remote();
   slot_details_.google_connected = google_connected_;
 
-  // A snapshot shows one size: its ZIP file. The archive stores entries uncompressed, so the
-  // save content inside differs from the file size only by ZIP header overhead - showing both
-  // was two nearly identical numbers. Independent of slot-metadata parsing below, so the size
-  // shows even when the slot table cannot be read.
+  // The ZIP file size, independent of slot-metadata parsing below so it shows even when the slot
+  // table cannot be read. The savedata size/file count inside the archive (which compression now
+  // makes genuinely different from this number) is resolved separately, below.
   if (row.has_local()) {
     bool zip_ok = false;
     const std::uint64_t zip_bytes = archive_file_size(
@@ -3948,6 +3947,40 @@ void App::open_save_details() {
     if (remote_bytes > 0) {
       slot_details_.archive_bytes = static_cast<std::uint64_t>(remote_bytes);
       slot_details_.archive_bytes_known = true;
+    }
+  }
+
+  // Savedata size + file count inside the archive: local sidecar first (authoritative for both
+  // raw and plain archives - it is the pre-backup walk, recorded at creation time and read the
+  // same way matching_backup_name does), then the local archive's central directory (raw archives
+  // only - compute_raw_archive_content_triple refuses plain-content archives itself), then the
+  // Drive-recorded triple. The manual-upload fallback (the metadata sidecar fetched below) is
+  // checked once that read completes, further down. Unknown stays hidden rather than approximated
+  // by the zip size.
+  ArchiveContentTriple triple;
+  bool triple_known = false;
+  if (row.has_local()) {
+    const SaveMetadataJsonResult local_sidecar = read_save_metadata_json(
+        local_backup_metadata_path(kBackupRoot, save.id, row.local_name));
+    if (local_sidecar.ok && local_sidecar.archive_identity == backup_identity(row.local_name) &&
+        local_sidecar.metadata.content_known) {
+      triple = {local_sidecar.metadata.content_signature, local_sidecar.metadata.content_bytes,
+               local_sidecar.metadata.file_count};
+      triple_known = true;
+    }
+  }
+  if (!triple_known && row.has_local() &&
+      compute_raw_archive_content_triple(
+          local_backup_archive_path(kBackupRoot, save.id, row.local_name), &triple)) {
+    triple_known = true;
+  }
+  if (!triple_known && row.has_remote()) {
+    for (const RemoteBackup &backup : remote_backups_) {
+      if (backup.name == row.remote_name && !backup.content_signature.empty()) {
+        triple = {backup.content_signature, backup.content_bytes, backup.file_count};
+        triple_known = true;
+        break;
+      }
     }
   }
 
@@ -3976,6 +4009,58 @@ void App::open_save_details() {
     if (ensure_google_access_token()) {
       metadata = download_remote_backup_metadata(save, row.remote_name,
                                                  remote_file_id_for(row.remote_name));
+    }
+  }
+
+  // Manual-upload fallback: a zip + sidecar hand-copied to Drive has no appProperties and never
+  // matched a local archive above (Cloud-only, or a local file the earlier reads could not use),
+  // but the sidecar just fetched still carries the triple it was created with.
+  if (!triple_known && metadata.ok && metadata.metadata.content_known) {
+    triple = {metadata.metadata.content_signature, metadata.metadata.content_bytes,
+             metadata.metadata.file_count};
+    triple_known = true;
+  }
+  if (triple_known) {
+    slot_details_.content_bytes = static_cast<std::uint64_t>(std::max(0LL, triple.bytes));
+    slot_details_.content_file_count = static_cast<std::uint64_t>(std::max(0LL, triple.files));
+    slot_details_.content_known = true;
+  }
+
+  // Backfill: a Drive row missing the triple (pre-triple uploads, or a zip + sidecar hand-copied
+  // to Drive) gets it PATCHed in once details resolves one locally - mirrors
+  // repair_remote_backup_metadata, one-time per archive. A failed PATCH is silent by design: the
+  // details view already showed everything it knows, and the next details open retries.
+  if (triple_known && row.has_remote() && google_connected_) {
+    const std::string folder_name = resolved_drive_folder_name(save.id);
+    const auto indexed = drive_index_.find(folder_name);
+    if (indexed != drive_index_.end()) {
+      for (RemoteBackup &backup : indexed->second) {
+        if (backup.name == row.remote_name && backup.content_signature.empty() &&
+            !backup.file_id.empty()) {
+          const std::string update_url =
+              std::string(kDriveFilesEndpoint) + "/" + form_url_encode(backup.file_id);
+          const HttpResponse response = drive_request([&](const std::string &token) {
+            return HttpClient().patch_json(
+                update_url,
+                build_drive_archive_properties_update_json(triple.signature, triple.bytes,
+                                                           triple.files),
+                token);
+          });
+          if (response.ok) {
+            // drive_index_ owns the truth; remote_backups_ is its per-save view - keep both
+            // coherent so the check benefits immediately.
+            backup.content_signature = triple.signature;
+            backup.content_bytes = triple.bytes;
+            backup.file_count = triple.files;
+            for (RemoteBackup &view : remote_backups_) {
+              if (view.file_id == backup.file_id) {
+                view = backup;
+              }
+            }
+          }
+          break;
+        }
+      }
     }
   }
 

@@ -47,12 +47,16 @@ struct SlotDetailsState {
   // One size per view, computed on demand when it opens so the grid never pays for it.
   // save_bytes is the live save's on-disk footprint ("New Backup" row); archive_bytes is a
   // snapshot's ZIP file size (local stat, or the Drive-reported size for a Cloud-only copy).
-  // The ZIP stores entries uncompressed, so a separate content size would differ from the file
-  // size only by header overhead. Each *_known is false when unreadable or not applicable.
+  // content_bytes/content_file_count are the savedata inside that archive - compression makes
+  // these genuinely different from archive_bytes, not just off by header overhead. Each *_known
+  // is false when unreadable or not applicable.
   std::uint64_t save_bytes{};
   bool save_bytes_known{};
   std::uint64_t archive_bytes{};
   bool archive_bytes_known{};
+  std::uint64_t content_bytes{};
+  std::uint64_t content_file_count{};
+  bool content_known{};
   // Where the inspected snapshot lives, mirroring the overview's cloud glyph in the header
   // corner. Both false for the live save, which is not a snapshot.
   bool snapshot_on_card{};
