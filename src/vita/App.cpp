@@ -2951,7 +2951,7 @@ void App::apply_psp_backup_identity(SaveRecord *record) const {
     if (need_title) {
       // PARAM.SFO is a few KB; the reader is bounded and decompresses one stored entry.
       const ArchiveReadResult sfo =
-          read_stored_backup_entry(archive_path, "PARAM.SFO", kMaxPspParamSfoSize);
+          read_backup_entry(archive_path, "PARAM.SFO", kMaxPspParamSfoSize);
       if (sfo.ok) {
         const std::string title = title_from_sfo_metadata(parse_sfo_metadata(sfo.data));
         if (!title.empty()) {
@@ -2961,7 +2961,7 @@ void App::apply_psp_backup_identity(SaveRecord *record) const {
     }
     if (!icon_cached) {
       const ArchiveReadResult icon =
-          read_stored_backup_entry(archive_path, "ICON0.PNG", kMaxPspIconSize);
+          read_backup_entry(archive_path, "ICON0.PNG", kMaxPspIconSize);
       if (icon.ok && ensure_parent_directory(icon_cache_path) &&
           write_file_atomic(icon_cache_path, icon.data)) {
         record->icon_path = icon_cache_path;
@@ -3491,7 +3491,7 @@ SaveMetadataJsonResult App::ensure_local_backup_metadata(const SaveRecord &save,
   const std::string archive_path =
       local_backup_archive_path(kBackupRoot, save.id, backup_name);
   const ArchiveReadResult embedded =
-      read_stored_backup_entry(archive_path, "sce_sys/sdslot.dat", kMaxSdslotFileSize);
+      read_backup_entry(archive_path, "sce_sys/sdslot.dat", kMaxSdslotFileSize);
   SaveMetadata recovered;
   if (embedded.ok) {
     recovered = parse_sdslot_data(embedded.data);

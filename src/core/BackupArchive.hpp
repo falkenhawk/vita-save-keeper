@@ -44,8 +44,8 @@ struct BackupRequest {
   std::function<bool()> cancel_check;
   // zlib level for entry data: 0 stores every entry (the pre-compression archive shape), 1-9
   // deflates each file, falling back to store per file whenever deflate does not shrink it.
-  // Readers gain deflate support in the following commit; the central directory always carries
-  // the uncompressed CRC32 and size, so change detection is identical either way.
+  // Every reader accepts both shapes, and the central directory always carries the uncompressed
+  // CRC32 and size, so change detection is identical either way.
   int compression_level{};
 };
 
@@ -173,9 +173,9 @@ bool read_archive_central_directory(const std::string &archive_path,
 // True when the archive's central directory lists exactly the given entries.
 bool entries_match_backup_archive(const std::vector<ArchiveEntryInfo> &folder_entries,
                                   const std::string &archive_path);
-ArchiveReadResult read_stored_backup_entry(const std::string &archive_path,
-                                           const std::string &entry_path,
-                                           std::size_t max_size);
+// Reads one entry - store or deflate - bounded by max_size.
+ArchiveReadResult read_backup_entry(const std::string &archive_path, const std::string &entry_path,
+                                    std::size_t max_size);
 
 // On-demand sizes for the details view; both cheap (stat sums, no PFS mount).
 // compute_folder_size is the total bytes of every regular file under a live save folder, with an

@@ -263,8 +263,7 @@ bool collect_files(const std::string &directory_path, const std::string &relativ
   return true;
 }
 
-std::uint32_t update_crc32(std::uint32_t crc, const unsigned char *data, std::size_t size) {
-  crc = ~crc;
+std::uint32_t update_crc32_bits(std::uint32_t crc, const unsigned char *data, std::size_t size) {
   for (std::size_t i = 0; i < size; ++i) {
     crc ^= data[i];
     for (int bit = 0; bit < 8; ++bit) {
@@ -272,7 +271,13 @@ std::uint32_t update_crc32(std::uint32_t crc, const unsigned char *data, std::si
       crc = (crc >> 1U) ^ (0xedb88320U & mask);
     }
   }
-  return ~crc;
+  return crc;
+}
+
+// Chunk-chainable: callers may keep the running value between calls, starting from 0 (the ~
+// complements round-trip across calls, e.g. measure_file chains this across read buffers).
+std::uint32_t update_crc32(std::uint32_t crc, const unsigned char *data, std::size_t size) {
+  return ~update_crc32_bits(~crc, data, size);
 }
 
 bool measure_file(ZipEntry *entry, const std::function<void(std::size_t)> &on_bytes = {},
@@ -756,9 +761,120 @@ bool ensure_parent_directory(const std::string &path) {
   return ensure_directory(path.substr(0, slash));
 }
 
-bool extract_stored_file(FILE *zip, const LocalZipHeader &header,
-                         const std::string &destination_path,
-                         const std::function<void()> &on_chunk = {}) {
+// Streams one entry's deflate data from zip into output, inflating it, updating *crc as it goes
+// (chunk-chained, so the caller starts *crc at 0 and compares the final value itself), and calling
+// on_chunk once per produced chunk for progress reporting. Guards both ends of the stream: a
+// zip-bomb ceiling on total output (the header's uncompressed size), and an exact-match requirement
+// at the end (no leftover compressed bytes, no short output) so a truncated or corrupt deflate
+// stream is reported as failure rather than silently producing partial data.
+bool inflate_entry_to_file(FILE *zip, const LocalZipHeader &header, FILE *output,
+                           std::uint32_t *crc, const std::function<void()> &on_chunk) {
+  z_stream stream {};
+  if (inflateInit2(&stream, -15) != Z_OK) {
+    return false;
+  }
+  std::array<unsigned char, kCopyBufferSize> in_buffer {};
+  std::array<unsigned char, kCopyBufferSize> out_buffer {};
+  std::uint32_t remaining = header.compressed_size;
+  std::uint64_t total_out = 0;
+  bool ok = true;
+  int status = Z_OK;
+  while (status != Z_STREAM_END) {
+    if (stream.avail_in == 0) {
+      if (remaining == 0) {
+        // Compressed bytes ran out before the stream ended: truncated or corrupt entry.
+        ok = false;
+        break;
+      }
+      const std::size_t chunk = std::min<std::size_t>(in_buffer.size(), remaining);
+      if (!read_bytes(zip, in_buffer.data(), chunk)) {
+        ok = false;
+        break;
+      }
+      remaining -= static_cast<std::uint32_t>(chunk);
+      stream.next_in = in_buffer.data();
+      stream.avail_in = static_cast<uInt>(chunk);
+    }
+    stream.next_out = out_buffer.data();
+    stream.avail_out = static_cast<uInt>(out_buffer.size());
+    status = inflate(&stream, Z_NO_FLUSH);
+    if (status != Z_OK && status != Z_STREAM_END) {
+      ok = false;
+      break;
+    }
+    const std::size_t produced = out_buffer.size() - stream.avail_out;
+    // Zip-bomb guard: the header's uncompressed size is the hard ceiling.
+    if (total_out + produced > header.uncompressed_size) {
+      ok = false;
+      break;
+    }
+    if (produced > 0) {
+      if (!write_bytes(output, out_buffer.data(), produced)) {
+        ok = false;
+        break;
+      }
+      *crc = update_crc32(*crc, out_buffer.data(), produced);
+      total_out += produced;
+      if (on_chunk) {
+        on_chunk();
+      }
+    }
+  }
+  // The stream must end exactly at the recorded sizes: no leftover compressed bytes, no short
+  // output.
+  ok = ok && status == Z_STREAM_END && remaining == 0 && stream.avail_in == 0 &&
+       total_out == header.uncompressed_size;
+  inflateEnd(&stream);
+  return ok;
+}
+
+// In-memory counterpart of inflate_entry_to_file for the bounded single-entry reader: *out must
+// already be sized to header.uncompressed_size (enforced below rather than assumed), and inflate
+// writes directly into it - no scratch buffer or running-offset copy needed, since zlib can never
+// write past avail_out, so pinning avail_out to out->size() up front makes overproduction
+// structurally impossible; no separate zip-bomb ceiling check is needed either.
+bool inflate_entry_to_buffer(FILE *zip, const LocalZipHeader &header,
+                             std::vector<unsigned char> *out) {
+  if (out->size() != header.uncompressed_size) {
+    return false;
+  }
+  z_stream stream {};
+  if (inflateInit2(&stream, -15) != Z_OK) {
+    return false;
+  }
+  std::array<unsigned char, kCopyBufferSize> in_buffer {};
+  std::uint32_t remaining = header.compressed_size;
+  stream.next_out = out->data();
+  stream.avail_out = static_cast<uInt>(out->size());
+  bool ok = true;
+  int status = Z_OK;
+  while (status != Z_STREAM_END) {
+    if (stream.avail_in == 0) {
+      const std::size_t chunk = std::min<std::size_t>(in_buffer.size(), remaining);
+      if (remaining == 0 || !read_bytes(zip, in_buffer.data(), chunk)) {
+        ok = false;
+        break;
+      }
+      remaining -= static_cast<std::uint32_t>(chunk);
+      stream.next_in = in_buffer.data();
+      stream.avail_in = static_cast<uInt>(chunk);
+    }
+    status = inflate(&stream, Z_NO_FLUSH);
+    if (status != Z_OK && status != Z_STREAM_END) {
+      ok = false;
+      break;
+    }
+  }
+  ok = ok && status == Z_STREAM_END && remaining == 0 && stream.avail_in == 0 &&
+       stream.avail_out == 0;
+  inflateEnd(&stream);
+  return ok;
+}
+
+// Extracts one entry (store or deflate) to destination_path, CRC-checking the uncompressed bytes
+// against the header regardless of method.
+bool extract_file(FILE *zip, const LocalZipHeader &header, const std::string &destination_path,
+                  const std::function<void()> &on_chunk = {}) {
   if (!ensure_parent_directory(destination_path)) {
     return false;
   }
@@ -768,30 +884,31 @@ bool extract_stored_file(FILE *zip, const LocalZipHeader &header,
     return false;
   }
 
-  std::array<unsigned char, kCopyBufferSize> buffer {};
-  std::uint32_t remaining = header.compressed_size;
   std::uint32_t crc = 0;
-  while (remaining > 0) {
-    const std::size_t chunk = std::min<std::size_t>(buffer.size(), remaining);
-    if (!read_bytes(zip, buffer.data(), chunk)) {
-      std::fclose(output);
-      return false;
+  bool ok = true;
+  if (header.method == 0) {
+    std::array<unsigned char, kCopyBufferSize> buffer {};
+    std::uint32_t remaining = header.compressed_size;
+    while (remaining > 0) {
+      const std::size_t chunk = std::min<std::size_t>(buffer.size(), remaining);
+      if (!read_bytes(zip, buffer.data(), chunk) || !write_bytes(output, buffer.data(), chunk)) {
+        ok = false;
+        break;
+      }
+      crc = update_crc32(crc, buffer.data(), chunk);
+      remaining -= static_cast<std::uint32_t>(chunk);
+      if (on_chunk) {
+        on_chunk();
+      }
     }
-    if (!write_bytes(output, buffer.data(), chunk)) {
-      std::fclose(output);
-      return false;
-    }
-    crc = update_crc32(crc, buffer.data(), chunk);
-    remaining -= static_cast<std::uint32_t>(chunk);
-    if (on_chunk) {
-      on_chunk();
-    }
+  } else {
+    ok = inflate_entry_to_file(zip, header, output, &crc, on_chunk);
   }
 
   if (std::fclose(output) != 0) {
     return false;
   }
-  if (crc != header.crc32) {
+  if (!ok || crc != header.crc32) {
     return false;
   }
   // Restoring the original modification time is best-effort. A flaky utime() on the target
@@ -866,11 +983,14 @@ bool extract_archive_to_directory(
       return false;
     }
 
-    // Restore only the ZIP shape Save Keeper writes today: store-method file entries with known
-    // sizes in the local header. Rejecting other forms keeps restore predictable before cloud data
-    // can introduce archives not produced by this app.
-    if ((header.flags & 0x0008U) != 0 || header.method != 0 ||
-        header.compressed_size != header.uncompressed_size ||
+    // Restore only the ZIP shapes Save Keeper writes today: store and deflate file entries with
+    // known sizes in the local header. Rejecting other forms keeps restore predictable before
+    // cloud data can introduce archives not produced by this app.
+    const bool store_shape =
+        header.method == 0 && header.compressed_size == header.uncompressed_size;
+    const bool deflate_shape =
+        header.method == 8 && header.compressed_size < header.uncompressed_size;
+    if ((header.flags & 0x0008U) != 0 || (!store_shape && !deflate_shape) ||
         !is_safe_zip_entry_path(header.name)) {
       return false;
     }
@@ -889,7 +1009,7 @@ bool extract_archive_to_directory(
       timestamps_uniform = false;
     }
 
-    if (!extract_stored_file(zip, header, join_path(destination_path, header.name), on_chunk)) {
+    if (!extract_file(zip, header, join_path(destination_path, header.name), on_chunk)) {
       return false;
     }
   }
@@ -1286,9 +1406,8 @@ std::uint64_t archive_file_size(const std::string &archive_path, bool *ok) {
   return got ? static_cast<std::uint64_t>(info.st_size) : 0;
 }
 
-ArchiveReadResult read_stored_backup_entry(const std::string &archive_path,
-                                           const std::string &entry_path,
-                                           std::size_t max_size) {
+ArchiveReadResult read_backup_entry(const std::string &archive_path, const std::string &entry_path,
+                                    std::size_t max_size) {
   ArchiveReadResult result;
   if (!is_safe_zip_entry_path(entry_path)) {
     result.error = "entry path is unsafe";
@@ -1314,8 +1433,12 @@ ArchiveReadResult read_stored_backup_entry(const std::string &archive_path,
       break;
     }
     LocalZipHeader header;
-    if (!read_local_header_after_signature(zip, &header) || (header.flags & 0x0008U) != 0 ||
-        header.method != 0 || header.compressed_size != header.uncompressed_size ||
+    const bool read_header = read_local_header_after_signature(zip, &header);
+    const bool store_shape =
+        read_header && header.method == 0 && header.compressed_size == header.uncompressed_size;
+    const bool deflate_shape =
+        read_header && header.method == 8 && header.compressed_size < header.uncompressed_size;
+    if (!read_header || (header.flags & 0x0008U) != 0 || (!store_shape && !deflate_shape) ||
         !is_safe_zip_entry_path(header.name)) {
       result.error = "archive entry is unsupported";
       break;
@@ -1332,9 +1455,15 @@ ArchiveReadResult read_stored_backup_entry(const std::string &archive_path,
       break;
     }
     result.data.resize(header.uncompressed_size);
-    if (!result.data.empty() && !read_bytes(zip, result.data.data(), result.data.size())) {
+    if (store_shape) {
+      if (!result.data.empty() && !read_bytes(zip, result.data.data(), result.data.size())) {
+        result.data.clear();
+        result.error = "archive entry is truncated";
+        break;
+      }
+    } else if (!inflate_entry_to_buffer(zip, header, &result.data)) {
       result.data.clear();
-      result.error = "archive entry is truncated";
+      result.error = "archive entry is corrupt";
       break;
     }
     if (update_crc32(0, result.data.data(), result.data.size()) != header.crc32) {

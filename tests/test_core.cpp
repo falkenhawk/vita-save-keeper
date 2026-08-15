@@ -434,6 +434,85 @@ void test_backup_archive_probation_stores_mixed_incompressible_prefix() {
   std::filesystem::remove_all(base);
 }
 
+void test_backup_archive_compressed_round_trip_restores_identical_bytes() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-inflate-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source" / "sce_sys");
+  const std::string compressible(100000, 'z');
+  std::ofstream(base / "source" / "level.dat", std::ios::binary) << compressible;
+  std::ofstream(base / "source" / "sce_sys" / "icon0.png", std::ios::binary) << "png-bytes";
+
+  vsm::BackupRequest request;
+  request.source_path = (base / "source").string();
+  request.backup_root = (base / "backups").string();
+  request.save_id = "PCSE00120";
+  request.timestamp = {2026, 8, 14, 13, 0, 0};
+  request.compression_level = 6;
+  const vsm::BackupResult backup = vsm::create_backup_archive(request);
+  EXPECT_TRUE(backup.ok);
+
+  vsm::RestoreRequest restore;
+  restore.archive_path = backup.archive_path;
+  restore.destination_path = (base / "restored").string();
+  EXPECT_TRUE(vsm::restore_backup_archive(restore).ok);
+
+  std::ifstream restored(base / "restored" / "level.dat", std::ios::binary);
+  const std::string round_tripped((std::istreambuf_iterator<char>(restored)),
+                                  std::istreambuf_iterator<char>());
+  EXPECT_EQ(round_tripped.size(), compressible.size());
+  EXPECT_TRUE(round_tripped == compressible);
+
+  // The bounded single-entry reader inflates too (sdslot/PARAM.SFO/icon extraction paths).
+  const vsm::ArchiveReadResult entry =
+      vsm::read_backup_entry(backup.archive_path, "level.dat", compressible.size());
+  EXPECT_TRUE(entry.ok);
+  EXPECT_EQ(entry.data.size(), compressible.size());
+  EXPECT_TRUE(entry.data == std::vector<unsigned char>(compressible.begin(), compressible.end()));
+
+  std::filesystem::remove_all(base);
+}
+
+void test_backup_archive_rejects_corrupt_deflate_stream() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-corrupt-deflate-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source");
+  std::ofstream(base / "source" / "level.dat", std::ios::binary) << std::string(100000, 'q');
+
+  vsm::BackupRequest request;
+  request.source_path = (base / "source").string();
+  request.backup_root = (base / "backups").string();
+  request.save_id = "PCSE00120";
+  request.timestamp = {2026, 8, 14, 13, 30, 0};
+  request.compression_level = 6;
+  const vsm::BackupResult backup = vsm::create_backup_archive(request);
+  EXPECT_TRUE(backup.ok);
+
+  // Locate the first local header's name/extra lengths (u16 LE at offsets 26/28) and flip a byte
+  // 20 bytes into the deflate data that follows, so the corruption lands inside the compressed
+  // stream regardless of header layout or fixture name.
+  {
+    std::fstream file(backup.archive_path,
+                      std::ios::in | std::ios::out | std::ios::binary);
+    unsigned char length_bytes[4] {};
+    file.seekg(26);
+    file.read(reinterpret_cast<char *>(length_bytes), sizeof(length_bytes));
+    const std::uint16_t name_length =
+        static_cast<std::uint16_t>(length_bytes[0] | (length_bytes[1] << 8));
+    const std::uint16_t extra_length =
+        static_cast<std::uint16_t>(length_bytes[2] | (length_bytes[3] << 8));
+    file.seekp(30 + name_length + extra_length + 20);
+    file.put('\xff');
+  }
+  vsm::RestoreRequest restore;
+  restore.archive_path = backup.archive_path;
+  restore.destination_path = (base / "restored").string();
+  EXPECT_TRUE(!vsm::restore_backup_archive(restore).ok);
+
+  std::filesystem::remove_all(base);
+}
+
 void test_timestamped_backup_name_uses_jksv_style_zip_name() {
   const vsm::BackupTimestamp timestamp{2026, 5, 21, 16, 14, 9};
 
@@ -1846,16 +1925,16 @@ void test_backup_archive_reads_bounded_sdslot_entry_without_restoring() {
   });
   EXPECT_TRUE(backup.ok);
 
-  const vsm::ArchiveReadResult read = vsm::read_stored_backup_entry(
+  const vsm::ArchiveReadResult read = vsm::read_backup_entry(
       backup.archive_path, "sce_sys/sdslot.dat", sdslot.size());
   EXPECT_TRUE(read.ok);
   EXPECT_EQ(read.data.size(), sdslot.size());
   EXPECT_EQ(vsm::parse_sdslot_data(read.data).slots.size(), static_cast<std::size_t>(1));
   const vsm::ArchiveReadResult missing =
-      vsm::read_stored_backup_entry(backup.archive_path, "missing.dat", sdslot.size());
+      vsm::read_backup_entry(backup.archive_path, "missing.dat", sdslot.size());
   EXPECT_TRUE(!missing.ok);
   EXPECT_TRUE(missing.entry_missing());
-  EXPECT_TRUE(!vsm::read_stored_backup_entry(backup.archive_path, "sce_sys/sdslot.dat",
+  EXPECT_TRUE(!vsm::read_backup_entry(backup.archive_path, "sce_sys/sdslot.dat",
                                              sdslot.size() - 1).ok);
   EXPECT_TRUE(!std::filesystem::exists(base / "source.restore-tmp"));
 
@@ -1885,7 +1964,7 @@ void test_legacy_zip_metadata_can_be_recovered_without_rewriting_the_archive() {
   std::ofstream(json_path, std::ios::binary) << "{broken";
   EXPECT_TRUE(!vsm::read_save_metadata_json(json_path.string()).ok);
 
-  const vsm::ArchiveReadResult embedded = vsm::read_stored_backup_entry(
+  const vsm::ArchiveReadResult embedded = vsm::read_backup_entry(
       backup.archive_path, "sce_sys/sdslot.dat", vsm::kSdslotHeaderSize +
                                                      vsm::kMaxSaveSlots *
                                                          vsm::kSdslotRecordSize);
@@ -3851,6 +3930,8 @@ int main() {
   test_backup_archive_deflates_compressible_entries();
   test_backup_archive_level_zero_stores_everything();
   test_backup_archive_probation_stores_mixed_incompressible_prefix();
+  test_backup_archive_compressed_round_trip_restores_identical_bytes();
+  test_backup_archive_rejects_corrupt_deflate_stream();
   test_detail_view_sizes_from_folder_and_archive();
   test_save_fingerprint_reflects_folder_content();
   test_scan_fingerprints_every_save_and_flags_mount_requiring_ones();
