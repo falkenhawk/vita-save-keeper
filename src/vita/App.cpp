@@ -731,6 +731,7 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
     request.save_id = save.id;
     request.timestamp = timestamp;
     request.archive_name = plan.archive_name;
+    request.compression_level = backup_compression_level_;
     if (busy_label != nullptr) {
       // The archive reports its two passes at half rate over the real size (0..content); doubling
       // its units back and offsetting by the hash pass above turns the label's bar into one
@@ -780,6 +781,7 @@ void App::load_settings() {
     sort_mode_ = settings.sort_mode;
     cleaned_empty_backup_folders_ = settings.cleaned_empty_backup_folders;
     backup_settings_synced_ = settings.backup_settings_synced;
+    backup_compression_level_ = settings.backup_compression_level;
   }
 }
 
@@ -787,9 +789,12 @@ void App::save_settings() {
   AppSettings settings;
   settings.sort_mode = sort_mode_;
   // Every field has to be mirrored back here: this builds a fresh AppSettings, so anything left
-  // out is erased from settings.txt the next time any other setting changes.
+  // out is erased from settings.txt the next time any other setting changes - for
+  // backup_compression_level in particular, a forgotten copy-forward silently deletes the user's
+  // override the next time any unrelated setting is saved.
   settings.cleaned_empty_backup_folders = cleaned_empty_backup_folders_;
   settings.backup_settings_synced = backup_settings_synced_;
+  settings.backup_compression_level = backup_compression_level_;
   write_text_file(kSettingsPath, serialize_app_settings(settings));
 }
 

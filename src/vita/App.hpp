@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/AppSettings.hpp"
 #include "core/BackupList.hpp"
 #include "core/GoogleAuth.hpp"
 #include "core/GoogleConfig.hpp"
@@ -359,6 +360,7 @@ private:
   SaveCategory category_{SaveCategory::VitaGame};
   SaveSortMode sort_mode_{SaveSortMode::Name};
   bool cleaned_empty_backup_folders_{};
+  int backup_compression_level_{kDefaultBackupCompressionLevel};
   // Which save was focused in each category tab, so L/R returns to where the user left off.
   std::array<std::size_t, kSaveCategoryCount> category_selection_{};
   std::vector<std::string> local_backups_;
