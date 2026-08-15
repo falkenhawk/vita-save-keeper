@@ -28,11 +28,10 @@ AppSettings parse_app_settings(const std::string &text) {
       } else if (key == "backup_settings_synced") {
         settings.backup_settings_synced = std::strtoll(value.c_str(), nullptr, 10);
       } else if (key == "backup_compression_level") {
-        char *end = nullptr;
-        const long parsed = std::strtol(value.c_str(), &end, 10);
-        if (end != value.c_str() && *end == '\0') {
-          settings.backup_compression_level =
-              static_cast<int>(std::max(0L, std::min(parsed, 9L)));
+        char *parse_end = nullptr;
+        const long parsed = std::strtol(value.c_str(), &parse_end, 10);
+        if (parse_end != value.c_str() && *parse_end == '\0') {
+          settings.backup_compression_level = static_cast<int>(std::clamp(parsed, 0L, 9L));
         }
       }
     }

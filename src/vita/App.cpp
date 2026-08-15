@@ -989,10 +989,11 @@ void App::load_settings() {
 void App::save_settings() {
   AppSettings settings;
   settings.sort_mode = sort_mode_;
-  // Every field has to be mirrored back here: this builds a fresh AppSettings, so anything left
-  // out is erased from settings.txt the next time any other setting changes - for
-  // backup_compression_level in particular, a forgotten copy-forward silently deletes the user's
-  // override the next time any unrelated setting is saved.
+  // Every field has to be mirrored back here: this builds a fresh AppSettings, and
+  // serialize_app_settings omits values equal to the default, so a field not copied forward is
+  // erased from settings.txt on the next unrelated save. For backup_compression_level that
+  // silently reverts a deliberate choice; losing cleaned_empty_backup_folders only costs one
+  // redundant sweep.
   settings.cleaned_empty_backup_folders = cleaned_empty_backup_folders_;
   settings.backup_settings_synced = backup_settings_synced_;
   settings.backup_compression_level = backup_compression_level_;
@@ -3382,7 +3383,7 @@ void App::apply_psp_backup_identity(SaveRecord *record) const {
   for (const std::string &name : local_names) {
     const std::string archive_path = local_backup_archive_path(kBackupRoot, record->id, name);
     if (need_title) {
-      // PARAM.SFO is a few KB; the reader is bounded and decompresses one stored entry.
+      // PARAM.SFO is a few KB; the reader is bounded and reads one entry, store or deflate.
       const ArchiveReadResult sfo =
           read_backup_entry(archive_path, "PARAM.SFO", kMaxPspParamSfoSize);
       if (sfo.ok) {

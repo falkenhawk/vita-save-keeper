@@ -4,6 +4,23 @@ All notable changes to Save Keeper are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- the details view now shows a backup's savedata size and file count next to its ZIP file size
+- a `backup_compression_level` setting in `settings.txt` - `0` turns compression off, `1`-`9`
+  pick the zlib level, default `6`
+- a backup that only lives in the cloud is now recognized as "no changes since", so freeing up
+  card space no longer costs a duplicate upload
+
+### Changed
+- backups are compressed now, and retail Vita saves are backed up decrypted through the console's
+  own mount, so big saves genuinely take less room on the memory card and on Google Drive.
+  Content that is already packed tight (LittleBigPlanet's own archives, photos) is stored as-is -
+  never larger - and every backup made by older versions still restores exactly as before
+- older Save Keeper versions refuse the new backups cleanly instead of restoring them wrongly -
+  restoring one of the new backups needs its game installed on the console
+
 ## [1.3.1] - 2026-08-16
 
 ### Fixed

@@ -10,9 +10,9 @@ namespace vsm {
 struct SyncItemInput {
   bool entries_ok{};
   bool folder_empty{};
-  // Content identical to any existing local archive, not just the newest: matching an older one
-  // still means the bytes are preserved, and re-zipping them would only duplicate an archive
-  // under a new timestamp.
+  // Content identical to any existing archive, local or Drive-only, not just the newest: matching
+  // an older local archive or a Drive-recorded content signature still means the bytes are
+  // preserved, and re-zipping them would only duplicate an archive under a new timestamp.
   bool matches_existing{};
   std::string newest_local;
   bool newest_on_drive{};

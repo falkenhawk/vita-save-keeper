@@ -2,6 +2,7 @@
 .superpowers/
 
 build/
+build-vita/
 *.elf
 *.self
 *.vpk

@@ -6,7 +6,7 @@
 
 namespace vsm {
 
-// Provisional until the on-device benchmark picks the shipped default (see the compression spec).
+// Provisional: 6 is zlib's default, pending an on-device benchmark of the CPU/space tradeoff.
 constexpr int kDefaultBackupCompressionLevel = 6;
 
 struct AppSettings {
@@ -21,8 +21,8 @@ struct AppSettings {
   // never in the synced file itself.
   long long backup_settings_synced{};
   // zlib level for new backup archives: 0 = store-only, 1-9 = deflate. Device-local because it
-  // trades this device's CPU time for space. The default is not serialized, so installs that
-  // never overrode it follow the shipped default when it changes.
+  // trades this device's CPU time for space. The default is not serialized, so installs whose
+  // level still matches the shipped default follow it when it changes.
   int backup_compression_level{kDefaultBackupCompressionLevel};
 };
 

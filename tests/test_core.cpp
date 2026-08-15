@@ -3126,9 +3126,17 @@ void test_only_last_saved_sort_requires_all_save_times() {
 void test_app_settings_backup_compression_level_round_trip() {
   // Absent key means the default; the default is never serialized, so a future default change
   // reaches every install that did not deliberately override it.
-  EXPECT_EQ(static_cast<std::size_t>(vsm::parse_app_settings("sort=name\n").backup_compression_level),
+  const vsm::AppSettings defaulted = vsm::parse_app_settings("sort=name\n");
+  EXPECT_EQ(static_cast<std::size_t>(defaulted.backup_compression_level),
             static_cast<std::size_t>(vsm::kDefaultBackupCompressionLevel));
-  EXPECT_TRUE(vsm::serialize_app_settings({}).find("backup_compression_level") == std::string::npos);
+  const std::string empty_serialized = vsm::serialize_app_settings({});
+  EXPECT_TRUE(empty_serialized.find("backup_compression_level") == std::string::npos);
+
+  // Parsing an explicit default and re-serializing erases it too - the round trip cannot tell
+  // "always default" from "deliberately set to the default".
+  const vsm::AppSettings explicit_default = vsm::parse_app_settings("backup_compression_level=6\n");
+  const std::string explicit_default_serialized = vsm::serialize_app_settings(explicit_default);
+  EXPECT_TRUE(explicit_default_serialized.find("backup_compression_level") == std::string::npos);
 
   vsm::AppSettings settings;
   settings.backup_compression_level = 0;
@@ -4159,9 +4167,20 @@ void test_content_signature_is_order_independent_and_pinned() {
   // An empty list hashes to the FNV offset basis.
   EXPECT_EQ(vsm::compute_content_signature({}), std::string("cbf29ce484222325"));
 
+  // A crc change on one entry must move the signature - the crc is not just along for the ride.
+  const std::vector<vsm::ArchiveEntryInfo> crc_changed = {
+      {"data.bin", 0x11223345u, 9u},
+      {"sce_sys/icon0.png", 0xdeadbeefu, 1234u},
+  };
+  EXPECT_TRUE(vsm::compute_content_signature(crc_changed) != vsm::compute_content_signature(forward));
+
   const vsm::ContentTotals totals = vsm::compute_content_totals(forward);
   EXPECT_EQ(static_cast<std::size_t>(totals.total_bytes), static_cast<std::size_t>(1243));
   EXPECT_EQ(static_cast<std::size_t>(totals.file_count), static_cast<std::size_t>(2));
+
+  const vsm::ContentTotals empty_totals = vsm::compute_content_totals({});
+  EXPECT_EQ(static_cast<std::size_t>(empty_totals.total_bytes), std::size_t{0});
+  EXPECT_EQ(static_cast<std::size_t>(empty_totals.file_count), std::size_t{0});
 }
 
 } // namespace

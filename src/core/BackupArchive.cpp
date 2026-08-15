@@ -916,8 +916,13 @@ bool inflate_entry_to_buffer(FILE *zip, const LocalZipHeader &header,
   int status = Z_OK;
   while (status != Z_STREAM_END) {
     if (stream.avail_in == 0) {
+      if (remaining == 0) {
+        // Compressed bytes ran out before the stream ended: truncated or corrupt entry.
+        ok = false;
+        break;
+      }
       const std::size_t chunk = std::min<std::size_t>(in_buffer.size(), remaining);
-      if (remaining == 0 || !read_bytes(zip, in_buffer.data(), chunk)) {
+      if (!read_bytes(zip, in_buffer.data(), chunk)) {
         ok = false;
         break;
       }
@@ -931,6 +936,8 @@ bool inflate_entry_to_buffer(FILE *zip, const LocalZipHeader &header,
       break;
     }
   }
+  // The stream must end exactly at the recorded sizes: no leftover compressed bytes, no short
+  // output - avail_out == 0 is the short-output guard.
   ok = ok && status == Z_STREAM_END && remaining == 0 && stream.avail_in == 0 &&
        stream.avail_out == 0;
   inflateEnd(&stream);
