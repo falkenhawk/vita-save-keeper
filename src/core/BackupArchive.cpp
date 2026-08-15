@@ -23,6 +23,7 @@
 #include <utime.h>
 #include <utility>
 #include <vector>
+#include <zlib.h>
 
 namespace vsm {
 namespace {
@@ -31,6 +32,22 @@ constexpr std::size_t kCopyBufferSize = 32 * 1024;
 // Byte-progress callbacks fire at most every this many bytes, bounding redraw cost while still
 // animating smoothly for saves large enough to need a bar at all.
 constexpr std::uint64_t kProgressReportStep = 256u * 1024u;
+// Deflate's output buffer is drained inside its inner write loop every time it fills, so making it
+// smaller than the input buffer is behaviorally identical - it just trades a few more loop
+// iterations for 24 KB less of the main thread's stack held per open entry.
+constexpr std::size_t kDeflateOutputBufferSize = 8 * 1024;
+// Once this many input bytes have gone through deflate for one entry, incompressible content has
+// had enough of a look: the project's known worst case is an exactly-50 MB LBP profile archive
+// that never shrinks, and on a 444 MHz Vita CPU running deflate to the end just to fall back to
+// store afterward burns a full extra read+deflate+rewrite pass for nothing. For a homogeneous file
+// (uniformly compressible or not throughout), giving up here only costs savings it would barely
+// have banked anyway - the fallback invariant only needs the deflated output to stay below the
+// uncompressed size, so aborting earlier is equally safe. A mixed file (an incompressible prefix
+// followed by a compressible tail) is the real tradeoff: probation judges only the part it has
+// seen, so it can store a file that would have shrunk meaningfully once the compressible tail was
+// reached - a measured 24.9% on one such 6 MB fixture. See the probation check in
+// write_deflated_file_data.
+constexpr std::uint64_t kDeflateProbationBytes = 4ull * 1024 * 1024;
 
 struct ZipTimestamp {
   std::uint16_t time{};
@@ -43,6 +60,8 @@ struct ZipEntry {
   ZipTimestamp modified_at;
   std::uint32_t crc32{};
   std::uint32_t size{};
+  std::uint32_t compressed_size{};
+  std::uint16_t method{};
   std::uint32_t local_header_offset{};
 };
 
@@ -457,12 +476,13 @@ bool write_local_header(FILE *zip, ZipEntry *entry, const ZipTimestamp &timestam
     return false;
   }
 
-  // The writer deliberately uses ZIP "store" entries. Compression is useful later, but store-only
-  // keeps this foundation dependency-free and easy to validate on both host and Vita.
+  // Method and compressed size are placeholders for deflate entries (patched after the data is
+  // streamed); store entries carry final values immediately. The CRC pass has already run, so
+  // crc32 and the uncompressed size are always exact here and no data descriptors are needed.
   return write_u32(zip, 0x04034b50) && write_u16(zip, 20) && write_u16(zip, 0) &&
-         write_u16(zip, 0) && write_u16(zip, timestamp.time) && write_u16(zip, timestamp.date) &&
-         write_u32(zip, entry->crc32) && write_u32(zip, entry->size) &&
-         write_u32(zip, entry->size) &&
+         write_u16(zip, entry->method) && write_u16(zip, timestamp.time) &&
+         write_u16(zip, timestamp.date) && write_u32(zip, entry->crc32) &&
+         write_u32(zip, entry->compressed_size) && write_u32(zip, entry->size) &&
          write_u16(zip, static_cast<std::uint16_t>(entry->zip_path.size())) && write_u16(zip, 0) &&
          write_string(zip, entry->zip_path);
 }
@@ -499,12 +519,177 @@ bool write_file_data(FILE *zip, const std::string &source_path,
   }
 }
 
+enum class DeflateOutcome { Error, Deflated, StoreInstead };
+
+// Streams one file into the zip as raw deflate. Aborts with StoreInstead the moment the output
+// would reach the uncompressed size, or earlier still if the probation guard below judges the
+// file incompressible from its opening bytes, so a fallback rewrite always overwrites every
+// deflated byte and no stale tail can survive past the entry. Progress reports input bytes,
+// mirroring the store path, so the caller's bar semantics do not change with the method.
+DeflateOutcome write_deflated_file_data(FILE *zip, const std::string &source_path, int level,
+                                        std::uint32_t uncompressed_size,
+                                        std::uint32_t *compressed_size,
+                                        const std::function<void(std::size_t)> &on_bytes,
+                                        const std::function<bool()> &cancel_check) {
+  FILE *input = std::fopen(source_path.c_str(), "rb");
+  if (!input) {
+    return DeflateOutcome::Error;
+  }
+
+  z_stream stream {};
+  if (deflateInit2(&stream, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+    std::fclose(input);
+    return DeflateOutcome::Error;
+  }
+
+  // Filled before use on every iteration, so skipping the zero-init avoids two large memsets per
+  // file; z_stream stays zeroed above because zlib requires it before deflateInit2.
+  std::array<unsigned char, kCopyBufferSize> in_buffer;
+  std::array<unsigned char, kDeflateOutputBufferSize> out_buffer;
+  std::uint64_t total_out = 0;
+  std::uint64_t consumed_input = 0;
+  DeflateOutcome outcome = DeflateOutcome::Deflated;
+
+  while (outcome == DeflateOutcome::Deflated) {
+    if (cancel_check && cancel_check()) {
+      outcome = DeflateOutcome::Error;
+      break;
+    }
+    const std::size_t read = std::fread(in_buffer.data(), 1, in_buffer.size(), input);
+    if (read < in_buffer.size() && std::ferror(input) != 0) {
+      outcome = DeflateOutcome::Error;
+      break;
+    }
+    const int flush = read < in_buffer.size() ? Z_FINISH : Z_NO_FLUSH;
+    stream.next_in = in_buffer.data();
+    stream.avail_in = static_cast<uInt>(read);
+
+    int status = Z_OK;
+    do {
+      stream.next_out = out_buffer.data();
+      stream.avail_out = static_cast<uInt>(out_buffer.size());
+      status = deflate(&stream, flush);
+      // Any status besides "made progress" or "stream finished" is unrecoverable; looping again
+      // on it (Z_BUF_ERROR included) risks spinning forever, which on device means a hard hang.
+      if (status != Z_OK && status != Z_STREAM_END) {
+        outcome = DeflateOutcome::Error;
+        break;
+      }
+      const std::size_t produced = out_buffer.size() - stream.avail_out;
+      if (total_out + produced >= uncompressed_size) {
+        outcome = DeflateOutcome::StoreInstead;
+        break;
+      }
+      if (produced > 0 && !write_bytes(zip, out_buffer.data(), produced)) {
+        outcome = DeflateOutcome::Error;
+        break;
+      }
+      total_out += produced;
+    } while (stream.avail_out == 0);
+
+    if (outcome != DeflateOutcome::Deflated) {
+      break;
+    }
+    consumed_input += read;
+    // Probation: once enough input has gone through deflate to judge the file, less than ~1.6%
+    // savings so far means the rest is unlikely to do meaningfully better either, so give up now
+    // rather than after paying for the whole file (see kDeflateProbationBytes above).
+    if (consumed_input >= kDeflateProbationBytes && total_out > consumed_input * 63 / 64) {
+      outcome = DeflateOutcome::StoreInstead;
+      break;
+    }
+    if (read > 0 && on_bytes) {
+      on_bytes(read);
+    }
+    if (flush == Z_FINISH && status == Z_STREAM_END) {
+      break;
+    }
+  }
+
+  deflateEnd(&stream);
+  std::fclose(input);
+  if (outcome == DeflateOutcome::Deflated) {
+    *compressed_size = static_cast<std::uint32_t>(total_out);
+  }
+  return outcome;
+}
+
+// Writes one entry's data: a placeholder local header (entry->method and entry->compressed_size
+// must already hold the entry's chosen method and its placeholder size, e.g. entry->size), then
+// either a stored copy or a deflate attempt that falls back to store when it does not shrink the
+// file, then a seek-back patch of the header's method and compressed-size fields once both are
+// final. entry->method and entry->compressed_size are updated in place to their final values -
+// the store fallback flips method back to 0 - so callers never juggle a separate out-param.
+bool write_entry_data(FILE *zip, ZipEntry *entry, int level,
+                      const std::function<void(std::size_t)> &on_bytes,
+                      const std::function<bool()> &cancel_check) {
+  if (!write_local_header(zip, entry, entry->modified_at)) {
+    return false;
+  }
+  if (entry->method == 0) {
+    return write_file_data(zip, entry->source_path, on_bytes, cancel_check);
+  }
+
+  std::uint64_t reported = 0;
+  const std::function<void(std::size_t)> on_deflate_bytes =
+      on_bytes ? std::function<void(std::size_t)>([&](std::size_t chunk) {
+        reported += chunk;
+        on_bytes(chunk);
+      })
+               : std::function<void(std::size_t)>();
+  std::uint32_t data_start = 0;
+  if (!current_offset(zip, &data_start)) {
+    return false;
+  }
+  std::uint32_t compressed_size = 0;
+  const DeflateOutcome outcome = write_deflated_file_data(
+      zip, entry->source_path, level, entry->size, &compressed_size, on_deflate_bytes, cancel_check);
+  if (outcome == DeflateOutcome::Error) {
+    return false;
+  }
+  if (outcome == DeflateOutcome::StoreInstead) {
+    // Deflate could not beat store for this file (already-compressed content, or the probation
+    // guard gave up early). Rewind and store it; every deflated byte sits below entry->size, so
+    // the raw copy overwrites all of them and the entry ends exactly at data_start + entry->size.
+    entry->method = 0;
+    compressed_size = entry->size;
+    std::uint64_t skip = reported;
+    const std::function<void(std::size_t)> on_remaining_bytes =
+        on_bytes ? std::function<void(std::size_t)>([&](std::size_t chunk) {
+          if (skip >= chunk) {
+            skip -= chunk;
+            return;
+          }
+          on_bytes(chunk - static_cast<std::size_t>(skip));
+          skip = 0;
+        })
+                 : std::function<void(std::size_t)>();
+    if (std::fseek(zip, static_cast<long>(data_start), SEEK_SET) != 0 ||
+        !write_file_data(zip, entry->source_path, on_remaining_bytes, cancel_check)) {
+      return false;
+    }
+  }
+  entry->compressed_size = compressed_size;
+
+  // Patch the placeholder method and compressed size now that both are known, then return to the
+  // entry's end for the next header. CRC and uncompressed size were exact up front. In the local
+  // header layout, signature (4) + version (2) + flags (2) puts method at +8; crc32 follows method
+  // and mod time/date at +14; compressed size follows crc32 at +18.
+  std::uint32_t data_end = 0;
+  return current_offset(zip, &data_end) &&
+         std::fseek(zip, static_cast<long>(entry->local_header_offset) + 8, SEEK_SET) == 0 &&
+         write_u16(zip, entry->method) &&
+         std::fseek(zip, static_cast<long>(entry->local_header_offset) + 18, SEEK_SET) == 0 &&
+         write_u32(zip, entry->compressed_size) &&
+         std::fseek(zip, static_cast<long>(data_end), SEEK_SET) == 0;
+}
+
 bool write_central_directory_entry(FILE *zip, const ZipEntry &entry,
                                    const ZipTimestamp &timestamp) {
   return write_u32(zip, 0x02014b50) && write_u16(zip, 20) && write_u16(zip, 20) &&
-         write_u16(zip, 0) && write_u16(zip, 0) && write_u16(zip, timestamp.time) &&
+         write_u16(zip, 0) && write_u16(zip, entry.method) && write_u16(zip, timestamp.time) &&
          write_u16(zip, timestamp.date) && write_u32(zip, entry.crc32) &&
-         write_u32(zip, entry.size) && write_u32(zip, entry.size) &&
+         write_u32(zip, entry.compressed_size) && write_u32(zip, entry.size) &&
          write_u16(zip, static_cast<std::uint16_t>(entry.zip_path.size())) && write_u16(zip, 0) &&
          write_u16(zip, 0) && write_u16(zip, 0) && write_u16(zip, 0) && write_u32(zip, 0) &&
          write_u32(zip, entry.local_header_offset) && write_string(zip, entry.zip_path);
@@ -864,11 +1049,13 @@ BackupResult create_backup_archive(const BackupRequest &request) {
       })
                        : std::function<void(std::size_t)>();
 
+  const int level = std::max(0, std::min(request.compression_level, 9));
   bool ok = true;
   for (ZipEntry &entry : entries) {
-    ok = write_local_header(zip, &entry, entry.modified_at) &&
-         write_file_data(zip, entry.source_path, on_bytes, request.cancel_check);
-    if (!ok) {
+    entry.method = (level > 0 && entry.size > 0) ? 8 : 0;
+    entry.compressed_size = entry.size;
+    if (!write_entry_data(zip, &entry, level, on_bytes, request.cancel_check)) {
+      ok = false;
       break;
     }
   }

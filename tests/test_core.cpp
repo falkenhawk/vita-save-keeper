@@ -244,6 +244,196 @@ std::vector<std::string> read_zip_central_directory_names(const std::filesystem:
   return names;
 }
 
+// (compression method, compressed size, uncompressed size) per entry, in central directory order.
+struct CdEntryShape {
+  std::uint16_t method{};
+  std::uint32_t compressed_size{};
+  std::uint32_t uncompressed_size{};
+};
+
+// Reads (method, compressed size, uncompressed size) per entry from the central directory, in
+// central directory order, and cross-checks each record against the local header the writer
+// patched (offset stored at central-directory record offset +42; the local header's method sits
+// at +8, compressed size at +18, uncompressed size at +22 - see write_entry_data's derivation of
+// those offsets). Without this cross-check a wrong seek-back offset in the writer could only ever
+// agree with the central directory it also wrote, never disagree with itself. Fails loudly via
+// EXPECT_EQ on a mismatch, and returns an empty vector on any truncation so callers still see a
+// count mismatch rather than reading past the end of the file.
+std::vector<CdEntryShape> read_zip_central_directory_shapes(const std::filesystem::path &archive_path) {
+  std::vector<CdEntryShape> shapes;
+  std::ifstream input(archive_path, std::ios::binary);
+  std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(input)),
+                                   std::istreambuf_iterator<char>());
+  const auto u16_at = [&](std::size_t at) {
+    return static_cast<std::uint16_t>(bytes[at] | (bytes[at + 1] << 8));
+  };
+  const auto u32_at = [&](std::size_t at) {
+    return static_cast<std::uint32_t>(bytes[at]) | (static_cast<std::uint32_t>(bytes[at + 1]) << 8) |
+           (static_cast<std::uint32_t>(bytes[at + 2]) << 16) |
+           (static_cast<std::uint32_t>(bytes[at + 3]) << 24);
+  };
+  if (bytes.size() < 22) {
+    return shapes;
+  }
+  const std::size_t eocd = bytes.size() - 22;
+  std::size_t at = u32_at(eocd + 16);
+  const std::uint16_t count = u16_at(eocd + 10);
+  for (std::uint16_t i = 0; i < count; ++i) {
+    if (at + 46 > bytes.size()) {
+      return {};
+    }
+    const std::uint16_t method = u16_at(at + 10);
+    const std::uint32_t compressed_size = u32_at(at + 20);
+    const std::uint32_t uncompressed_size = u32_at(at + 24);
+    const std::uint32_t local_header_offset = u32_at(at + 42);
+
+    if (static_cast<std::uint64_t>(local_header_offset) + 26 > bytes.size()) {
+      return {};
+    }
+    EXPECT_EQ(static_cast<std::size_t>(u16_at(local_header_offset + 8)),
+              static_cast<std::size_t>(method));
+    EXPECT_EQ(static_cast<std::size_t>(u32_at(local_header_offset + 18)),
+              static_cast<std::size_t>(compressed_size));
+    EXPECT_EQ(static_cast<std::size_t>(u32_at(local_header_offset + 22)),
+              static_cast<std::size_t>(uncompressed_size));
+
+    shapes.push_back({method, compressed_size, uncompressed_size});
+    at += 46 + u16_at(at + 28) + u16_at(at + 30) + u16_at(at + 32);
+  }
+  return shapes;
+}
+
+void test_backup_archive_deflates_compressible_entries() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-deflate-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source");
+  // Exactly one full copy buffer of repetitive bytes: pins the entry.size > 0 method decision at
+  // the buffer boundary, where the read that fills the buffer exactly still leaves flush at
+  // Z_NO_FLUSH and only the following zero-byte read flips it to Z_FINISH.
+  std::ofstream(base / "source" / "boundary.dat", std::ios::binary) << std::string(32768, 'c');
+  // A zero-byte file must always store: entry.size > 0 is false, so method is never even
+  // attempted as deflate.
+  std::ofstream(base / "source" / "empty.dat", std::ios::binary);
+  // Highly repetitive content deflates far below its size; pseudo-random bytes from a fixed LCG
+  // do not (deterministic, unlike /dev/urandom), so the noise file must fall back to store.
+  std::ofstream(base / "source" / "level.dat", std::ios::binary) << std::string(100000, 'a');
+  {
+    std::ofstream random_file(base / "source" / "noise.bin", std::ios::binary);
+    std::uint32_t state = 0x12345678u;
+    for (int i = 0; i < 100000; ++i) {
+      state = state * 1664525u + 1013904223u;
+      random_file.put(static_cast<char>(state >> 24));
+    }
+  }
+
+  vsm::BackupRequest request;
+  request.source_path = (base / "source").string();
+  request.backup_root = (base / "backups").string();
+  request.save_id = "PCSE00120";
+  request.timestamp = {2026, 8, 14, 12, 0, 0};
+  request.compression_level = 6;
+  const vsm::BackupResult result = vsm::create_backup_archive(request);
+  EXPECT_TRUE(result.ok);
+
+  // collect_files sorts children: boundary.dat, empty.dat, level.dat, noise.bin. The helper
+  // cross-checks each local header against its central directory record as it reads.
+  const std::vector<CdEntryShape> shapes = read_zip_central_directory_shapes(result.archive_path);
+  EXPECT_EQ(shapes.size(), static_cast<std::size_t>(4));
+  EXPECT_EQ(static_cast<std::size_t>(shapes[0].method), static_cast<std::size_t>(8));
+  EXPECT_TRUE(shapes[0].compressed_size < shapes[0].uncompressed_size);
+  EXPECT_EQ(static_cast<std::size_t>(shapes[1].method), static_cast<std::size_t>(0));
+  EXPECT_EQ(static_cast<std::size_t>(shapes[1].compressed_size), static_cast<std::size_t>(0));
+  EXPECT_EQ(static_cast<std::size_t>(shapes[1].uncompressed_size), static_cast<std::size_t>(0));
+  EXPECT_EQ(static_cast<std::size_t>(shapes[2].method), static_cast<std::size_t>(8));
+  EXPECT_TRUE(shapes[2].compressed_size < shapes[2].uncompressed_size);
+  EXPECT_EQ(static_cast<std::size_t>(shapes[3].method), static_cast<std::size_t>(0));
+  EXPECT_EQ(static_cast<std::size_t>(shapes[3].compressed_size),
+            static_cast<std::size_t>(shapes[3].uncompressed_size));
+
+  // Change detection reads uncompressed CRC/size from the central directory, so a deflated
+  // archive still matches its source folder.
+  bool entries_ok = false;
+  const std::vector<vsm::ArchiveEntryInfo> entries =
+      vsm::compute_folder_entries((base / "source").string(), &entries_ok);
+  EXPECT_TRUE(entries_ok);
+  EXPECT_TRUE(vsm::entries_match_backup_archive(entries, result.archive_path));
+
+  std::filesystem::remove_all(base);
+}
+
+void test_backup_archive_level_zero_stores_everything() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-store-level-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source");
+  std::ofstream(base / "source" / "level.dat", std::ios::binary) << std::string(50000, 'b');
+
+  vsm::BackupRequest request;
+  request.source_path = (base / "source").string();
+  request.backup_root = (base / "backups").string();
+  request.save_id = "PCSE00120";
+  request.timestamp = {2026, 8, 14, 12, 0, 0};
+  request.compression_level = 0;
+  const vsm::BackupResult result = vsm::create_backup_archive(request);
+  EXPECT_TRUE(result.ok);
+  const std::vector<CdEntryShape> shapes = read_zip_central_directory_shapes(result.archive_path);
+  EXPECT_EQ(shapes.size(), static_cast<std::size_t>(1));
+  EXPECT_EQ(static_cast<std::size_t>(shapes[0].method), static_cast<std::size_t>(0));
+
+  std::filesystem::remove_all(base);
+}
+
+void test_backup_archive_probation_stores_mixed_incompressible_prefix() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-probation-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source");
+
+  // Discriminating fixture: 4 MB + 32 KB of incompressible LCG noise (same generator as
+  // noise.bin above), followed by 64 KB of a repeated byte. Full deflate of the whole file lands
+  // around 4228671 bytes - still below the file's 4292608-byte uncompressed size - so without the
+  // probation guard this entry would deflate (method 8). The guard only ever sees the first 4 MB,
+  // all of which is noise, judges it incompressible, and gives up there: this is the only thing
+  // that can make the entry store here, unlike a plain "big incompressible file" fixture, which
+  // the ordinary compressed-size-would-not-shrink fallback would already store with probation
+  // deleted.
+  {
+    std::ofstream file(base / "source" / "mixed.dat", std::ios::binary);
+    std::uint32_t state = 0x12345678u;
+    const std::size_t noise_size = 4u * 1024u * 1024u + 32u * 1024u;
+    std::string noise(noise_size, '\0');
+    for (std::size_t i = 0; i < noise_size; ++i) {
+      state = state * 1664525u + 1013904223u;
+      noise[i] = static_cast<char>(state >> 24);
+    }
+    file << noise << std::string(64 * 1024, 'z');
+  }
+
+  vsm::BackupRequest request;
+  request.source_path = (base / "source").string();
+  request.backup_root = (base / "backups").string();
+  request.save_id = "PCSE00120";
+  request.timestamp = {2026, 8, 14, 12, 0, 0};
+  request.compression_level = 6;
+  const vsm::BackupResult result = vsm::create_backup_archive(request);
+  EXPECT_TRUE(result.ok);
+
+  const std::vector<CdEntryShape> shapes = read_zip_central_directory_shapes(result.archive_path);
+  EXPECT_EQ(shapes.size(), static_cast<std::size_t>(1));
+  EXPECT_EQ(static_cast<std::size_t>(shapes[0].method), static_cast<std::size_t>(0));
+  EXPECT_EQ(static_cast<std::size_t>(shapes[0].compressed_size),
+            static_cast<std::size_t>(shapes[0].uncompressed_size));
+
+  bool entries_ok = false;
+  const std::vector<vsm::ArchiveEntryInfo> entries =
+      vsm::compute_folder_entries((base / "source").string(), &entries_ok);
+  EXPECT_TRUE(entries_ok);
+  EXPECT_TRUE(vsm::entries_match_backup_archive(entries, result.archive_path));
+
+  std::filesystem::remove_all(base);
+}
+
 void test_timestamped_backup_name_uses_jksv_style_zip_name() {
   const vsm::BackupTimestamp timestamp{2026, 5, 21, 16, 14, 9};
 
@@ -3658,6 +3848,9 @@ int main() {
   test_selection_wraps_and_handles_empty_lists();
   test_grid_window_scrolls_only_when_selection_leaves_view();
   test_backup_archive_creates_timestamped_zip_snapshot();
+  test_backup_archive_deflates_compressible_entries();
+  test_backup_archive_level_zero_stores_everything();
+  test_backup_archive_probation_stores_mixed_incompressible_prefix();
   test_detail_view_sizes_from_folder_and_archive();
   test_save_fingerprint_reflects_folder_content();
   test_scan_fingerprints_every_save_and_flags_mount_requiring_ones();

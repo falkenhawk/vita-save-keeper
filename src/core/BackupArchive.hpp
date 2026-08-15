@@ -42,6 +42,11 @@ struct BackupRequest {
   // partial file is removed like any other failure. The caller knows the abort was its own, so it
   // can tell "canceled" from a real error.
   std::function<bool()> cancel_check;
+  // zlib level for entry data: 0 stores every entry (the pre-compression archive shape), 1-9
+  // deflates each file, falling back to store per file whenever deflate does not shrink it.
+  // Readers gain deflate support in the following commit; the central directory always carries
+  // the uncompressed CRC32 and size, so change detection is identical either way.
+  int compression_level{};
 };
 
 struct BackupResult {
