@@ -3,6 +3,7 @@
 #include "core/GoogleAuth.hpp"
 #include "core/PathUtil.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <string>
 
@@ -118,6 +119,33 @@ std::string build_drive_upload_metadata_json(const std::string &file_name,
          json_escape(parent_id) + "\"]}";
 }
 
+namespace {
+
+std::string content_triple_properties_json(const std::string &content_signature,
+                                           long long content_bytes, long long file_count) {
+  return "\"appProperties\":{\"contentSig\":\"" + json_escape(content_signature) +
+         "\",\"contentBytes\":\"" + std::to_string(content_bytes) +
+         "\",\"fileCount\":\"" + std::to_string(file_count) + "\"}";
+}
+
+} // namespace
+
+std::string build_drive_archive_upload_metadata_json(const std::string &file_name,
+                                                     const std::string &parent_id,
+                                                     const std::string &content_signature,
+                                                     long long content_bytes,
+                                                     long long file_count) {
+  return "{\"name\":\"" + json_escape(file_name) + "\",\"parents\":[\"" +
+         json_escape(parent_id) + "\"]," +
+         content_triple_properties_json(content_signature, content_bytes, file_count) + "}";
+}
+
+std::string build_drive_archive_properties_update_json(const std::string &content_signature,
+                                                       long long content_bytes,
+                                                       long long file_count) {
+  return "{" + content_triple_properties_json(content_signature, content_bytes, file_count) + "}";
+}
+
 std::string build_drive_sidecar_upload_metadata_json(const std::string &file_name,
                                                      const std::string &parent_id,
                                                      const std::string &archive_file_id) {
@@ -180,7 +208,8 @@ namespace {
 std::string build_paged_listing_query(const std::string &drive_query,
                                       const std::string &page_token) {
   std::string result = "q=" + form_url_encode(drive_query) +
-                       "&fields=" + form_url_encode("nextPageToken,files(id,name,parents,size)") +
+                       "&fields=" +
+                       form_url_encode("nextPageToken,files(id,name,parents,size,appProperties)") +
                        "&pageSize=1000";
   if (!page_token.empty()) {
     result += "&pageToken=" + form_url_encode(page_token);
@@ -250,6 +279,25 @@ bool parse_drive_file_object(const std::string &object_json, DriveFile *file) {
   if (find_json_string_from(object_json, 0, "size", &size_text, nullptr)) {
     const long long parsed = std::strtoll(size_text.c_str(), nullptr, 10);
     file->size_bytes = parsed > 0 ? parsed : 0;
+  }
+  // The content triple lives in a nested appProperties object; lift it as a bounded substring so
+  // field order inside it (and elsewhere in object_json) stays irrelevant.
+  const std::size_t properties_key = object_json.find("\"appProperties\"");
+  if (properties_key != std::string::npos) {
+    const std::size_t open = object_json.find('{', properties_key);
+    const std::size_t close =
+        open == std::string::npos ? std::string::npos : find_matching_brace(object_json, open);
+    if (open != std::string::npos && close != std::string::npos) {
+      const std::string properties = object_json.substr(open, close - open + 1);
+      find_json_string_from(properties, 0, "contentSig", &file->content_signature, nullptr);
+      std::string number_text;
+      if (find_json_string_from(properties, 0, "contentBytes", &number_text, nullptr)) {
+        file->content_bytes = std::max(0LL, std::strtoll(number_text.c_str(), nullptr, 10));
+      }
+      if (find_json_string_from(properties, 0, "fileCount", &number_text, nullptr)) {
+        file->file_count = std::max(0LL, std::strtoll(number_text.c_str(), nullptr, 10));
+      }
+    }
   }
   return true;
 }

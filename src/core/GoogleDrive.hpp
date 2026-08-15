@@ -13,6 +13,11 @@ struct DriveFile {
   // Drive v3 serializes the int64 "size" as a quoted string; 0 when the response omitted it
   // (folders, or requests whose fields selector did not ask for size).
   long long size_bytes{};
+  // Content triple from the archive's appProperties; empty/zero when the file predates the
+  // triple or was uploaded outside the app. contentBytes/fileCount arrive as decimal strings.
+  std::string content_signature;
+  long long content_bytes{};
+  long long file_count{};
 };
 
 struct DriveFileList {
@@ -40,6 +45,15 @@ std::string build_drive_folder_metadata_json(const std::string &folder_name,
                                              const std::string &parent_id);
 std::string build_drive_upload_metadata_json(const std::string &file_name,
                                              const std::string &parent_id);
+std::string build_drive_archive_upload_metadata_json(const std::string &file_name,
+                                                     const std::string &parent_id,
+                                                     const std::string &content_signature,
+                                                     long long content_bytes,
+                                                     long long file_count);
+// Metadata-only PATCH body for backfilling the triple onto an already-uploaded archive.
+std::string build_drive_archive_properties_update_json(const std::string &content_signature,
+                                                       long long content_bytes,
+                                                       long long file_count);
 std::string build_drive_sidecar_upload_metadata_json(const std::string &file_name,
                                                      const std::string &parent_id,
                                                      const std::string &archive_file_id);

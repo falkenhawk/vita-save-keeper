@@ -2659,11 +2659,13 @@ void test_google_drive_builds_list_children_query() {
 void test_google_drive_builds_paged_index_queries() {
   EXPECT_EQ(vsm::build_drive_list_all_folders_query(""),
             "q=mimeType%3D%27application%2Fvnd.google-apps.folder%27%20and%20trashed%3Dfalse"
-            "&fields=nextPageToken%2Cfiles%28id%2Cname%2Cparents%2Csize%29&pageSize=1000");
+            "&fields=nextPageToken%2Cfiles%28id%2Cname%2Cparents%2Csize%2CappProperties%29"
+            "&pageSize=1000");
   EXPECT_EQ(vsm::build_drive_list_all_files_query("token-1"),
             "q=mimeType%21%3D%27application%2Fvnd.google-apps.folder%27%20and%20name%20contains"
             "%20%27.zip%27%20and%20trashed%3Dfalse"
-            "&fields=nextPageToken%2Cfiles%28id%2Cname%2Cparents%2Csize%29&pageSize=1000"
+            "&fields=nextPageToken%2Cfiles%28id%2Cname%2Cparents%2Csize%2CappProperties%29"
+            "&pageSize=1000"
             "&pageToken=token-1");
 }
 
@@ -2705,6 +2707,37 @@ void test_google_drive_parses_single_object_upload_response() {
   const vsm::DriveFileList empty = vsm::parse_drive_file_list("{\n \"files\": []\n}\n");
   EXPECT_TRUE(empty.ok);
   EXPECT_EQ(empty.files.size(), static_cast<std::size_t>(0));
+}
+
+void test_drive_archive_metadata_and_listing_carry_content_triple() {
+  const std::string upload = vsm::build_drive_archive_upload_metadata_json(
+      "2026-08-14 12-00-00.zip", "folder-id", "40c441899c0a29bd", 1243, 2);
+  EXPECT_EQ(upload,
+            std::string("{\"name\":\"2026-08-14 12-00-00.zip\",\"parents\":[\"folder-id\"],"
+                        "\"appProperties\":{\"contentSig\":\"40c441899c0a29bd\","
+                        "\"contentBytes\":\"1243\",\"fileCount\":\"2\"}}"));
+
+  const std::string update = vsm::build_drive_archive_properties_update_json(
+      "40c441899c0a29bd", 1243, 2);
+  EXPECT_EQ(update,
+            std::string("{\"appProperties\":{\"contentSig\":\"40c441899c0a29bd\","
+                        "\"contentBytes\":\"1243\",\"fileCount\":\"2\"}}"));
+
+  // The listing parser lifts the triple out of the nested appProperties object; files without it
+  // (older uploads, hand-copied zips) parse with the fields empty/zero.
+  const vsm::DriveFileList list = vsm::parse_drive_file_list(
+      "{\"files\":[{\"id\":\"f1\",\"name\":\"a.zip\",\"size\":\"42\","
+      "\"appProperties\":{\"contentSig\":\"40c441899c0a29bd\",\"contentBytes\":\"1243\","
+      "\"fileCount\":\"2\"}},{\"id\":\"f2\",\"name\":\"b.zip\"}]}");
+  EXPECT_TRUE(list.ok);
+  EXPECT_EQ(list.files.size(), static_cast<std::size_t>(2));
+  EXPECT_EQ(list.files[0].content_signature, std::string("40c441899c0a29bd"));
+  EXPECT_EQ(static_cast<std::size_t>(list.files[0].content_bytes), static_cast<std::size_t>(1243));
+  EXPECT_EQ(static_cast<std::size_t>(list.files[0].file_count), static_cast<std::size_t>(2));
+  EXPECT_TRUE(list.files[1].content_signature.empty());
+
+  // The paged listing must actually request the field or the parser never sees it.
+  EXPECT_TRUE(vsm::build_drive_list_all_files_query("").find("appProperties") != std::string::npos);
 }
 
 void test_multipart_body_frames_match_the_drive_wire_format() {
@@ -4014,6 +4047,7 @@ int main() {
   test_google_drive_builds_paged_index_queries();
   test_google_drive_parses_parents_and_page_token();
   test_google_drive_parses_single_object_upload_response();
+  test_drive_archive_metadata_and_listing_carry_content_triple();
   test_multipart_body_frames_match_the_drive_wire_format();
   test_multipart_chunks_walk_regions_without_spanning_boundaries();
   test_multipart_chunks_handle_empty_files_and_past_end_offsets();
