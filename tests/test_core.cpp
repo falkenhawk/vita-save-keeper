@@ -555,6 +555,56 @@ void test_backup_archive_plain_marker_written_first_and_breaks_cd_match() {
   std::filesystem::remove_all(base);
 }
 
+void test_archive_has_plain_marker_and_restore_extraction_skips_it() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-plain-marker-restore-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source");
+  std::ofstream(base / "source" / "data.bin", std::ios::binary) << std::string(2000, 'p');
+
+  vsm::BackupRequest plain_request;
+  plain_request.source_path = (base / "source").string();
+  plain_request.backup_root = (base / "backups").string();
+  plain_request.save_id = "PCSE00121";
+  plain_request.timestamp = {2026, 8, 15, 10, 0, 0};
+  plain_request.compression_level = 6;
+  plain_request.add_plain_marker = true;
+  const vsm::BackupResult plain_backup = vsm::create_backup_archive(plain_request);
+  EXPECT_TRUE(plain_backup.ok);
+  EXPECT_TRUE(vsm::archive_has_plain_marker(plain_backup.archive_path));
+
+  // Extraction (the plain restore path's building block) skips the marker: the ordinary file
+  // lands on disk, but the marker never materializes as a file.
+  const std::filesystem::path extracted = base / "extracted";
+  const vsm::RestoreResult extraction =
+      vsm::extract_backup_archive_for_inspection(plain_backup.archive_path, extracted.string());
+  EXPECT_TRUE(extraction.ok);
+  EXPECT_TRUE(std::filesystem::exists(extracted / "data.bin"));
+  EXPECT_TRUE(!std::filesystem::exists(extracted / vsm::kPlainContentMarkerName));
+
+  // An ordinary (raw) archive never carries the marker; its extraction behavior is unaffected.
+  vsm::BackupRequest raw_request;
+  raw_request.source_path = (base / "source").string();
+  raw_request.backup_root = (base / "backups").string();
+  raw_request.save_id = "PCSE00121";
+  raw_request.timestamp = {2026, 8, 15, 10, 5, 0};
+  raw_request.compression_level = 6;
+  const vsm::BackupResult raw_backup = vsm::create_backup_archive(raw_request);
+  EXPECT_TRUE(raw_backup.ok);
+  EXPECT_TRUE(!vsm::archive_has_plain_marker(raw_backup.archive_path));
+
+  const std::filesystem::path raw_extracted = base / "raw-extracted";
+  const vsm::RestoreResult raw_extraction =
+      vsm::extract_backup_archive_for_inspection(raw_backup.archive_path, raw_extracted.string());
+  EXPECT_TRUE(raw_extraction.ok);
+  EXPECT_TRUE(std::filesystem::exists(raw_extracted / "data.bin"));
+
+  // An unreadable/nonexistent archive reports false rather than crashing.
+  EXPECT_TRUE(!vsm::archive_has_plain_marker((base / "does-not-exist.zip").string()));
+
+  std::filesystem::remove_all(base);
+}
+
 void test_timestamped_backup_name_uses_jksv_style_zip_name() {
   const vsm::BackupTimestamp timestamp{2026, 5, 21, 16, 14, 9};
 
@@ -4154,6 +4204,7 @@ int main() {
   test_backup_archive_compressed_round_trip_restores_identical_bytes();
   test_backup_archive_rejects_corrupt_deflate_stream();
   test_backup_archive_plain_marker_written_first_and_breaks_cd_match();
+  test_archive_has_plain_marker_and_restore_extraction_skips_it();
   test_detail_view_sizes_from_folder_and_archive();
   test_save_fingerprint_reflects_folder_content();
   test_scan_fingerprints_every_save_and_flags_mount_requiring_ones();

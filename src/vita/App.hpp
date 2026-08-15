@@ -230,6 +230,16 @@ private:
   LocalSnapshotResult create_local_snapshot(const SaveRecord &save, const std::string &suffix,
                                             const char *busy_label, bool force_new = false);
   void handle_restore();
+  // Restores a plain-content archive (Task A2's decrypted-through-a-mount shape, identified by
+  // archive_has_plain_marker): extracts to a work directory, copies it back in through a held
+  // save mount, then re-links the backup's sidecar (and Drive appProperties, when synced) to the
+  // freshly re-encrypted on-disk content. Called from handle_restore in place of
+  // restore_backup_archive for archives carrying the marker; the archive itself is never touched,
+  // so any failure here leaves it as valid a retry source as before the attempt.
+  RestoreResult restore_plain_content_archive(const SaveRecord &save,
+                                              const std::string &archive_path,
+                                              const std::string &backup_name,
+                                              const BackupRow &row);
   void handle_delete_button();
   void load_google_token_cache();
   bool load_google_credentials();

@@ -7,6 +7,7 @@
 #include "core/BackupStore.hpp"
 #include "core/BackupOnlySaves.hpp"
 #include "core/ContentSignature.hpp"
+#include "core/DirWalk.hpp"
 #include "core/GoogleAuth.hpp"
 #include "core/GoogleConfig.hpp"
 #include "core/GoogleDrive.hpp"
@@ -445,6 +446,100 @@ bool ensure_parent_directory(const std::string &path) {
     return true;
   }
   return ensure_directory_path(path.substr(0, slash));
+}
+
+// True for a path a plain restore must never touch through the held savedata mount: PFS
+// integrity/bookkeeping belongs to the console, not the app - the same rule
+// resolve_live_metadata_on_mount_thread's guard applies to a live folder that lacks it. Checked
+// defensively on both sides of a plain restore (clearing the mount and copying into it), because
+// whether a mounted view can even surface sce_pfs is unconfirmed on hardware (see the Task A3
+// report): if it can, skipping only one side would either strand stale bookkeeping behind a copy
+// that never refreshes it, or delete it with nothing to put back.
+bool is_pfs_bookkeeping_path(const std::string &relative_path) {
+  return relative_path == "sce_pfs" || relative_path.compare(0, 8, "sce_pfs/") == 0;
+}
+
+// Removes every direct child of a mounted save directory except sce_pfs, keeping the folder
+// itself (a plain restore repopulates it next, through the same mount). Mirrors
+// BackupArchive.cpp's file-private clear_directory_contents, minus the exclusion, which that
+// helper has no reason to know about since raw restore never operates through a mount.
+bool clear_mounted_save_contents(const std::string &path) {
+  bool ok = true;
+  const bool opened = for_each_dir_entry(path, [&](const DirEntryInfo &entry) {
+    if (std::string(entry.name) == "sce_pfs") {
+      return true;
+    }
+    ok = remove_directory_tree(join_path(path, entry.name)) && ok;
+    return true;
+  });
+  return opened && ok;
+}
+
+bool copy_regular_file_through_mount(const std::string &source_path,
+                                     const std::string &destination_path) {
+  FILE *input = std::fopen(source_path.c_str(), "rb");
+  if (!input) {
+    return false;
+  }
+  FILE *output = std::fopen(destination_path.c_str(), "wb");
+  if (!output) {
+    std::fclose(input);
+    return false;
+  }
+  std::array<unsigned char, 65536> buffer {};
+  bool ok = true;
+  while (true) {
+    const std::size_t read = std::fread(buffer.data(), 1, buffer.size(), input);
+    if (read == 0) {
+      ok = std::feof(input) != 0;
+      break;
+    }
+    if (std::fwrite(buffer.data(), 1, read, output) != read) {
+      ok = false;
+      break;
+    }
+  }
+  const bool closed_output = std::fclose(output) == 0;
+  std::fclose(input);
+  return ok && closed_output;
+}
+
+// Recursively copies source_root's tree into destination_root through a held mount: a real byte
+// copy, not a rename, since a rename cannot cross into a mount (the mount's plaintext view and
+// the extracted work directory are on different filesystems from the mount's perspective).
+// relative_path is the recursion cursor, empty at the top call. Never writes a path under
+// sce_pfs - see is_pfs_bookkeeping_path.
+bool copy_tree_through_mount(const std::string &source_root, const std::string &destination_root,
+                             const std::string &relative_path = {}) {
+  const std::string source_dir =
+      relative_path.empty() ? source_root : join_path(source_root, relative_path);
+  const std::string destination_dir =
+      relative_path.empty() ? destination_root : join_path(destination_root, relative_path);
+  bool ok = true;
+  const bool opened = for_each_dir_entry(source_dir, [&](const DirEntryInfo &entry) {
+    const std::string child_relative =
+        relative_path.empty() ? entry.name : relative_path + "/" + entry.name;
+    if (is_pfs_bookkeeping_path(child_relative)) {
+      return true;
+    }
+    if (!entry.stat_ok) {
+      ok = false;
+      return true;
+    }
+    const std::string destination_path = join_path(destination_dir, entry.name);
+    if (entry.is_directory) {
+      if (!ensure_directory(destination_path.c_str())) {
+        ok = false;
+        return true;
+      }
+      ok = copy_tree_through_mount(source_root, destination_root, child_relative) && ok;
+    } else if (entry.is_regular) {
+      ok = copy_regular_file_through_mount(join_path(source_dir, entry.name), destination_path) &&
+           ok;
+    }
+    return true;
+  });
+  return opened && ok;
 }
 
 bool read_text_file(const char *path, std::string *contents) {
@@ -2334,6 +2429,117 @@ void App::handle_action_button() {
   handle_restore();
 }
 
+RestoreResult App::restore_plain_content_archive(const SaveRecord &save,
+                                                  const std::string &archive_path,
+                                                  const std::string &backup_name,
+                                                  const BackupRow &row) {
+  // Extract to a work directory next to the archive, on the same convention
+  // ensure_local_backup_metadata's own inspection work directory uses: cleared before use (a
+  // previous crash may have left one behind) and removed on every exit path via
+  // BackupInspectionDirectory's destructor. A distinct suffix from restore_backup_archive's own
+  // ".restore-tmp" keeps the two staging areas from ever colliding, even hypothetically.
+  BackupInspectionDirectory work(archive_path + ".restore-plain-tmp");
+  const RestoreResult extracted = extract_backup_archive_for_inspection(
+      archive_path, work.path(), UINT64_MAX,
+      [this](std::uint64_t done, std::uint64_t total) {
+        ui_.draw_busy("Restoring save", static_cast<long long>(done),
+                      static_cast<long long>(total));
+      });
+  if (!extracted.ok) {
+    // Nothing was touched yet: the archive is untouched and the work directory is cleaned up by
+    // BackupInspectionDirectory's destructor.
+    return {false, "could not extract the backup for restore"};
+  }
+
+  const std::string mount_name = acquire_held_save_mount(save.path);
+  if (mount_name.empty()) {
+    // The game must be installed for its save to mount; the archive is untouched, so (re)installing
+    // it and retrying is the recovery.
+    return {false, "could not mount the save for restore"};
+  }
+
+  // Clear the mounted directory's CONTENTS (not the folder itself - the mount stays open over
+  // it) and then COPY the extracted tree back in through the mount: a rename cannot cross into a
+  // mount the way restore_backup_archive's own rename-based swap does for a raw archive, so this
+  // is a real byte copy instead.
+  const bool copied =
+      clear_mounted_save_contents(save.path) && copy_tree_through_mount(work.path(), save.path);
+  // Released on every exit from here on (success or failure alike): this is the only call that
+  // can consume the hold acquired just above.
+  release_held_save_mount(mount_name);
+  if (!copied) {
+    // Partial-failure semantics mirror the existing per-target restore: a failure mid-copy can
+    // leave a partially restored save behind, but the archive itself is untouched, so retrying
+    // the restore is the recovery.
+    return {false, "could not copy the save through the mount"};
+  }
+
+  // Post-restore re-link: the console re-encrypted every file as it was written through the
+  // mount, so the on-disk (unmounted) walk no longer matches this backup's recorded triple.
+  // Re-walking and updating the sidecar restores the same post-restore "no changes since"
+  // behavior a raw restore gets for free from its rename-based swap, which reproduces the
+  // archive's own bytes exactly instead of asking the console to re-encrypt them.
+  bool relink_ok = false;
+  const std::vector<ArchiveEntryInfo> relinked_entries =
+      compute_folder_entries(save.path, &relink_ok);
+  if (relink_ok && !relinked_entries.empty()) {
+    const std::string metadata_path =
+        local_backup_metadata_path(kBackupRoot, save.id, backup_name);
+    const SaveMetadataJsonResult existing = read_save_metadata_json(metadata_path);
+    SaveMetadata updated = existing.ok ? existing.metadata : SaveMetadata{};
+    const std::string fresh_signature = compute_content_signature(relinked_entries);
+    const ContentTotals fresh_totals = compute_content_totals(relinked_entries);
+    updated.content_signature = fresh_signature;
+    updated.content_bytes = static_cast<long long>(fresh_totals.total_bytes);
+    updated.file_count = static_cast<long long>(fresh_totals.file_count);
+    updated.content_known = true;
+    updated.content_format = "plain";
+    std::string write_error;
+    // Best-effort: the restore already succeeded and the save on disk is correct either way. A
+    // failed write here only means this backup's unchanged-check falls back to its old triple
+    // until the next successful write of it (e.g. this save's next backup).
+    write_save_metadata_json_atomic(metadata_path, backup_identity(backup_name), updated,
+                                    &write_error);
+
+    // Mirrors the details view's backfill PATCH, except this one is an unconditional update
+    // rather than a fill-when-empty: the remote-recorded triple is not just missing, it is stale.
+    if (row.has_remote() && google_connected_) {
+      const std::string folder_name = resolved_drive_folder_name(save.id);
+      const auto indexed = drive_index_.find(folder_name);
+      if (indexed != drive_index_.end()) {
+        for (RemoteBackup &backup : indexed->second) {
+          if (backup.name == row.remote_name && !backup.file_id.empty()) {
+            const std::string update_url =
+                std::string(kDriveFilesEndpoint) + "/" + form_url_encode(backup.file_id);
+            const HttpResponse response = drive_request([&](const std::string &token) {
+              return HttpClient().patch_json(
+                  update_url,
+                  build_drive_archive_properties_update_json(
+                      fresh_signature, updated.content_bytes, updated.file_count),
+                  token);
+            });
+            if (response.ok) {
+              // drive_index_ owns the truth; remote_backups_ is its per-save view - keep both
+              // coherent, same as the details-view backfill.
+              backup.content_signature = fresh_signature;
+              backup.content_bytes = updated.content_bytes;
+              backup.file_count = updated.file_count;
+              for (RemoteBackup &view : remote_backups_) {
+                if (view.file_id == backup.file_id) {
+                  view = backup;
+                }
+              }
+            }
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  return {true, {}};
+}
+
 void App::handle_restore() {
   const SaveRecord *selected = selected_save_record();
   const BackupRow *selected_row = selected_backup_row();
@@ -2451,8 +2657,6 @@ void App::handle_restore() {
   }
 
   ui_.draw_busy("Restoring save", 0, -1);
-  RestoreRequest restore_request;
-  restore_request.archive_path = archive_path;
   // Whether an archive is flat or carries prefixes is a property of that archive, not of today's
   // config, so the sidecar decides - and it is read for every restore, not just entries that
   // currently have extras. That matters when folders were included, a backup was taken, and the
@@ -2477,20 +2681,39 @@ void App::handle_restore() {
     sidecar_targets_unsafe = sidecar.ok && !recorded.empty();
     extra_targets = archive_layout_for_record(save).extra_targets;
   }
-  if (extra_targets.empty()) {
-    restore_request.destination_path = save.path;
-  } else {
-    // The savedata destination is supplied here from the live entry, never read from the sidecar,
-    // so a tampered sidecar can only ever aim a directory clear inside ux0:data.
-    for (const TrackedPath &target : restore_targets_for_backup(save.path, extra_targets)) {
-      restore_request.targets.push_back({target.prefix, target.path, target.is_file});
+
+  // Plain archives (Task A2) hold decrypted savedata written through a held PFS mount and must be
+  // restored the same way - the rename-based swap below would drop re-encrypted-on-write bytes
+  // onto disk as if they were the raw on-disk shape and corrupt the save.
+  RestoreResult result;
+  if (archive_has_plain_marker(archive_path)) {
+    if (!extra_targets.empty()) {
+      // Plain archives are single-source by construction: Task A2 only takes the plain path for
+      // saves with no extra tracked folders, so a plain-marked archive recording targets anyway
+      // means something is wrong (a hand-tampered sidecar, or a future bug in A2's own gate).
+      // Refuse rather than guess how to fan a single held mount across several prefixes.
+      result.error = "this backup's format and folder layout are inconsistent";
+    } else {
+      result = restore_plain_content_archive(save, archive_path, backup_name, row);
     }
+  } else {
+    RestoreRequest restore_request;
+    restore_request.archive_path = archive_path;
+    if (extra_targets.empty()) {
+      restore_request.destination_path = save.path;
+    } else {
+      // The savedata destination is supplied here from the live entry, never read from the
+      // sidecar, so a tampered sidecar can only ever aim a directory clear inside ux0:data.
+      for (const TrackedPath &target : restore_targets_for_backup(save.path, extra_targets)) {
+        restore_request.targets.push_back({target.prefix, target.path, target.is_file});
+      }
+    }
+    restore_request.progress = [this](std::uint64_t done, std::uint64_t total) {
+      ui_.draw_busy("Restoring save", static_cast<long long>(done),
+                    static_cast<long long>(total));
+    };
+    result = restore_backup_archive(restore_request);
   }
-  restore_request.progress = [this](std::uint64_t done, std::uint64_t total) {
-    ui_.draw_busy("Restoring save", static_cast<long long>(done),
-                  static_cast<long long>(total));
-  };
-  const RestoreResult result = restore_backup_archive(restore_request);
   restore_confirmation_pending_ = false;
   if (result.ok) {
     if (save.backups_only) {
@@ -3758,7 +3981,17 @@ SaveMetadataJsonResult App::ensure_local_backup_metadata(const SaveRecord &save,
   // Retail backups contain raw PFS-encrypted files, so their embedded sdslot.dat looks like
   // random bytes until the whole save directory is mounted. Extract into an isolated work path;
   // never mount over the live save merely to inspect an old backup.
-  if (recovered.slots.empty()) {
+  //
+  // A plain-content archive (Task A2) is the one exception: its sdslot.dat is already plaintext,
+  // so the read_backup_entry call above already returned the real slot data - recovered.slots
+  // being empty here means the save genuinely has none, not that decryption is still needed.
+  // Extracting and mounting an already-decrypted copy would be both wrong (mounting a plain
+  // folder plants sce_pfs bookkeeping in the extraction work directory - the same rule
+  // resolve_live_metadata_on_mount_thread's guard applies to a live folder that lacks it) and
+  // pointless (mounting cannot make plaintext any more readable than it already is). Checking the
+  // marker rather than re-deriving eligibility keeps this in step with whatever archive shape a
+  // given backup actually has, regardless of the save's current live PFS state.
+  if (recovered.slots.empty() && !archive_has_plain_marker(archive_path)) {
     // AppMgr accepts savedata mounts only from a savedata device root. Use the alternate ur0 root
     // so inspection can never collide with the game's live ux0 save. The fixed title-ID-shaped
     // folder belongs only to Save Keeper and is removed by BackupInspectionDirectory.

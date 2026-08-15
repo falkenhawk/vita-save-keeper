@@ -1061,6 +1061,17 @@ bool extract_archive_to_directory(
       return false;
     }
 
+    // The plain-content marker is a reserved control entry, never real savedata: read past its
+    // data without creating a file, and before it can count against the entry/byte caps or the
+    // timestamp-uniformity check below, so it can never materialize in a restored save or an
+    // inspection directory. Raw archives never contain this name, so their behavior is unchanged.
+    if (header.name == kPlainContentMarkerName) {
+      if (!skip_bytes(zip, header.compressed_size)) {
+        return false;
+      }
+      continue;
+    }
+
     // Inspection accepts cloud-provided ZIPs, so cap both archive expansion and header churn
     // before creating the next file. Save Keeper's own writer is already limited to ZIP32.
     if (++entry_count > 0xffffU || header.uncompressed_size > max_total_bytes - total_bytes) {
@@ -1440,6 +1451,19 @@ bool read_archive_central_directory(const std::string &archive_path,
   std::fclose(input);
   *out = std::move(entries);
   return true;
+}
+
+bool archive_has_plain_marker(const std::string &archive_path) {
+  std::vector<ArchiveEntryInfo> entries;
+  if (!read_archive_central_directory(archive_path, &entries)) {
+    return false;
+  }
+  for (const ArchiveEntryInfo &entry : entries) {
+    if (entry.path == kPlainContentMarkerName) {
+      return true;
+    }
+  }
+  return false;
 }
 
 bool entries_match_backup_archive(const std::vector<ArchiveEntryInfo> &folder_entries,

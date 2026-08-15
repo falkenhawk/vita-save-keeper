@@ -179,6 +179,11 @@ std::vector<ArchiveEntryInfo> compute_sources_entries(
 // read without decompressing anything. False when the file is not one of our readable ZIPs.
 bool read_archive_central_directory(const std::string &archive_path,
                                     std::vector<ArchiveEntryInfo> *out);
+// True iff the archive's central directory lists an entry named kPlainContentMarkerName - it was
+// written decrypted through a held PFS mount (Task A2) and must be restored through one too.
+// False when the central directory itself could not be read, the same failure mode as
+// read_archive_central_directory (corrupt/truncated archive, or not one of our ZIP shapes).
+bool archive_has_plain_marker(const std::string &archive_path);
 // True when the archive's central directory lists exactly the given entries.
 bool entries_match_backup_archive(const std::vector<ArchiveEntryInfo> &folder_entries,
                                   const std::string &archive_path);
