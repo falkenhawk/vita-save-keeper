@@ -870,6 +870,49 @@ void test_save_metadata_json_omits_tracked_targets_for_regular_saves() {
   EXPECT_TRUE(parsed.metadata.tracked_targets.empty());
 }
 
+void test_save_metadata_json_content_triple_round_trip() {
+  vsm::SaveMetadata metadata;
+  metadata.saved_at = {2026, 8, 14, 12, 0, 0};
+  metadata.source = vsm::SaveTimeSource::Filesystem;
+  metadata.content_signature = "40c441899c0a29bd";
+  metadata.content_bytes = 1243;
+  metadata.file_count = 2;
+  metadata.content_known = true;
+
+  const std::string json = vsm::serialize_save_metadata_json("2026-08-14 12-00-00", metadata);
+  EXPECT_TRUE(json.find("\"contentSig\":\"40c441899c0a29bd\"") != std::string::npos);
+
+  const vsm::SaveMetadataJsonResult parsed = vsm::parse_save_metadata_json(json);
+  EXPECT_TRUE(parsed.ok);
+  EXPECT_TRUE(parsed.metadata.content_known);
+  EXPECT_EQ(parsed.metadata.content_signature, std::string("40c441899c0a29bd"));
+  EXPECT_EQ(static_cast<std::size_t>(parsed.metadata.content_bytes),
+            static_cast<std::size_t>(1243));
+  EXPECT_EQ(static_cast<std::size_t>(parsed.metadata.file_count), static_cast<std::size_t>(2));
+  // no contentFormat was set, so the key stays absent and parses back empty
+  EXPECT_TRUE(json.find("contentFormat") == std::string::npos);
+  EXPECT_TRUE(parsed.metadata.content_format.empty());
+
+  // Without the triple the sidecar stays byte-identical to what earlier builds wrote, and a
+  // sidecar missing the fields parses with content_known false.
+  vsm::SaveMetadata plain = metadata;
+  plain.content_known = false;
+  const std::string plain_json = vsm::serialize_save_metadata_json("2026-08-14 12-00-00", plain);
+  EXPECT_TRUE(plain_json.find("contentSig") == std::string::npos);
+  EXPECT_TRUE(!vsm::parse_save_metadata_json(plain_json).metadata.content_known);
+
+  // content_format "plain" round-trips through its own key, independent of the triple.
+  vsm::SaveMetadata plain_format = metadata;
+  plain_format.content_format = "plain";
+  const std::string plain_format_json =
+      vsm::serialize_save_metadata_json("2026-08-14 12-00-00", plain_format);
+  EXPECT_TRUE(plain_format_json.find("\"contentFormat\":\"plain\"") != std::string::npos);
+  const vsm::SaveMetadataJsonResult plain_format_parsed =
+      vsm::parse_save_metadata_json(plain_format_json);
+  EXPECT_TRUE(plain_format_parsed.ok);
+  EXPECT_EQ(plain_format_parsed.metadata.content_format, std::string("plain"));
+}
+
 void test_tracked_targets_safety_confines_restore_destinations() {
   // the RetroArch-shaped set the app records is accepted
   const std::vector<vsm::TrackedPath> good = {
@@ -3974,6 +4017,7 @@ int main() {
   test_save_metadata_json_round_trips_and_ignores_unknown_fields();
   test_save_metadata_json_records_tracked_targets_when_present();
   test_save_metadata_json_omits_tracked_targets_for_regular_saves();
+  test_save_metadata_json_content_triple_round_trip();
   test_tracked_targets_safety_confines_restore_destinations();
   test_legacy_vita_slot_json_is_upgraded_from_utc_to_local_time();
   test_backup_metadata_is_usable_only_for_matching_trustworthy_identity();

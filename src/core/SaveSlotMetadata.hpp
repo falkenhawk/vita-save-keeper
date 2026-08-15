@@ -50,6 +50,18 @@ struct SaveMetadata {
   // made from, so a later config edit cannot silently redirect the restore. Regular saves leave it
   // empty and their sidecar omits the field entirely.
   std::vector<TrackedPath> tracked_targets;
+  // Content triple of the archive this sidecar describes (signature over the entries list, total
+  // uncompressed bytes, file count). Optional at schema v2, same additive pattern as
+  // savedata_paths: absent for sidecars written before the triple existed, and never required.
+  std::string content_signature;
+  long long content_bytes{};
+  long long file_count{};
+  bool content_known{};
+  // Archive content format: empty = entries hold the save's on-disk bytes (every archive before
+  // this field existed, and all homebrew/PSP/tracked archives); "plain" = a retail save's entries
+  // were written decrypted through a PFS mount and must be restored through one. Optional at
+  // schema v2 like the triple; absent keeps old sidecars byte-identical.
+  std::string content_format;
 };
 
 constexpr std::size_t kSdslotHeaderSize = 0x400;

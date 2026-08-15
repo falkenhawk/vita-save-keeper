@@ -520,6 +520,20 @@ std::string serialize_save_metadata_json(const std::string &identity,
     }
     root["savedata_paths"] = picojson::value(std::move(targets));
   }
+
+  // Optional, same additive pattern: present only when the archive's content triple is known, so
+  // a sidecar written before the triple existed stays byte-identical.
+  if (metadata.content_known) {
+    root["contentSig"] = picojson::value(metadata.content_signature);
+    root["contentBytes"] = picojson::value(static_cast<double>(metadata.content_bytes));
+    root["fileCount"] = picojson::value(static_cast<double>(metadata.file_count));
+  }
+
+  // Optional, written only for archives whose entries need a PFS mount to restore correctly;
+  // absent means "as on disk", matching every archive written before this field existed.
+  if (!metadata.content_format.empty()) {
+    root["contentFormat"] = picojson::value(metadata.content_format);
+  }
   return picojson::value(std::move(root)).serialize();
 }
 
@@ -621,6 +635,29 @@ SaveMetadataJsonResult parse_save_metadata_json(const std::string &json) {
       entry.is_file = file && file->is<bool>() && file->get<bool>();
       result.metadata.tracked_targets.push_back(std::move(entry));
     }
+  }
+
+  // Optional, all-or-nothing so a hand-edited half triple never half-applies: a valid 16-char
+  // lowercase-hex signature plus two non-negative numbers, or content_known stays false.
+  std::string content_signature;
+  const picojson::value *content_bytes = json_member(root, "contentBytes");
+  const picojson::value *file_count = json_member(root, "fileCount");
+  if (json_string(root, "contentSig", 16, &content_signature) &&
+      content_signature.size() == 16 &&
+      content_signature.find_first_not_of("0123456789abcdef") == std::string::npos &&
+      content_bytes && content_bytes->is<double>() && content_bytes->get<double>() >= 0 &&
+      file_count && file_count->is<double>() && file_count->get<double>() >= 0) {
+    result.metadata.content_signature = content_signature;
+    result.metadata.content_bytes = static_cast<long long>(content_bytes->get<double>());
+    result.metadata.file_count = static_cast<long long>(file_count->get<double>());
+    result.metadata.content_known = true;
+  }
+
+  // Optional; absence (or a value failing the bound/UTF-8 check) just leaves content_format
+  // empty. No validation of the value's meaning here, that lives at the call sites that use it.
+  std::string content_format;
+  if (json_string(root, "contentFormat", 32, &content_format)) {
+    result.metadata.content_format = content_format;
   }
 
   result.ok = true;
