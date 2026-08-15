@@ -513,6 +513,48 @@ void test_backup_archive_rejects_corrupt_deflate_stream() {
   std::filesystem::remove_all(base);
 }
 
+void test_backup_archive_plain_marker_written_first_and_breaks_cd_match() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-plain-marker-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source");
+  std::ofstream(base / "source" / "data.bin", std::ios::binary) << std::string(2000, 'm');
+
+  vsm::BackupRequest request;
+  request.source_path = (base / "source").string();
+  request.backup_root = (base / "backups").string();
+  request.save_id = "PCSE00120";
+  request.timestamp = {2026, 8, 15, 9, 0, 0};
+  request.compression_level = 6;
+  request.add_plain_marker = true;
+  const vsm::BackupResult result = vsm::create_backup_archive(request);
+  EXPECT_TRUE(result.ok);
+
+  const std::vector<std::string> names = read_zip_central_directory_names(result.archive_path);
+  EXPECT_EQ(names.size(), static_cast<std::size_t>(2));
+  EXPECT_EQ(names[0], std::string(vsm::kPlainContentMarkerName));
+  EXPECT_EQ(names[1], std::string("data.bin"));
+
+  const std::vector<CdEntryShape> shapes = read_zip_central_directory_shapes(result.archive_path);
+  EXPECT_EQ(shapes.size(), static_cast<std::size_t>(2));
+  EXPECT_EQ(static_cast<std::size_t>(shapes[0].method), static_cast<std::size_t>(8));
+  EXPECT_TRUE(shapes[0].compressed_size < shapes[0].uncompressed_size);
+  EXPECT_EQ(static_cast<std::size_t>(shapes[1].method), static_cast<std::size_t>(8));
+  EXPECT_TRUE(shapes[1].compressed_size < shapes[1].uncompressed_size);
+
+  // The marker breaks a plain content-directory comparison against the pre-mount folder walk by
+  // design: the folder never contains the marker, so the count alone can never match. This is the
+  // documented reason plan_backup_creation/matching_backup_name must special-case plain archives
+  // via their recorded sidecar triple instead (Task 3).
+  bool entries_ok = false;
+  const std::vector<vsm::ArchiveEntryInfo> entries =
+      vsm::compute_folder_entries((base / "source").string(), &entries_ok);
+  EXPECT_TRUE(entries_ok);
+  EXPECT_TRUE(!vsm::entries_match_backup_archive(entries, result.archive_path));
+
+  std::filesystem::remove_all(base);
+}
+
 void test_timestamped_backup_name_uses_jksv_style_zip_name() {
   const vsm::BackupTimestamp timestamp{2026, 5, 21, 16, 14, 9};
 
@@ -2202,6 +2244,82 @@ void test_backup_creation_plan_reuses_matching_content_and_counts_collisions() {
                                    {"2026-07-12 01-44-07.zip"});
   EXPECT_TRUE(!plan.reuse_existing);
   EXPECT_EQ(plan.archive_name, "2026-07-12 01-44-07~2 auto.zip");
+
+  std::filesystem::remove_all(base);
+}
+
+void test_backup_creation_plan_content_matches_callback_replaces_cd_comparison() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-plan-content-matches-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source");
+  std::ofstream(base / "source" / "old.bin", std::ios::binary) << "old-bytes";
+
+  const vsm::BackupTimestamp timestamp{2026, 8, 15, 9, 0, 0};
+  vsm::BackupRequest request;
+  request.source_path = (base / "source").string();
+  request.backup_root = (base / "backups").string();
+  request.save_id = "PCSE00120";
+  request.timestamp = timestamp;
+  const vsm::BackupResult existing = vsm::create_backup_archive(request);
+  EXPECT_TRUE(existing.ok);
+  const std::string existing_name =
+      std::filesystem::path(existing.archive_path).filename().string();
+
+  // current_entries deliberately does not describe the existing archive's actual central
+  // directory (a plain-content archive's CD holds decrypted bytes and a marker entry that never
+  // appears in a live folder walk) - the CD comparison alone must reject it.
+  const std::vector<vsm::ArchiveEntryInfo> current_entries = {
+      {"data.bin", 0x11223344u, 9u},
+  };
+  bool entries_ok = false;
+  const std::vector<vsm::ArchiveEntryInfo> actual_folder_entries =
+      vsm::compute_folder_entries((base / "source").string(), &entries_ok);
+  EXPECT_TRUE(entries_ok);
+  EXPECT_TRUE(!vsm::entries_match_backup_archive(current_entries, existing.archive_path));
+  EXPECT_TRUE(vsm::entries_match_backup_archive(actual_folder_entries, existing.archive_path));
+
+  // A fabricated sidecar records a triple matching current_entries's signature - standing in for
+  // the pre-mount walk a plain backup records, which the archive's own (decrypted) CD cannot be
+  // compared against.
+  const std::string signature = vsm::compute_content_signature(current_entries);
+  vsm::SaveMetadata sidecar_metadata;
+  sidecar_metadata.saved_at = {2026, 8, 15, 9, 0, 0};
+  sidecar_metadata.source = vsm::SaveTimeSource::Filesystem;
+  sidecar_metadata.content_signature = signature;
+  sidecar_metadata.content_bytes = 9;
+  sidecar_metadata.file_count = 1;
+  sidecar_metadata.content_known = true;
+  const std::string metadata_path =
+      vsm::local_backup_metadata_path((base / "backups").string(), "PCSE00120", existing_name);
+  std::string write_error;
+  EXPECT_TRUE(vsm::write_save_metadata_json_atomic(
+      metadata_path, vsm::backup_identity(existing_name), sidecar_metadata, &write_error));
+
+  const auto content_matches = [&](const std::string &name) {
+    const vsm::SaveMetadataJsonResult sidecar = vsm::read_save_metadata_json(
+        vsm::local_backup_metadata_path((base / "backups").string(), "PCSE00120", name));
+    if (sidecar.ok && sidecar.archive_identity == vsm::backup_identity(name) &&
+        sidecar.metadata.content_known) {
+      return sidecar.metadata.content_signature == signature;
+    }
+    return vsm::entries_match_backup_archive(
+        current_entries,
+        vsm::local_backup_archive_path((base / "backups").string(), "PCSE00120", name));
+  };
+
+  // With the callback, the sidecar triple wins and the mismatching CD is never consulted.
+  const vsm::BackupCreationPlan plan_with_callback = vsm::plan_backup_creation(
+      timestamp, "", current_entries, (base / "backups").string(), "PCSE00120", {existing_name},
+      {}, true, content_matches);
+  EXPECT_TRUE(plan_with_callback.reuse_existing);
+  EXPECT_EQ(plan_with_callback.archive_name, existing_name);
+
+  // Without a callback, behavior is exactly as before: the CD comparison alone, which fails here.
+  const vsm::BackupCreationPlan plan_without_callback = vsm::plan_backup_creation(
+      timestamp, "", current_entries, (base / "backups").string(), "PCSE00120", {existing_name},
+      {});
+  EXPECT_TRUE(!plan_without_callback.reuse_existing);
 
   std::filesystem::remove_all(base);
 }
@@ -4035,6 +4153,7 @@ int main() {
   test_backup_archive_probation_stores_mixed_incompressible_prefix();
   test_backup_archive_compressed_round_trip_restores_identical_bytes();
   test_backup_archive_rejects_corrupt_deflate_stream();
+  test_backup_archive_plain_marker_written_first_and_breaks_cd_match();
   test_detail_view_sizes_from_folder_and_archive();
   test_save_fingerprint_reflects_folder_content();
   test_scan_fingerprints_every_save_and_flags_mount_requiring_ones();
@@ -4062,6 +4181,7 @@ int main() {
   test_backup_archive_extracts_to_isolated_inspection_directory_and_cleans_up();
   test_backup_archive_explicit_name_never_overwrites();
   test_backup_creation_plan_reuses_matching_content_and_counts_collisions();
+  test_backup_creation_plan_content_matches_callback_replaces_cd_comparison();
   test_backup_archive_restores_snapshot_and_removes_stale_files();
   test_compute_folder_entries_reports_crc_progress();
   test_restore_and_inspection_report_archive_byte_progress();

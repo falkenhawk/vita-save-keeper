@@ -507,30 +507,38 @@ std::string token_error_text(const TokenResponse &response) {
   return response.error.empty() ? "invalid token response" : response.error;
 }
 
+// Whether an existing local backup named "name" carries the given content: prefers the sidecar's
+// recorded triple (the on-disk walk at creation time), which is the only valid source for a
+// plain-content archive whose central directory holds decrypted bytes and a marker entry that
+// never appears in a live folder walk; falls back to a central-directory comparison against
+// entries when no usable sidecar triple is recorded (older archives, raw archives never re-linked
+// with a sidecar). entries_signature is compute_content_signature(entries) - passed in so a
+// caller checking several candidate names only computes it once. File-scope so both
+// matching_backup_name below and create_local_snapshot's plan_backup_creation callback share it.
+bool backup_content_matches(const std::string &entries_signature,
+                            const std::vector<ArchiveEntryInfo> &entries,
+                            const std::string &save_id, const std::string &name) {
+  // Identity-gated but not save_metadata_is_usable: that helper also demands a trusted time
+  // source, which has nothing to do with whether the recorded triple is valid here.
+  const SaveMetadataJsonResult sidecar =
+      read_save_metadata_json(local_backup_metadata_path(kBackupRoot, save_id, name));
+  if (sidecar.ok && sidecar.archive_identity == backup_identity(name) &&
+      sidecar.metadata.content_known) {
+    return sidecar.metadata.content_signature == entries_signature;
+  }
+  return entries_match_backup_archive(entries,
+                                      local_backup_archive_path(kBackupRoot, save_id, name));
+}
+
 // Name of the local archive whose contents equal the given folder signature, or empty. Content is
 // compared against every archive, not just the newest: matching an older one still means the
 // bytes are preserved, and a new zip of them would only duplicate it under another timestamp.
-// Comparison prefers the sidecar-recorded triple (the on-disk walk at creation time), which is
-// the only valid source for a plain-content archive whose central directory holds decrypted
-// data; archives without a recorded triple fall back to the central-directory comparison.
 std::string matching_backup_name(const std::vector<ArchiveEntryInfo> &entries,
                                  const std::string &save_id,
                                  const std::vector<std::string> &backup_names) {
   const std::string signature = compute_content_signature(entries);
   for (const std::string &existing : backup_names) {
-    // Identity-gated but not save_metadata_is_usable: that helper also demands a trusted time
-    // source, which has nothing to do with whether the recorded triple is valid here.
-    const SaveMetadataJsonResult sidecar =
-        read_save_metadata_json(local_backup_metadata_path(kBackupRoot, save_id, existing));
-    if (sidecar.ok && sidecar.archive_identity == backup_identity(existing) &&
-        sidecar.metadata.content_known) {
-      if (sidecar.metadata.content_signature == signature) {
-        return existing;
-      }
-      continue;
-    }
-    if (entries_match_backup_archive(entries,
-                                     local_backup_archive_path(kBackupRoot, save_id, existing))) {
+    if (backup_content_matches(signature, entries, save_id, existing)) {
       return existing;
     }
   }
@@ -743,11 +751,29 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
   }
 
   const BackupTimestamp timestamp = backup_timestamp_from(metadata.saved_at);
+  // Computed once and reused by the reuse callback below for every candidate name it checks,
+  // rather than recomputing it per candidate.
+  const std::string entries_signature = compute_content_signature(entries);
+  const auto content_matches = [&](const std::string &name) {
+    return backup_content_matches(entries_signature, entries, save.id, name);
+  };
   const BackupCreationPlan plan =
       plan_backup_creation(timestamp, suffix, entries, kBackupRoot, save.id, local_names,
-                           remote_names, !force_new);
+                           remote_names, !force_new, content_matches);
   snapshot.archive_name = plan.archive_name;
   snapshot.reused = plan.reuse_existing;
+  const std::string metadata_path =
+      local_backup_metadata_path(kBackupRoot, save.id, plan.archive_name);
+
+  // Whether the archive now backing plan.archive_name actually holds decrypted (plain) content.
+  // Newly created below: exactly what plain_content decides, since this call just built it either
+  // way. Reused: whatever the matched archive's own sidecar already says - the triple that
+  // matched it describes the save's logical content the same way regardless of format (Task 8's
+  // pre-mount walk never depends on how the archive stores it), so an unchanged save can reuse a
+  // raw archive recorded before this device ever ran plain backups, and that archive's sidecar
+  // must keep saying raw (content_format empty), never get relabeled "plain" just because this
+  // save happens to be plain-eligible now.
+  bool content_is_plain = false;
 
   // Matching content at this exact save-time identity is already safely backed up. Reuse it;
   // otherwise create the pre-allocated name exclusively so a collision can never overwrite it.
@@ -782,7 +808,38 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
       };
     }
     request.cancel_check = cancel_check;
+
+    // Eligible retail saves are archived DECRYPTED through a held PFS mount: entries above were
+    // already walked unmounted (that walk is the recorded triple), and the archive gets the
+    // plain-content marker so an app version predating deflate support refuses the whole archive
+    // instead of restoring decrypted bytes as if they were the raw on-disk shape. Level 0 keeps
+    // the legacy raw path entirely - the escape hatch if PFS-mount backups misbehave. PSP and
+    // plain (non-PFS) folders never mount; bundled extra folders keep raw shape too (a single held
+    // mount cannot represent archive_sources' several live directories, and the gate above already
+    // requires extra_paths to be empty here).
+    const bool plain_content = save.extra_paths.empty() &&
+                               save.platform != SavePlatform::Psp &&
+                               backup_compression_level_ >= 1 &&
+                               save_directory_has_pfs_metadata(save.path);
+    std::string mount_name;
+    if (plain_content) {
+      request.add_plain_marker = true;
+      mount_name = acquire_held_save_mount(save.path);
+      if (mount_name.empty()) {
+        // Never fall back to a raw archive here: a silently ambiguous archive format (decrypted
+        // bytes with no marker, or vice versa) is worse than a backup the user can simply retry.
+        remove_local_backup_folder_if_empty(kBackupRoot, save.id);
+        snapshot.canceled = end_cancelable_transfer();
+        snapshot.error = "could not mount the save for backup";
+        return snapshot;
+      }
+    }
     const BackupResult backup = create_backup_archive(request);
+    // Released on every exit from here (success, error, cancel alike): this is the only call that
+    // can consume the hold, so one straight-line release right after it covers all three.
+    if (plain_content) {
+      release_held_save_mount(mount_name);
+    }
     if (!backup.ok) {
       // create_backup_archive makes the folder before any failure it can realistically hit here,
       // and removes its own partial archive - a cancel leaves nothing behind either.
@@ -791,6 +848,10 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
       snapshot.error = backup.error;
       return snapshot;
     }
+    content_is_plain = plain_content;
+  } else {
+    const SaveMetadataJsonResult existing_sidecar = read_save_metadata_json(metadata_path);
+    content_is_plain = existing_sidecar.ok && existing_sidecar.metadata.content_format == "plain";
   }
   end_cancelable_transfer();
 
@@ -798,15 +859,16 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
   // hashes - never the archive's central directory, which a plain-content archive fills with
   // decrypted data. entries is guaranteed non-empty here (checked above), so the empty-list
   // signature can never be recorded.
-  metadata.content_signature = compute_content_signature(entries);
+  metadata.content_signature = entries_signature;
   const ContentTotals totals = compute_content_totals(entries);
   metadata.content_bytes = static_cast<long long>(totals.total_bytes);
   metadata.file_count = static_cast<long long>(totals.file_count);
   metadata.content_known = true;
+  if (content_is_plain) {
+    metadata.content_format = "plain";
+  }
 
   std::string metadata_error;
-  const std::string metadata_path =
-      local_backup_metadata_path(kBackupRoot, save.id, plan.archive_name);
   if (!write_save_metadata_json_atomic(metadata_path, backup_identity(plan.archive_name),
                                        metadata, &metadata_error)) {
     // The archive remains a valid whole-save backup. Details can be recovered from it later when
@@ -4330,7 +4392,12 @@ BackupUploadResult App::upload_local_backup_impl(const SaveRecord &save,
   bool triple_ok = false;
   const SaveMetadataJsonResult sidecar_for_triple =
       read_save_metadata_json(local_backup_metadata_path(kBackupRoot, save.id, backup_name));
-  if (save_metadata_is_usable(sidecar_for_triple, backup_identity(backup_name)) &&
+  // Identity-gated but not save_metadata_is_usable: that helper also demands a trusted time
+  // source, which is irrelevant to whether the recorded triple is valid here - and without this,
+  // a plain-content archive whose sidecar happens to carry a BackupClock time would fail this
+  // check, fall to the CD fallback, which the marker entry refuses, and upload with no triple at
+  // all (see the same rationale in backup_content_matches above).
+  if (sidecar_for_triple.ok && sidecar_for_triple.archive_identity == backup_identity(backup_name) &&
       sidecar_for_triple.metadata.content_known) {
     triple.signature = sidecar_for_triple.metadata.content_signature;
     triple.bytes = sidecar_for_triple.metadata.content_bytes;

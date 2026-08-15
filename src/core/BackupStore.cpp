@@ -190,14 +190,12 @@ std::string allocate_backup_name(const BackupTimestamp &timestamp, const std::st
   }
 }
 
-BackupCreationPlan plan_backup_creation(const BackupTimestamp &timestamp,
-                                        const std::string &suffix,
-                                        const std::vector<ArchiveEntryInfo> &current_entries,
-                                        const std::string &backup_root,
-                                        const std::string &save_id,
-                                        const std::vector<std::string> &local_names,
-                                        const std::vector<std::string> &remote_names,
-                                        bool reuse_matching_archive) {
+BackupCreationPlan plan_backup_creation(
+    const BackupTimestamp &timestamp, const std::string &suffix,
+    const std::vector<ArchiveEntryInfo> &current_entries, const std::string &backup_root,
+    const std::string &save_id, const std::vector<std::string> &local_names,
+    const std::vector<std::string> &remote_names, bool reuse_matching_archive,
+    const std::function<bool(const std::string &backup_name)> &content_matches) {
   for (unsigned int counter = 0;; counter = counter == 0 ? 2 : counter + 1) {
     const std::string candidate = candidate_name(timestamp, suffix, counter);
     const std::string identity = backup_identity(candidate);
@@ -207,9 +205,12 @@ BackupCreationPlan plan_backup_creation(const BackupTimestamp &timestamp,
         if (backup_identity(local_name) != identity) {
           continue;
         }
-        if (entries_match_backup_archive(
-                current_entries,
-                local_backup_archive_path(backup_root, save_id, local_name))) {
+        const bool matches =
+            content_matches
+                ? content_matches(local_name)
+                : entries_match_backup_archive(
+                      current_entries, local_backup_archive_path(backup_root, save_id, local_name));
+        if (matches) {
           return {local_name, true};
         }
       }

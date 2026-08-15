@@ -47,6 +47,11 @@ struct BackupRequest {
   // Every reader accepts both shapes, and the central directory always carries the uncompressed
   // CRC32 and size, so change detection is identical either way.
   int compression_level{};
+  // Writes the plain-content marker as the archive's first entry (kPlainContentMarkerName).
+  // Set only by the App's plain backup path together with compression_level >= 1; the marker's
+  // repetitive content always deflates, so app versions that predate deflate support refuse the
+  // whole archive instead of restoring decrypted bytes as if they were raw.
+  bool add_plain_marker{};
 };
 
 struct BackupResult {

@@ -619,6 +619,72 @@ DeflateOutcome write_deflated_file_data(FILE *zip, const std::string &source_pat
   return outcome;
 }
 
+// Deflates a small in-memory buffer to completion. Used only for the plain-content marker, which
+// is a handful of bytes, so a whole-buffer round trip is simpler than reusing the streaming writer
+// above and costs nothing measurable.
+bool deflate_buffer(const unsigned char *data, std::size_t size, int level,
+                    std::vector<unsigned char> *out) {
+  z_stream stream {};
+  if (deflateInit2(&stream, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+    return false;
+  }
+  std::array<unsigned char, 256> out_buffer {};
+  stream.next_in = const_cast<unsigned char *>(data);
+  stream.avail_in = static_cast<uInt>(size);
+  int status = Z_OK;
+  bool ok = true;
+  do {
+    stream.next_out = out_buffer.data();
+    stream.avail_out = static_cast<uInt>(out_buffer.size());
+    status = deflate(&stream, Z_FINISH);
+    if (status != Z_OK && status != Z_STREAM_END) {
+      ok = false;
+      break;
+    }
+    const std::size_t produced = out_buffer.size() - stream.avail_out;
+    out->insert(out->end(), out_buffer.data(), out_buffer.data() + produced);
+  } while (status != Z_STREAM_END);
+  deflateEnd(&stream);
+  return ok;
+}
+
+// Writes the plain-content marker (kPlainContentMarkerName) as a complete, self-contained entry:
+// its content and size are fixed and tiny, so - unlike the streaming file writer above - both the
+// compressed size and the CRC are known before the local header goes out, and no placeholder patch
+// is needed afterward. Always method 8: the marker's repetitive 66-byte content deflates on any
+// zlib level, and admitting method 0 here would let an app version that predates deflate support
+// read mounted decrypted bytes as if they were the archive's raw on-disk shape (see
+// BackupRequest::add_plain_marker). level is clamped to at least 1 defensively - the marker is
+// only ever requested alongside compression_level >= 1, but a caller that got that wrong must
+// still never produce a store entry here.
+bool write_plain_marker_entry(FILE *zip, int level, const ZipTimestamp &timestamp,
+                              ZipEntry *out_entry) {
+  static const std::string kMarkerLine = "save-keeper plain-content marker\n";
+  const std::string content = kMarkerLine + kMarkerLine;
+
+  ZipEntry entry;
+  entry.zip_path = kPlainContentMarkerName;
+  entry.modified_at = timestamp;
+  entry.crc32 =
+      update_crc32(0, reinterpret_cast<const unsigned char *>(content.data()), content.size());
+  entry.size = static_cast<std::uint32_t>(content.size());
+  entry.method = 8;
+
+  std::vector<unsigned char> compressed;
+  if (!deflate_buffer(reinterpret_cast<const unsigned char *>(content.data()), content.size(),
+                      std::max(1, level), &compressed)) {
+    return false;
+  }
+  entry.compressed_size = static_cast<std::uint32_t>(compressed.size());
+
+  if (!write_local_header(zip, &entry, timestamp) ||
+      !write_bytes(zip, compressed.data(), compressed.size())) {
+    return false;
+  }
+  *out_entry = entry;
+  return true;
+}
+
 // Writes one entry's data: a placeholder local header (entry->method and entry->compressed_size
 // must already hold the entry's chosen method and its placeholder size, e.g. entry->size), then
 // either a stored copy or a deflate attempt that falls back to store when it does not shrink the
@@ -1096,7 +1162,7 @@ BackupResult create_backup_archive(const BackupRequest &request) {
   } else if (!collect_files(request.source_path, "", &entries)) {
     return error_result(archive_path, "could not read source directory");
   }
-  if (entries.size() > 0xffffU) {
+  if (entries.size() + (request.add_plain_marker ? 1u : 0u) > 0xffffU) {
     return error_result(archive_path, "too many files for simple ZIP archive");
   }
 
@@ -1170,8 +1236,21 @@ BackupResult create_backup_archive(const BackupRequest &request) {
                        : std::function<void(std::size_t)>();
 
   const int level = std::max(0, std::min(request.compression_level, 9));
+
+  // The marker (when requested) is written first and outside the entries vector: it has no
+  // source_path, so it does not go through write_entry_data's file-based streaming, and its final
+  // sizes are known up front (write_plain_marker_entry needs no placeholder patch). It still
+  // participates in the central directory and entry count like any entry, listed first.
+  ZipEntry marker_entry;
   bool ok = true;
+  if (request.add_plain_marker) {
+    ok = write_plain_marker_entry(zip, level, to_zip_timestamp(request.timestamp), &marker_entry);
+  }
+
   for (ZipEntry &entry : entries) {
+    if (!ok) {
+      break;
+    }
     entry.method = (level > 0 && entry.size > 0) ? 8 : 0;
     entry.compressed_size = entry.size;
     if (!write_entry_data(zip, &entry, level, on_bytes, request.cancel_check)) {
@@ -1183,11 +1262,14 @@ BackupResult create_backup_archive(const BackupRequest &request) {
   std::uint32_t central_directory_offset = 0;
   std::uint32_t central_directory_end = 0;
   if (ok && current_offset(zip, &central_directory_offset)) {
+    if (request.add_plain_marker) {
+      ok = write_central_directory_entry(zip, marker_entry, marker_entry.modified_at);
+    }
     for (const ZipEntry &entry : entries) {
-      ok = write_central_directory_entry(zip, entry, entry.modified_at);
       if (!ok) {
         break;
       }
+      ok = write_central_directory_entry(zip, entry, entry.modified_at);
     }
     ok = ok && current_offset(zip, &central_directory_end);
   } else {
@@ -1197,8 +1279,10 @@ BackupResult create_backup_archive(const BackupRequest &request) {
   if (ok) {
     const std::uint32_t central_directory_size =
         central_directory_end - central_directory_offset;
-    ok = write_end_of_central_directory(zip, static_cast<std::uint16_t>(entries.size()),
-                                        central_directory_size, central_directory_offset);
+    const std::uint16_t total_entry_count = static_cast<std::uint16_t>(
+        entries.size() + (request.add_plain_marker ? 1u : 0u));
+    ok = write_end_of_central_directory(zip, total_entry_count, central_directory_size,
+                                        central_directory_offset);
   }
 
   if (std::fclose(zip) != 0) {

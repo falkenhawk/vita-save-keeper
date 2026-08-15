@@ -4,6 +4,7 @@
 #include "core/BackupName.hpp"
 
 #include <cstddef>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -42,14 +43,18 @@ struct BackupCreationPlan {
   bool reuse_existing{};
 };
 
-BackupCreationPlan plan_backup_creation(const BackupTimestamp &timestamp,
-                                        const std::string &suffix,
-                                        const std::vector<ArchiveEntryInfo> &current_entries,
-                                        const std::string &backup_root,
-                                        const std::string &save_id,
-                                        const std::vector<std::string> &local_names,
-                                        const std::vector<std::string> &remote_names,
-                                        bool reuse_matching_archive = true);
+// content_matches, when non-empty, REPLACES the default central-directory comparison
+// (entries_match_backup_archive against current_entries) for every reuse candidate: a
+// plain-content archive's central directory holds decrypted bytes and a marker entry that
+// current_entries never has, so it can never agree with a live folder walk, and the caller's
+// callback is the only way to compare such an archive correctly (typically by preferring a
+// sidecar-recorded triple).
+BackupCreationPlan plan_backup_creation(
+    const BackupTimestamp &timestamp, const std::string &suffix,
+    const std::vector<ArchiveEntryInfo> &current_entries, const std::string &backup_root,
+    const std::string &save_id, const std::vector<std::string> &local_names,
+    const std::vector<std::string> &remote_names, bool reuse_matching_archive = true,
+    const std::function<bool(const std::string &backup_name)> &content_matches = {});
 
 // Publishes a completed same-folder download without replacing an existing backup. The temporary
 // file is removed on both success and failure; a successfully published ZIP is never tied to the
