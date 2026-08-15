@@ -6,6 +6,7 @@
 #include "core/BackupName.hpp"
 #include "core/BackupStore.hpp"
 #include "core/BackupOnlySaves.hpp"
+#include "core/ContentSignature.hpp"
 #include "core/GoogleAuth.hpp"
 #include "core/GoogleConfig.hpp"
 #include "core/GoogleDrive.hpp"
@@ -759,6 +760,16 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
     }
   }
   end_cancelable_transfer();
+
+  // The triple describes the save's on-disk (unmounted) bytes - the same walk the unchanged-check
+  // hashes - never the archive's central directory, which a plain-content archive fills with
+  // decrypted data. entries is guaranteed non-empty here (checked above), so the empty-list
+  // signature can never be recorded.
+  metadata.content_signature = compute_content_signature(entries);
+  const ContentTotals totals = compute_content_totals(entries);
+  metadata.content_bytes = static_cast<long long>(totals.total_bytes);
+  metadata.file_count = static_cast<long long>(totals.file_count);
+  metadata.content_known = true;
 
   std::string metadata_error;
   const std::string metadata_path =
@@ -2828,7 +2839,9 @@ bool App::sync_drive_index() {
       }
       const auto folder = folder_id_to_name.find(file.parent_id);
       if (folder != folder_id_to_name.end()) {
-        drive_index_[folder->second].push_back({file.name, file.id, file.size_bytes});
+        drive_index_[folder->second].push_back({file.name, file.id, file.size_bytes,
+                                                 file.content_signature, file.content_bytes,
+                                                 file.file_count});
       }
     }
     page_token = list.next_page_token;
@@ -3272,6 +3285,24 @@ long long App::remote_size_for(const std::string &remote_name) const {
     }
   }
   return 0;
+}
+
+bool App::compute_raw_archive_content_triple(const std::string &archive_path,
+                                             ArchiveContentTriple *out) const {
+  std::vector<ArchiveEntryInfo> entries;
+  if (!read_archive_central_directory(archive_path, &entries) || entries.empty()) {
+    return false;
+  }
+  for (const ArchiveEntryInfo &entry : entries) {
+    if (entry.path == kPlainContentMarkerName) {
+      return false;
+    }
+  }
+  out->signature = compute_content_signature(entries);
+  const ContentTotals totals = compute_content_totals(entries);
+  out->bytes = static_cast<long long>(totals.total_bytes);
+  out->files = static_cast<long long>(totals.file_count);
+  return true;
 }
 
 // Actual Drive folder holding this save's backups: either the bare key created by older versions
@@ -4051,10 +4082,33 @@ BackupUploadResult App::upload_local_backup_impl(const SaveRecord &save,
   }
 
   const std::string archive_path = local_backup_archive_path(kBackupRoot, save.id, backup_name);
+
+  // Publish the content triple alongside the upload: the sidecar's recorded triple (from the
+  // pre-backup unmounted walk) is authoritative and the only valid source once plain-content
+  // archives exist; fall back to the archive's own central directory only when no usable sidecar
+  // carries one (older archives, or a raw archive uploaded with no walk available) - the fallback
+  // itself refuses plain-content archives via their marker entry.
+  ArchiveContentTriple triple;
+  bool triple_ok = false;
+  const SaveMetadataJsonResult sidecar_for_triple =
+      read_save_metadata_json(local_backup_metadata_path(kBackupRoot, save.id, backup_name));
+  if (save_metadata_is_usable(sidecar_for_triple, backup_identity(backup_name)) &&
+      sidecar_for_triple.metadata.content_known) {
+    triple.signature = sidecar_for_triple.metadata.content_signature;
+    triple.bytes = sidecar_for_triple.metadata.content_bytes;
+    triple.files = sidecar_for_triple.metadata.file_count;
+    triple_ok = true;
+  } else {
+    triple_ok = compute_raw_archive_content_triple(archive_path, &triple);
+  }
+  const std::string upload_metadata =
+      triple_ok ? build_drive_archive_upload_metadata_json(backup_name, folder_id,
+                                                            triple.signature, triple.bytes,
+                                                            triple.files)
+                : build_drive_upload_metadata_json(backup_name, folder_id);
   const HttpResponse upload_response = drive_request([&](const std::string &token) {
-    return HttpClient().post_multipart_file(
-        kDriveUploadEndpoint, build_drive_upload_metadata_json(backup_name, folder_id),
-        archive_path, "application/zip", token);
+    return HttpClient().post_multipart_file(kDriveUploadEndpoint, upload_metadata, archive_path,
+                                            "application/zip", token);
   });
   if (!upload_response.ok) {
     set_status(StatusKind::Error, "Cloud upload failed.");
@@ -4075,7 +4129,9 @@ BackupUploadResult App::upload_local_backup_impl(const SaveRecord &save,
   if (uploaded.ok && !uploaded.files.empty()) {
     archive_file_id = uploaded.files[0].id;
     std::vector<RemoteBackup> &list = drive_index_[folder_name];
-    list.push_back({uploaded.files[0].name, uploaded.files[0].id});
+    list.push_back({uploaded.files[0].name, uploaded.files[0].id, 0,
+                    triple_ok ? triple.signature : std::string(),
+                    triple_ok ? triple.bytes : 0, triple_ok ? triple.files : 0});
     std::sort(list.begin(), list.end(),
               [](const RemoteBackup &a, const RemoteBackup &b) { return a.name > b.name; });
     refresh_cloud_ahead_marks();

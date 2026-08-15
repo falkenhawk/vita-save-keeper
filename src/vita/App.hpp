@@ -34,6 +34,21 @@ struct RemoteBackup {
   // From the Drive listing; 0 when Drive did not report a size. Lets the details view show a
   // Cloud-only backup's ZIP size without downloading it.
   long long size_bytes{};
+  // Content triple from the archive's appProperties; signature empty when Drive has none
+  // recorded (pre-triple uploads, hand-copied files).
+  std::string content_signature;
+  long long content_bytes{};
+  long long file_count{};
+};
+
+// Content triple of a local archive: signature over its entries, total uncompressed bytes, and
+// file count. Either recorded at creation from the live folder walk (authoritative) or derived
+// from a raw archive's central directory as a fallback - see
+// App::compute_raw_archive_content_triple.
+struct ArchiveContentTriple {
+  std::string signature;
+  long long bytes{};
+  long long files{};
 };
 
 struct LocalSnapshotResult {
@@ -287,6 +302,13 @@ private:
   void focus_backup_row_by_identity(const std::string &backup_name);
   std::string remote_file_id_for(const std::string &remote_name) const;
   long long remote_size_for(const std::string &remote_name) const;
+  // Content triple of a local archive, derived from its central directory. Only valid for
+  // archives whose entries hold the on-disk bytes: refused (returns false) when the archive
+  // carries the plain-content marker entry, whose CD describes decrypted data, or when the CD is
+  // unreadable or empty. Prefer the sidecar-recorded triple; this exists for archives that
+  // predate it (or a future upload of a raw archive with no sidecar walk available).
+  bool compute_raw_archive_content_triple(const std::string &archive_path,
+                                          ArchiveContentTriple *out) const;
   void perform_scoped_delete(bool delete_local, bool delete_remote);
   // Start on the live-save ("New Backup") row: deletes the savedata itself, so a game can start
   // over - the one save action the system UI never offers. Hard-gated: a local backup of the

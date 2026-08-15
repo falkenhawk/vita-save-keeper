@@ -122,6 +122,10 @@ struct ArchiveEntryInfo {
   std::uint32_t size{};
 };
 
+// Marker entry carried by plain-content archives (entries written decrypted through a PFS mount).
+// Old app versions reject the whole archive because this entry is always deflate-compressed.
+constexpr const char *kPlainContentMarkerName = ".save-keeper-plain";
+
 struct ArchiveReadResult {
   bool ok{};
   std::vector<unsigned char> data;
