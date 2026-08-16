@@ -555,6 +555,92 @@ void test_backup_archive_plain_marker_written_first_and_breaks_cd_match() {
   std::filesystem::remove_all(base);
 }
 
+void test_comparison_entries_ignores_sce_pfs_on_the_folder_side() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-sce-pfs-comparison-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source");
+  std::ofstream(base / "source" / "data.bin", std::ios::binary) << "save-bytes";
+
+  vsm::BackupRequest request;
+  request.source_path = (base / "source").string();
+  request.backup_root = (base / "backups").string();
+  request.save_id = "PCSE00120";
+  request.timestamp = {2026, 8, 16, 9, 0, 0};
+  request.compression_level = 6;
+  const vsm::BackupResult result = vsm::create_backup_archive(request);
+  EXPECT_TRUE(result.ok);
+
+  bool entries_ok = false;
+  const std::vector<vsm::ArchiveEntryInfo> baseline_entries =
+      vsm::compute_folder_entries((base / "source").string(), &entries_ok);
+  EXPECT_TRUE(entries_ok);
+  EXPECT_TRUE(vsm::entries_match_backup_archive(baseline_entries, result.archive_path));
+
+  // The live folder grows sce_pfs bookkeeping the archive never had - mirrors a held-mount
+  // session dirtying it between backups (App.cpp's is_pfs_bookkeeping_path/is_protected_special_
+  // path reasoning). A folder with this extra file must still read as unchanged.
+  std::filesystem::create_directories(base / "source" / "sce_pfs");
+  std::ofstream(base / "source" / "sce_pfs" / "files.db", std::ios::binary) << "pfs-bookkeeping";
+
+  bool with_pfs_ok = false;
+  const std::vector<vsm::ArchiveEntryInfo> with_pfs_entries =
+      vsm::compute_folder_entries((base / "source").string(), &with_pfs_ok);
+  EXPECT_TRUE(with_pfs_ok);
+  EXPECT_EQ(with_pfs_entries.size(), baseline_entries.size() + 1);
+  EXPECT_TRUE(vsm::entries_match_backup_archive(with_pfs_entries, result.archive_path));
+
+  // The signature ignores sce_pfs the same way: identical with or without it present, even though
+  // the raw (unfiltered) signature does change.
+  EXPECT_EQ(vsm::compute_content_signature(vsm::comparison_entries(with_pfs_entries)),
+            vsm::compute_content_signature(vsm::comparison_entries(baseline_entries)));
+  EXPECT_TRUE(vsm::compute_content_signature(with_pfs_entries) !=
+              vsm::compute_content_signature(baseline_entries));
+
+  std::filesystem::remove_all(base);
+}
+
+void test_entries_match_backup_archive_ignores_sce_pfs_on_the_archive_side_too() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-sce-pfs-legacy-archive-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source" / "sce_pfs");
+  std::ofstream(base / "source" / "data.bin", std::ios::binary) << "save-bytes";
+  std::ofstream(base / "source" / "sce_pfs" / "files.db", std::ios::binary) << "old-pfs-bytes";
+
+  vsm::BackupRequest request;
+  request.source_path = (base / "source").string();
+  request.backup_root = (base / "backups").string();
+  request.save_id = "PCSE00120";
+  request.timestamp = {2026, 8, 16, 9, 30, 0};
+  request.compression_level = 6;
+  const vsm::BackupResult result = vsm::create_backup_archive(request);
+  EXPECT_TRUE(result.ok);
+  // The archive's central directory now lists sce_pfs/files.db, exactly like every raw archive
+  // this app has ever written (the writer never excluded it - only comparisons do).
+
+  // sce_pfs churns between sessions independent of the save itself; this archive must stay
+  // matchable whether the live folder's copy is now absent...
+  std::filesystem::remove_all(base / "source" / "sce_pfs");
+  bool without_pfs_ok = false;
+  const std::vector<vsm::ArchiveEntryInfo> entries_without_pfs =
+      vsm::compute_folder_entries((base / "source").string(), &without_pfs_ok);
+  EXPECT_TRUE(without_pfs_ok);
+  EXPECT_TRUE(vsm::entries_match_backup_archive(entries_without_pfs, result.archive_path));
+
+  // ...or present with entirely different bytes (a later mount's own bookkeeping write).
+  std::filesystem::create_directories(base / "source" / "sce_pfs");
+  std::ofstream(base / "source" / "sce_pfs" / "files.db", std::ios::binary)
+      << "different-session-pfs-bytes";
+  bool with_different_pfs_ok = false;
+  const std::vector<vsm::ArchiveEntryInfo> entries_with_different_pfs =
+      vsm::compute_folder_entries((base / "source").string(), &with_different_pfs_ok);
+  EXPECT_TRUE(with_different_pfs_ok);
+  EXPECT_TRUE(vsm::entries_match_backup_archive(entries_with_different_pfs, result.archive_path));
+
+  std::filesystem::remove_all(base);
+}
+
 void test_archive_has_plain_marker_and_restore_extraction_skips_it() {
   const std::filesystem::path base =
       std::filesystem::temp_directory_path() / "save-keeper-plain-marker-restore-test";
@@ -4253,6 +4339,8 @@ int main() {
   test_backup_archive_compressed_round_trip_restores_identical_bytes();
   test_backup_archive_rejects_corrupt_deflate_stream();
   test_backup_archive_plain_marker_written_first_and_breaks_cd_match();
+  test_comparison_entries_ignores_sce_pfs_on_the_folder_side();
+  test_entries_match_backup_archive_ignores_sce_pfs_on_the_archive_side_too();
   test_archive_has_plain_marker_and_restore_extraction_skips_it();
   test_detail_view_sizes_from_folder_and_archive();
   test_save_fingerprint_reflects_folder_content();

@@ -4,6 +4,7 @@
 
 #include "core/BackupArchive.hpp"
 
+#include "core/ContentSignature.hpp"
 #include "core/DirWalk.hpp"
 #include "core/PathUtil.hpp"
 
@@ -994,7 +995,8 @@ bool extract_file(FILE *zip, const LocalZipHeader &header, const std::string &de
 bool extract_archive_to_directory(
     FILE *zip, const std::string &destination_path, std::uint64_t max_total_bytes,
     bool *file_timestamps_uniform = nullptr,
-    const std::function<void(std::uint64_t, std::uint64_t)> &progress = {}) {
+    const std::function<void(std::uint64_t, std::uint64_t)> &progress = {},
+    std::uint64_t *extracted_content_bytes = nullptr) {
   // Progress counts bytes consumed from the archive stream, so headers ride along for free and
   // the bar lands exactly on the file size when the entries end at the central directory. The
   // stream position is the single source of truth; no second pass over the archive is needed.
@@ -1044,6 +1046,9 @@ bool extract_archive_to_directory(
       }
       if (progress) {
         progress(archive_bytes, archive_bytes);
+      }
+      if (extracted_content_bytes) {
+        *extracted_content_bytes = total_bytes;
       }
       return true;
     }
@@ -1480,23 +1485,33 @@ bool archive_has_plain_marker(const std::string &archive_path, bool *cd_ok) {
 bool entries_match_backup_archive(const std::vector<ArchiveEntryInfo> &folder_entries,
                                   const std::string &archive_path) {
   std::vector<ArchiveEntryInfo> archive_entries;
-  if (!read_archive_central_directory(archive_path, &archive_entries) ||
-      archive_entries.size() != folder_entries.size()) {
+  if (!read_archive_central_directory(archive_path, &archive_entries)) {
+    return false;
+  }
+
+  // Both sides are filtered here, not left to the caller: a live folder walk's sce_pfs churns
+  // between sessions regardless of whether the save itself changed (comparison_entries), but an
+  // OLD raw archive's central directory still lists sce_pfs - it was never excluded from what the
+  // writer stores, only from what a comparison looks at. Filtering only the folder side would make
+  // every such archive permanently unmatchable (a count mismatch that can never heal); filtering
+  // both keeps them matchable against today's filtered folder walk.
+  std::vector<ArchiveEntryInfo> folder_sorted = comparison_entries(folder_entries);
+  std::vector<ArchiveEntryInfo> archive_sorted = comparison_entries(archive_entries);
+  if (archive_sorted.size() != folder_sorted.size()) {
     return false;
   }
 
   // collect_files walks children in sorted order on both sides, but sort defensively so the
   // comparison never depends on traversal details.
-  std::vector<ArchiveEntryInfo> folder_sorted = folder_entries;
   const auto by_path = [](const ArchiveEntryInfo &a, const ArchiveEntryInfo &b) {
     return a.path < b.path;
   };
   std::sort(folder_sorted.begin(), folder_sorted.end(), by_path);
-  std::sort(archive_entries.begin(), archive_entries.end(), by_path);
+  std::sort(archive_sorted.begin(), archive_sorted.end(), by_path);
   for (std::size_t i = 0; i < folder_sorted.size(); ++i) {
-    if (folder_sorted[i].path != archive_entries[i].path ||
-        folder_sorted[i].crc32 != archive_entries[i].crc32 ||
-        folder_sorted[i].size != archive_entries[i].size) {
+    if (folder_sorted[i].path != archive_sorted[i].path ||
+        folder_sorted[i].crc32 != archive_sorted[i].crc32 ||
+        folder_sorted[i].size != archive_sorted[i].size) {
       return false;
     }
   }
@@ -1710,12 +1725,17 @@ RestoreResult extract_backup_archive_for_inspection(
     return restore_error("could not open archive");
   }
   bool timestamps_uniform = false;
+  std::uint64_t content_bytes = 0;
   const bool extracted = ensure_directory(destination_path) &&
                          extract_archive_to_directory(zip, destination_path, max_total_bytes,
-                                                      &timestamps_uniform, progress);
+                                                      &timestamps_uniform, progress,
+                                                      &content_bytes);
   std::fclose(zip);
-  const RestoreResult result = extracted ? RestoreResult{true, {}, timestamps_uniform}
-                                         : restore_error("could not inspect archive");
+  RestoreResult result = extracted ? RestoreResult{true, {}, timestamps_uniform}
+                                   : restore_error("could not inspect archive");
+  if (extracted) {
+    result.content_bytes = content_bytes;
+  }
   if (!result.ok) {
     remove_tree(destination_path);
   }

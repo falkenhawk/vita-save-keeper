@@ -95,6 +95,14 @@ struct RestoreResult {
   // Inspection uses this to recognize legacy Save Keeper archives, which stamped every entry
   // with one synthetic backup time. Such a timestamp must not be presented as a file save time.
   bool file_timestamps_uniform{};
+  // Sum of the uncompressed sizes of every entry extract_backup_archive_for_inspection actually
+  // extracted (the plain-content marker excluded, same as everywhere else it is invisible). Only
+  // that call fills this in; restore_backup_archive's own extraction has no caller that needs it,
+  // so it is left at 0 there. A plain restore's progress bar uses this as its real content-byte
+  // denominator: the archive's own byte count (extract_archive_to_directory's "progress" callback)
+  // is compressed-archive bytes, not the decrypted content a held-mount copy actually moves, and
+  // this total is already computed as a side effect of extraction - no extra directory walk needed.
+  std::uint64_t content_bytes{};
 };
 
 // Shared invariant of BackupRequest::sources and RestoreRequest::targets (and the sidecar targets a
@@ -189,7 +197,9 @@ bool read_archive_central_directory(const std::string &archive_path,
 // central-directory read and fallback can omit the parameter and treat "unreadable" as "false"
 // exactly as before this parameter existed.
 bool archive_has_plain_marker(const std::string &archive_path, bool *cd_ok = nullptr);
-// True when the archive's central directory lists exactly the given entries.
+// True when the archive's central directory lists exactly the given entries, once both sides are
+// run through ContentSignature.hpp's comparison_entries (sce_pfs excluded from both, so an old raw
+// archive that still stores it stays matchable against today's filtered folder walk).
 bool entries_match_backup_archive(const std::vector<ArchiveEntryInfo> &folder_entries,
                                   const std::string &archive_path);
 // Reads one entry - store or deflate - bounded by max_size.

@@ -48,4 +48,27 @@ ContentTotals compute_content_totals(const std::vector<ArchiveEntryInfo> &entrie
   return totals;
 }
 
+std::vector<ArchiveEntryInfo> comparison_entries(const std::vector<ArchiveEntryInfo> &entries) {
+  // The plain-content marker is deliberately NOT filtered here, unlike an earlier draft of this
+  // helper: entries_match_backup_archive's whole plain-vs-raw safety net depends on the marker
+  // making a plain archive's entry count refuse to match an unmounted folder walk (see
+  // test_backup_archive_plain_marker_written_first_and_breaks_cd_match's comment) - stripping it
+  // on both sides would make a plain archive falsely "match" a raw walk that happens to share the
+  // same real files, which is exactly the class of mistake plan_backup_creation's sidecar-triple
+  // special case exists to avoid. A live folder walk never produces the marker anyway, so leaving
+  // it unfiltered costs nothing on the folder side; only an archive's own central directory ever
+  // carries it, and that is precisely where a comparison must keep noticing it.
+  std::vector<ArchiveEntryInfo> filtered;
+  filtered.reserve(entries.size());
+  for (const ArchiveEntryInfo &entry : entries) {
+    const bool is_pfs_bookkeeping =
+        entry.path == "sce_pfs" || entry.path.compare(0, 8, "sce_pfs/") == 0;
+    if (is_pfs_bookkeeping) {
+      continue;
+    }
+    filtered.push_back(entry);
+  }
+  return filtered;
+}
+
 } // namespace vsm
