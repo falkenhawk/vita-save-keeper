@@ -18,6 +18,17 @@ struct BackupSource {
   std::string path;
 };
 
+// One small, wholly in-memory file to fold into an archive as its own entry (Amendment B's raw
+// PFS skeleton): the App reads these into memory itself - see BackupRequest::raw_entries - because
+// they must be captured UNMOUNTED, before the held mount the rest of a plain archive is written
+// through is even acquired (a mounted view cannot supply raw bytes: sce_pfs is invisible through
+// it, and sce_sys shows only decrypted content). The writer just stores or deflates whatever bytes
+// it is handed under zip_path; it has no opinion on where they came from.
+struct InMemoryEntry {
+  std::string zip_path;
+  std::vector<unsigned char> data;
+};
+
 struct BackupRequest {
   std::string source_path;
   std::string backup_root;
@@ -47,11 +58,18 @@ struct BackupRequest {
   // Every reader accepts both shapes, and the central directory always carries the uncompressed
   // CRC32 and size, so change detection is identical either way.
   int compression_level{};
-  // Writes the plain-content marker as the archive's first entry (kPlainContentMarkerName).
-  // Set only by the App's plain backup path together with compression_level >= 1; the marker's
-  // repetitive content always deflates, so app versions that predate deflate support refuse the
-  // whole archive instead of restoring decrypted bytes as if they were raw.
-  bool add_plain_marker{};
+  // Writes the plain-content format/compatibility entry as the archive's first entry
+  // (kPlainFormatEntryName, ".savekeeper" at the archive root - Amendment B). Set only by the
+  // App's plain backup path together with compression_level >= 1; the entry's prose content
+  // always deflates, so app versions that predate deflate support (which reject any method-8
+  // entry before touching a live save) refuse the whole archive instead of restoring decrypted
+  // bytes as if they were raw.
+  bool add_plain_format_entry{};
+  // Raw (encrypted, unmounted) sce_sys/sce_pfs skeleton files, pre-read into memory by the App -
+  // see InMemoryEntry's own doc. Written right after the format entry, before any game-file
+  // entries, under kRawSkeletonPrefix zip paths. Only ever set together with
+  // add_plain_format_entry; empty for every other kind of archive.
+  std::vector<InMemoryEntry> raw_entries;
 };
 
 struct BackupResult {
@@ -135,9 +153,31 @@ struct ArchiveEntryInfo {
   std::uint32_t size{};
 };
 
-// Marker entry carried by plain-content archives (entries written decrypted through a PFS mount).
-// Old app versions reject the whole archive because this entry is always deflate-compressed.
+// Marker entry recognized only for restoring plain-content archives written before Amendment B's
+// raw PFS skeleton existed (none shipped - this session's own test archives only): never written
+// by this version, kept purely so restore can still dispatch such an archive to the fallback
+// three-tier restore (restore_plain_content_archive_fallback) instead of refusing it outright. Old
+// app versions that predate deflate support reject the whole archive because this entry was always
+// deflate-compressed.
 constexpr const char *kPlainContentMarkerName = ".save-keeper-plain";
+
+// Amendment B's plain-content format/compatibility entry, at the archive root (NOT under
+// kRawSkeletonPrefix): every plain-content archive this app writes from here on carries exactly
+// this entry as its first, in place of the old kPlainContentMarkerName. Three jobs: (1) restore's
+// format-dispatch signal (two-phase raw-skeleton restore vs. the old three-tier fallback), (2) the
+// same old-version tripwire the marker used to serve alone - always deflate-compressed, so an app
+// version predating deflate support refuses the whole archive before touching a live save, and
+// (3) self-documentation for a PC user who opens the archive directly. Its content's first line
+// ends with a decimal format version restore reads with parse_plain_format_version.
+constexpr const char *kPlainFormatEntryName = ".savekeeper";
+
+// Zip-path prefix for the raw (encrypted, unmounted) sce_sys/sce_pfs skeleton entries a
+// plain-content archive carries alongside its decrypted game files (Amendment B): a mutually
+// consistent PFS pair captured before the backup's held mount is even acquired, and written back
+// raw, before any mount, as the first step of a two-phase restore. Excluded from signatures, entry
+// comparisons, and details counts/sizes (see ContentSignature.hpp's comparison_entries) - it is
+// restore bookkeeping, not savedata content the user or the change-detection check cares about.
+constexpr const char *kRawSkeletonPrefix = ".raw/";
 
 struct ArchiveReadResult {
   bool ok{};
@@ -197,6 +237,19 @@ bool read_archive_central_directory(const std::string &archive_path,
 // central-directory read and fallback can omit the parameter and treat "unreadable" as "false"
 // exactly as before this parameter existed.
 bool archive_has_plain_marker(const std::string &archive_path, bool *cd_ok = nullptr);
+// Same contract as archive_has_plain_marker, but for kPlainFormatEntryName (".savekeeper") -
+// Amendment B's replacement, written by every plain-content archive this app creates from here on
+// and restore's signal to use the two-phase raw-skeleton restore rather than the old fallback.
+bool archive_has_plain_format_entry(const std::string &archive_path, bool *cd_ok = nullptr);
+// Parses the format version from a kPlainFormatEntryName entry's content: the trailing decimal
+// integer on its FIRST LINE (our own writer's first line always ends "... - format 1", see
+// BackupArchive.cpp's kFormatEntryContent). Reads backward from the end of that line while it
+// sees ASCII digits; no trailing digits there, or empty content, defaults to 1 - our own writer
+// always emits this exact shape, so anything else only happens via a hand-edited or corrupted
+// entry outside our control, and treating that permissively (rather than refusing an archive our
+// own writer produced) is the safer default. Exported so restore dispatch (App-side, not host
+// testable on its own) can be pinned by a host test against this parser directly.
+int parse_plain_format_version(const std::string &content);
 // True when the archive's central directory lists exactly the given entries, once both sides are
 // run through ContentSignature.hpp's comparison_entries (sce_pfs excluded from both, so an old raw
 // archive that still stores it stays matchable against today's filtered folder walk).

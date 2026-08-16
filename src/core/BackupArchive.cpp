@@ -13,6 +13,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <dirent.h>
@@ -649,31 +650,38 @@ bool deflate_buffer(const unsigned char *data, std::size_t size, int level,
   return ok;
 }
 
-// Writes the plain-content marker (kPlainContentMarkerName) as a complete, self-contained entry:
-// its content and size are fixed and tiny, so - unlike the streaming file writer above - both the
-// compressed size and the CRC are known before the local header goes out, and no placeholder patch
-// is needed afterward. Always method 8: the marker's repetitive 66-byte content deflates on any
-// zlib level, and admitting method 0 here would let an app version that predates deflate support
-// read mounted decrypted bytes as if they were the archive's raw on-disk shape (see
-// BackupRequest::add_plain_marker). level is clamped to at least 1 defensively - the marker is
-// only ever requested alongside compression_level >= 1, but a caller that got that wrong must
-// still never produce a store entry here.
-bool write_plain_marker_entry(FILE *zip, int level, const ZipTimestamp &timestamp,
-                              ZipEntry *out_entry) {
-  static const std::string kMarkerLine = "save-keeper plain-content marker\n";
-  const std::string content = kMarkerLine + kMarkerLine;
+// Verbatim content of the kPlainFormatEntryName entry (Amendment B). ~165 bytes of ASCII prose -
+// long enough that deflate always wins (a test pins method 8 + compressed < uncompressed) - naming
+// the format version on its first line (parse_plain_format_version reads the trailing integer
+// there) and documenting the archive for a PC user who opens it directly.
+const std::string kFormatEntryContent =
+    "save-keeper compatibility marker - format 1\n"
+    "\n"
+    "game files in this archive are stored decrypted; .raw/ holds the\n"
+    "console's encrypted sce_sys + sce_pfs snapshot used at restore.\n";
 
+// Writes kPlainFormatEntryName (".savekeeper") as a complete, self-contained entry: its content and
+// size are fixed and tiny, so - unlike the streaming file writer above - both the compressed size
+// and the CRC are known before the local header goes out, and no placeholder patch is needed
+// afterward. Always method 8: the content reliably deflates on any zlib level, and admitting
+// method 0 here would let an app version that predates deflate support (which rejects any
+// method-8 entry before touching a live save) read mounted decrypted bytes as if they were the
+// archive's raw on-disk shape (see BackupRequest::add_plain_format_entry). level is clamped to at
+// least 1 defensively - the entry is only ever requested alongside compression_level >= 1, but a
+// caller that got that wrong must still never produce a store entry here.
+bool write_plain_format_entry(FILE *zip, int level, const ZipTimestamp &timestamp,
+                              ZipEntry *out_entry) {
   ZipEntry entry;
-  entry.zip_path = kPlainContentMarkerName;
+  entry.zip_path = kPlainFormatEntryName;
   entry.modified_at = timestamp;
-  entry.crc32 =
-      update_crc32(0, reinterpret_cast<const unsigned char *>(content.data()), content.size());
-  entry.size = static_cast<std::uint32_t>(content.size());
+  entry.crc32 = update_crc32(0, reinterpret_cast<const unsigned char *>(kFormatEntryContent.data()),
+                             kFormatEntryContent.size());
+  entry.size = static_cast<std::uint32_t>(kFormatEntryContent.size());
   entry.method = 8;
 
   std::vector<unsigned char> compressed;
-  if (!deflate_buffer(reinterpret_cast<const unsigned char *>(content.data()), content.size(),
-                      std::max(1, level), &compressed)) {
+  if (!deflate_buffer(reinterpret_cast<const unsigned char *>(kFormatEntryContent.data()),
+                      kFormatEntryContent.size(), std::max(1, level), &compressed)) {
     return false;
   }
   entry.compressed_size = static_cast<std::uint32_t>(compressed.size());
@@ -681,6 +689,48 @@ bool write_plain_marker_entry(FILE *zip, int level, const ZipTimestamp &timestam
   if (!write_local_header(zip, &entry, timestamp) ||
       !write_bytes(zip, compressed.data(), compressed.size())) {
     return false;
+  }
+  *out_entry = entry;
+  return true;
+}
+
+// Writes one small, wholly in-memory entry (the .raw/ skeleton files - see
+// BackupRequest::raw_entries): same deflate-with-store-fallback rule as a file entry
+// (write_entry_data), but with no seek-back patch needed, since the whole compressed buffer (if
+// any) is produced before any bytes reach the zip, so the final method and compressed size are
+// already known when the local header goes out. Encrypted PFS content does not compress in
+// practice, so these entries are expected to store; level 0 or an empty buffer stores
+// unconditionally, exactly like the main writer's whole-archive level-0 rule.
+bool write_in_memory_entry(FILE *zip, const std::string &zip_path, const unsigned char *data,
+                           std::size_t size, int level, const ZipTimestamp &timestamp,
+                           ZipEntry *out_entry) {
+  if (size > 0xffffffffULL) {
+    return false;
+  }
+  ZipEntry entry;
+  entry.zip_path = zip_path;
+  entry.modified_at = timestamp;
+  entry.crc32 = update_crc32(0, data, size);
+  entry.size = static_cast<std::uint32_t>(size);
+
+  std::vector<unsigned char> compressed;
+  const bool deflated =
+      level > 0 && size > 0 && deflate_buffer(data, size, level, &compressed) &&
+      compressed.size() < size;
+  if (deflated) {
+    entry.method = 8;
+    entry.compressed_size = static_cast<std::uint32_t>(compressed.size());
+    if (!write_local_header(zip, &entry, timestamp) ||
+        !write_bytes(zip, compressed.data(), compressed.size())) {
+      return false;
+    }
+  } else {
+    entry.method = 0;
+    entry.compressed_size = entry.size;
+    if (!write_local_header(zip, &entry, timestamp) ||
+        (size > 0 && !write_bytes(zip, data, size))) {
+      return false;
+    }
   }
   *out_entry = entry;
   return true;
@@ -1073,11 +1123,15 @@ bool extract_archive_to_directory(
       return false;
     }
 
-    // The plain-content marker is a reserved control entry, never real savedata: read past its
-    // data without creating a file, and before it can count against the entry/byte caps or the
-    // timestamp-uniformity check below, so it can never materialize in a restored save or an
-    // inspection directory. Raw archives never contain this name, so their behavior is unchanged.
-    if (header.name == kPlainContentMarkerName) {
+    // The plain-content marker/format entries are reserved control entries, never real savedata:
+    // read past their data without creating a file, and before either can count against the
+    // entry/byte caps or the timestamp-uniformity check below, so neither can ever materialize in
+    // a restored save or an inspection directory. .raw/ skeleton entries are NOT skipped here -
+    // the two-phase restore's own work-directory extraction needs them on disk (App.cpp reads them
+    // back out explicitly, by their known .raw/sce_sys and .raw/sce_pfs paths, right after this
+    // call returns). Raw archives never contain either control name, so their behavior is
+    // unchanged.
+    if (header.name == kPlainContentMarkerName || header.name == kPlainFormatEntryName) {
       if (!skip_bytes(zip, header.compressed_size)) {
         return false;
       }
@@ -1185,8 +1239,14 @@ BackupResult create_backup_archive(const BackupRequest &request) {
   } else if (!collect_files(request.source_path, "", &entries)) {
     return error_result(archive_path, "could not read source directory");
   }
-  if (entries.size() + (request.add_plain_marker ? 1u : 0u) > 0xffffU) {
+  if (entries.size() + (request.add_plain_format_entry ? 1u : 0u) + request.raw_entries.size() >
+      0xffffU) {
     return error_result(archive_path, "too many files for simple ZIP archive");
+  }
+  for (const InMemoryEntry &raw_entry : request.raw_entries) {
+    if (raw_entry.zip_path.size() > 0xffffU) {
+      return error_result(archive_path, "file path is too long for simple ZIP archive");
+    }
   }
 
   // The archive reads every byte twice - a hash pass for the entry headers, then the write pass -
@@ -1260,14 +1320,33 @@ BackupResult create_backup_archive(const BackupRequest &request) {
 
   const int level = std::max(0, std::min(request.compression_level, 9));
 
-  // The marker (when requested) is written first and outside the entries vector: it has no
-  // source_path, so it does not go through write_entry_data's file-based streaming, and its final
-  // sizes are known up front (write_plain_marker_entry needs no placeholder patch). It still
-  // participates in the central directory and entry count like any entry, listed first.
-  ZipEntry marker_entry;
+  // The format entry and raw skeleton entries (when requested) are written first and outside the
+  // entries vector: they have no source_path, so they never go through write_entry_data's
+  // file-based streaming, and their final sizes are known up front (no placeholder patch needed).
+  // They still participate in the central directory and entry count like any entry, in this fixed
+  // order: the format entry, then each raw skeleton entry, then the game files. Neither one feeds
+  // stat_total or on_bytes above (they are outside the `entries` vector those are built from), so
+  // they are deliberately excluded from the progress bar's denominator and byte count - the bar
+  // tracks real save content, and a skeleton is typically under a megabyte against saves the bar
+  // is meant for.
+  ZipEntry format_entry;
+  std::vector<ZipEntry> raw_zip_entries;
+  raw_zip_entries.reserve(request.raw_entries.size());
   bool ok = true;
-  if (request.add_plain_marker) {
-    ok = write_plain_marker_entry(zip, level, to_zip_timestamp(request.timestamp), &marker_entry);
+  if (request.add_plain_format_entry) {
+    ok = write_plain_format_entry(zip, level, to_zip_timestamp(request.timestamp), &format_entry);
+  }
+  if (ok) {
+    for (const InMemoryEntry &raw_entry : request.raw_entries) {
+      ZipEntry written_raw_entry;
+      if (!write_in_memory_entry(zip, raw_entry.zip_path, raw_entry.data.data(),
+                                 raw_entry.data.size(), level, to_zip_timestamp(request.timestamp),
+                                 &written_raw_entry)) {
+        ok = false;
+        break;
+      }
+      raw_zip_entries.push_back(written_raw_entry);
+    }
   }
 
   for (ZipEntry &entry : entries) {
@@ -1285,8 +1364,14 @@ BackupResult create_backup_archive(const BackupRequest &request) {
   std::uint32_t central_directory_offset = 0;
   std::uint32_t central_directory_end = 0;
   if (ok && current_offset(zip, &central_directory_offset)) {
-    if (request.add_plain_marker) {
-      ok = write_central_directory_entry(zip, marker_entry, marker_entry.modified_at);
+    if (request.add_plain_format_entry) {
+      ok = write_central_directory_entry(zip, format_entry, format_entry.modified_at);
+    }
+    for (const ZipEntry &raw_entry : raw_zip_entries) {
+      if (!ok) {
+        break;
+      }
+      ok = write_central_directory_entry(zip, raw_entry, raw_entry.modified_at);
     }
     for (const ZipEntry &entry : entries) {
       if (!ok) {
@@ -1303,7 +1388,7 @@ BackupResult create_backup_archive(const BackupRequest &request) {
     const std::uint32_t central_directory_size =
         central_directory_end - central_directory_offset;
     const std::uint16_t total_entry_count = static_cast<std::uint16_t>(
-        entries.size() + (request.add_plain_marker ? 1u : 0u));
+        entries.size() + (request.add_plain_format_entry ? 1u : 0u) + raw_zip_entries.size());
     ok = write_end_of_central_directory(zip, total_entry_count, central_directory_size,
                                         central_directory_offset);
   }
@@ -1480,6 +1565,38 @@ bool archive_has_plain_marker(const std::string &archive_path, bool *cd_ok) {
     }
   }
   return false;
+}
+
+bool archive_has_plain_format_entry(const std::string &archive_path, bool *cd_ok) {
+  std::vector<ArchiveEntryInfo> entries;
+  const bool read_ok = read_archive_central_directory(archive_path, &entries);
+  if (cd_ok) {
+    *cd_ok = read_ok;
+  }
+  if (!read_ok) {
+    return false;
+  }
+  for (const ArchiveEntryInfo &entry : entries) {
+    if (entry.path == kPlainFormatEntryName) {
+      return true;
+    }
+  }
+  return false;
+}
+
+int parse_plain_format_version(const std::string &content) {
+  const std::size_t newline = content.find('\n');
+  const std::string first_line = newline == std::string::npos ? content : content.substr(0, newline);
+  std::size_t end = first_line.size();
+  while (end > 0 && first_line[end - 1] >= '0' && first_line[end - 1] <= '9') {
+    --end;
+  }
+  if (end == first_line.size()) {
+    // No trailing digits on the first line at all.
+    return 1;
+  }
+  const long value = std::strtol(first_line.substr(end).c_str(), nullptr, 10);
+  return value >= 1 ? static_cast<int>(value) : 1;
 }
 
 bool entries_match_backup_archive(const std::vector<ArchiveEntryInfo> &folder_entries,

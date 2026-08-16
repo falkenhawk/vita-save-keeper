@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 
 namespace vsm {
 namespace {
@@ -49,21 +50,27 @@ ContentTotals compute_content_totals(const std::vector<ArchiveEntryInfo> &entrie
 }
 
 std::vector<ArchiveEntryInfo> comparison_entries(const std::vector<ArchiveEntryInfo> &entries) {
-  // The plain-content marker is deliberately NOT filtered here, unlike an earlier draft of this
-  // helper: entries_match_backup_archive's whole plain-vs-raw safety net depends on the marker
-  // making a plain archive's entry count refuse to match an unmounted folder walk (see
+  // The plain-content marker/format entries are deliberately NOT filtered here, unlike an earlier
+  // draft of this helper: entries_match_backup_archive's whole plain-vs-raw safety net depends on
+  // one of them making a plain archive's entry count refuse to match an unmounted folder walk (see
   // test_backup_archive_plain_marker_written_first_and_breaks_cd_match's comment) - stripping it
   // on both sides would make a plain archive falsely "match" a raw walk that happens to share the
   // same real files, which is exactly the class of mistake plan_backup_creation's sidecar-triple
-  // special case exists to avoid. A live folder walk never produces the marker anyway, so leaving
-  // it unfiltered costs nothing on the folder side; only an archive's own central directory ever
-  // carries it, and that is precisely where a comparison must keep noticing it.
+  // special case exists to avoid. A live folder walk never produces either one anyway, so leaving
+  // them unfiltered costs nothing on the folder side; only an archive's own central directory ever
+  // carries them, and that is precisely where a comparison must keep noticing them. Note
+  // kPlainFormatEntryName (".savekeeper") lives at the archive root, not under kRawSkeletonPrefix,
+  // so the .raw/ prefix filter below never touches it either - no extra exception needed here.
   std::vector<ArchiveEntryInfo> filtered;
   filtered.reserve(entries.size());
+  const std::size_t raw_skeleton_prefix_length = std::strlen(kRawSkeletonPrefix);
   for (const ArchiveEntryInfo &entry : entries) {
     const bool is_pfs_bookkeeping =
         entry.path == "sce_pfs" || entry.path.compare(0, 8, "sce_pfs/") == 0;
-    if (is_pfs_bookkeeping) {
+    const bool is_sce_sys = entry.path == "sce_sys" || entry.path.compare(0, 8, "sce_sys/") == 0;
+    const bool is_raw_skeleton =
+        entry.path.compare(0, raw_skeleton_prefix_length, kRawSkeletonPrefix) == 0;
+    if (is_pfs_bookkeeping || is_sce_sys || is_raw_skeleton) {
       continue;
     }
     filtered.push_back(entry);

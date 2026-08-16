@@ -513,9 +513,9 @@ void test_backup_archive_rejects_corrupt_deflate_stream() {
   std::filesystem::remove_all(base);
 }
 
-void test_backup_archive_plain_marker_written_first_and_breaks_cd_match() {
+void test_backup_archive_plain_format_entry_written_first_and_breaks_cd_match() {
   const std::filesystem::path base =
-      std::filesystem::temp_directory_path() / "save-keeper-plain-marker-test";
+      std::filesystem::temp_directory_path() / "save-keeper-plain-format-entry-test";
   std::filesystem::remove_all(base);
   std::filesystem::create_directories(base / "source");
   std::ofstream(base / "source" / "data.bin", std::ios::binary) << std::string(2000, 'm');
@@ -526,13 +526,13 @@ void test_backup_archive_plain_marker_written_first_and_breaks_cd_match() {
   request.save_id = "PCSE00120";
   request.timestamp = {2026, 8, 15, 9, 0, 0};
   request.compression_level = 6;
-  request.add_plain_marker = true;
+  request.add_plain_format_entry = true;
   const vsm::BackupResult result = vsm::create_backup_archive(request);
   EXPECT_TRUE(result.ok);
 
   const std::vector<std::string> names = read_zip_central_directory_names(result.archive_path);
   EXPECT_EQ(names.size(), static_cast<std::size_t>(2));
-  EXPECT_EQ(names[0], std::string(vsm::kPlainContentMarkerName));
+  EXPECT_EQ(names[0], std::string(vsm::kPlainFormatEntryName));
   EXPECT_EQ(names[1], std::string("data.bin"));
 
   const std::vector<CdEntryShape> shapes = read_zip_central_directory_shapes(result.archive_path);
@@ -542,8 +542,8 @@ void test_backup_archive_plain_marker_written_first_and_breaks_cd_match() {
   EXPECT_EQ(static_cast<std::size_t>(shapes[1].method), static_cast<std::size_t>(8));
   EXPECT_TRUE(shapes[1].compressed_size < shapes[1].uncompressed_size);
 
-  // The marker breaks a plain content-directory comparison against the pre-mount folder walk by
-  // design: the folder never contains the marker, so the count alone can never match. This is the
+  // The format entry breaks a plain content-directory comparison against the pre-mount folder walk
+  // by design: the folder never contains it, so the count alone can never match. This is the
   // documented reason plan_backup_creation/matching_backup_name must special-case plain archives
   // via their recorded sidecar triple instead (Task 3).
   bool entries_ok = false;
@@ -551,6 +551,215 @@ void test_backup_archive_plain_marker_written_first_and_breaks_cd_match() {
       vsm::compute_folder_entries((base / "source").string(), &entries_ok);
   EXPECT_TRUE(entries_ok);
   EXPECT_TRUE(!vsm::entries_match_backup_archive(entries, result.archive_path));
+
+  std::filesystem::remove_all(base);
+}
+
+void test_backup_archive_raw_skeleton_entries_ordered_after_format_entry_and_stored() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-raw-skeleton-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source");
+  std::ofstream(base / "source" / "data.bin", std::ios::binary) << std::string(2000, 'm');
+
+  // Pseudo-random bytes (deterministic LCG, mirroring the noise fixture other tests use) stand in
+  // for encrypted PFS content: incompressible, so these entries are expected to store, exactly as
+  // Amendment B's design predicts for real keystone/sealedkey/sce_pfs bytes.
+  const auto noise_bytes = [](std::size_t size) {
+    std::vector<unsigned char> data(size);
+    std::uint32_t state = 0x9e3779b9u;
+    for (std::size_t i = 0; i < size; ++i) {
+      state = state * 1664525u + 1013904223u;
+      data[i] = static_cast<unsigned char>(state >> 24);
+    }
+    return data;
+  };
+
+  vsm::BackupRequest request;
+  request.source_path = (base / "source").string();
+  request.backup_root = (base / "backups").string();
+  request.save_id = "PCSE00120";
+  request.timestamp = {2026, 8, 15, 9, 30, 0};
+  request.compression_level = 6;
+  request.add_plain_format_entry = true;
+  request.raw_entries.push_back({std::string(vsm::kRawSkeletonPrefix) + "sce_sys/keystone",
+                                 noise_bytes(96)});
+  request.raw_entries.push_back({std::string(vsm::kRawSkeletonPrefix) + "sce_pfs/000.pfs",
+                                 noise_bytes(4096)});
+  const vsm::BackupResult result = vsm::create_backup_archive(request);
+  EXPECT_TRUE(result.ok);
+
+  const std::vector<std::string> names = read_zip_central_directory_names(result.archive_path);
+  EXPECT_EQ(names.size(), static_cast<std::size_t>(4));
+  EXPECT_EQ(names[0], std::string(vsm::kPlainFormatEntryName));
+  EXPECT_EQ(names[1], std::string(".raw/sce_sys/keystone"));
+  EXPECT_EQ(names[2], std::string(".raw/sce_pfs/000.pfs"));
+  EXPECT_EQ(names[3], std::string("data.bin"));
+
+  const std::vector<CdEntryShape> shapes = read_zip_central_directory_shapes(result.archive_path);
+  EXPECT_EQ(shapes.size(), static_cast<std::size_t>(4));
+  EXPECT_EQ(static_cast<std::size_t>(shapes[0].method), static_cast<std::size_t>(8));
+  EXPECT_TRUE(shapes[0].compressed_size < shapes[0].uncompressed_size);
+  // Both raw skeleton entries store: incompressible content never beats its own size.
+  EXPECT_EQ(static_cast<std::size_t>(shapes[1].method), static_cast<std::size_t>(0));
+  EXPECT_EQ(static_cast<std::size_t>(shapes[1].compressed_size),
+            static_cast<std::size_t>(shapes[1].uncompressed_size));
+  EXPECT_EQ(static_cast<std::size_t>(shapes[2].method), static_cast<std::size_t>(0));
+  EXPECT_EQ(static_cast<std::size_t>(shapes[2].compressed_size),
+            static_cast<std::size_t>(shapes[2].uncompressed_size));
+
+  std::filesystem::remove_all(base);
+}
+
+void test_extract_backup_archive_skips_format_entry_but_keeps_raw_skeleton() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-raw-skeleton-extract-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source");
+  std::ofstream(base / "source" / "data.bin", std::ios::binary) << std::string(2000, 'q');
+
+  vsm::BackupRequest request;
+  request.source_path = (base / "source").string();
+  request.backup_root = (base / "backups").string();
+  request.save_id = "PCSE00120";
+  request.timestamp = {2026, 8, 15, 9, 45, 0};
+  request.compression_level = 6;
+  request.add_plain_format_entry = true;
+  request.raw_entries.push_back(
+      {std::string(vsm::kRawSkeletonPrefix) + "sce_sys/keystone", {1, 2, 3, 4}});
+  request.raw_entries.push_back(
+      {std::string(vsm::kRawSkeletonPrefix) + "sce_pfs/000.pfs", {5, 6, 7}});
+  const vsm::BackupResult result = vsm::create_backup_archive(request);
+  EXPECT_TRUE(result.ok);
+
+  const std::filesystem::path work = base / "work";
+  const vsm::RestoreResult extracted =
+      vsm::extract_backup_archive_for_inspection(result.archive_path, work.string());
+  EXPECT_TRUE(extracted.ok);
+
+  // The two-phase restore's own raw skeleton write reads these two paths back out of the work
+  // directory by exactly this shape - see App::restore_plain_content_archive.
+  EXPECT_TRUE(std::filesystem::exists(work / ".raw" / "sce_sys" / "keystone"));
+  EXPECT_TRUE(std::filesystem::exists(work / ".raw" / "sce_pfs" / "000.pfs"));
+  EXPECT_TRUE(std::filesystem::exists(work / "data.bin"));
+  // The format entry never belongs on disk, in a work directory any more than in a live save.
+  EXPECT_TRUE(!std::filesystem::exists(work / vsm::kPlainFormatEntryName));
+
+  std::filesystem::remove_all(base);
+}
+
+void test_parse_plain_format_version_reads_trailing_integer_on_first_line() {
+  EXPECT_EQ(static_cast<std::size_t>(
+                vsm::parse_plain_format_version("save-keeper compatibility marker - format 1\n"
+                                               "\nbody text\n")),
+            static_cast<std::size_t>(1));
+  EXPECT_EQ(static_cast<std::size_t>(
+                vsm::parse_plain_format_version("save-keeper compatibility marker - format 2\n")),
+            static_cast<std::size_t>(2));
+  EXPECT_EQ(static_cast<std::size_t>(
+                vsm::parse_plain_format_version("save-keeper compatibility marker - format 12\n")),
+            static_cast<std::size_t>(12));
+  // No trailing digits on the first line, or no content at all: our own writer never produces
+  // either, so both default to 1 rather than refusing an archive outside our control.
+  EXPECT_EQ(static_cast<std::size_t>(
+                vsm::parse_plain_format_version("save-keeper compatibility marker\nbody\n")),
+            static_cast<std::size_t>(1));
+  EXPECT_EQ(static_cast<std::size_t>(vsm::parse_plain_format_version("")),
+            static_cast<std::size_t>(1));
+}
+
+void test_archive_has_plain_marker_recognizes_legacy_name_for_fallback_detection_only() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-legacy-marker-detection-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source");
+  // No writer path emits the old marker name any more (Amendment B replaced it with the format
+  // entry) - the only way to exercise fallback DETECTION now is a literal file of that name inside
+  // the source folder, landing in the archive as an ordinary entry that happens to share the name.
+  // archive_has_plain_marker only ever looks at the CD path string, so this is a faithful stand-in
+  // for what a genuinely pre-Amendment-B archive's central directory looked like.
+  std::ofstream(base / "source" / vsm::kPlainContentMarkerName, std::ios::binary)
+      << "save-keeper plain-content marker\n";
+  std::ofstream(base / "source" / "data.bin", std::ios::binary) << "save-bytes";
+
+  vsm::BackupRequest legacy_request;
+  legacy_request.source_path = (base / "source").string();
+  legacy_request.backup_root = (base / "backups").string();
+  legacy_request.save_id = "PCSE00120";
+  legacy_request.timestamp = {2026, 8, 15, 10, 0, 0};
+  legacy_request.compression_level = 6;
+  const vsm::BackupResult legacy_result = vsm::create_backup_archive(legacy_request);
+  EXPECT_TRUE(legacy_result.ok);
+  bool legacy_cd_ok = false;
+  EXPECT_TRUE(vsm::archive_has_plain_marker(legacy_result.archive_path, &legacy_cd_ok));
+  EXPECT_TRUE(legacy_cd_ok);
+  EXPECT_TRUE(!vsm::archive_has_plain_format_entry(legacy_result.archive_path));
+
+  // The reverse holds for a real Amendment B archive: it carries the format entry, never the old
+  // marker name.
+  std::filesystem::create_directories(base / "plain-source");
+  std::ofstream(base / "plain-source" / "data.bin", std::ios::binary) << "save-bytes";
+  vsm::BackupRequest plain_request;
+  plain_request.source_path = (base / "plain-source").string();
+  plain_request.backup_root = (base / "backups").string();
+  plain_request.save_id = "PCSE00121";
+  plain_request.timestamp = {2026, 8, 15, 10, 5, 0};
+  plain_request.compression_level = 6;
+  plain_request.add_plain_format_entry = true;
+  const vsm::BackupResult plain_result = vsm::create_backup_archive(plain_request);
+  EXPECT_TRUE(plain_result.ok);
+  bool format_cd_ok = false;
+  EXPECT_TRUE(vsm::archive_has_plain_format_entry(plain_result.archive_path, &format_cd_ok));
+  EXPECT_TRUE(format_cd_ok);
+  EXPECT_TRUE(!vsm::archive_has_plain_marker(plain_result.archive_path));
+
+  std::filesystem::remove_all(base);
+}
+
+void test_comparison_entries_filters_sce_sys_and_raw_skeleton_prefixes() {
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-sce-sys-comparison-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source" / "sce_sys");
+  std::ofstream(base / "source" / "data.bin", std::ios::binary) << "save-bytes";
+  std::ofstream(base / "source" / "sce_sys" / "param.sfo", std::ios::binary) << "sfo-bytes-v1";
+
+  vsm::BackupRequest request;
+  request.source_path = (base / "source").string();
+  request.backup_root = (base / "backups").string();
+  request.save_id = "PCSE00120";
+  request.timestamp = {2026, 8, 16, 9, 0, 0};
+  request.compression_level = 6;
+  const vsm::BackupResult result = vsm::create_backup_archive(request);
+  EXPECT_TRUE(result.ok);
+
+  bool entries_ok = false;
+  const std::vector<vsm::ArchiveEntryInfo> baseline_entries =
+      vsm::compute_folder_entries((base / "source").string(), &entries_ok);
+  EXPECT_TRUE(entries_ok);
+  EXPECT_TRUE(vsm::entries_match_backup_archive(baseline_entries, result.archive_path));
+
+  // sce_sys is rewritten/re-encrypted by the console independent of meaningful save changes (same
+  // noise class as sce_pfs); a folder whose ONLY difference is sce_sys content must still read as
+  // unchanged against the archive.
+  std::ofstream(base / "source" / "sce_sys" / "param.sfo", std::ios::binary) << "sfo-bytes-v2-diff";
+  bool changed_sce_sys_ok = false;
+  const std::vector<vsm::ArchiveEntryInfo> changed_sce_sys_entries =
+      vsm::compute_folder_entries((base / "source").string(), &changed_sce_sys_ok);
+  EXPECT_TRUE(changed_sce_sys_ok);
+  EXPECT_TRUE(vsm::entries_match_backup_archive(changed_sce_sys_entries, result.archive_path));
+  EXPECT_EQ(vsm::compute_content_signature(vsm::comparison_entries(changed_sce_sys_entries)),
+            vsm::compute_content_signature(vsm::comparison_entries(baseline_entries)));
+  EXPECT_TRUE(vsm::compute_content_signature(changed_sce_sys_entries) !=
+              vsm::compute_content_signature(baseline_entries));
+
+  // .raw/ skeleton entries (never produced by a live folder walk, only by an archive's own CD) are
+  // filtered out too, directly on a synthetic entries list.
+  std::vector<vsm::ArchiveEntryInfo> with_raw_skeleton = baseline_entries;
+  with_raw_skeleton.push_back({std::string(vsm::kRawSkeletonPrefix) + "sce_pfs/000.pfs", 0, 4096});
+  with_raw_skeleton.push_back({std::string(vsm::kRawSkeletonPrefix) + "sce_sys/keystone", 0, 96});
+  EXPECT_EQ(vsm::compute_content_signature(vsm::comparison_entries(with_raw_skeleton)),
+            vsm::compute_content_signature(vsm::comparison_entries(baseline_entries)));
 
   std::filesystem::remove_all(base);
 }
@@ -641,9 +850,9 @@ void test_entries_match_backup_archive_ignores_sce_pfs_on_the_archive_side_too()
   std::filesystem::remove_all(base);
 }
 
-void test_archive_has_plain_marker_and_restore_extraction_skips_it() {
+void test_archive_has_plain_format_entry_and_restore_extraction_skips_it() {
   const std::filesystem::path base =
-      std::filesystem::temp_directory_path() / "save-keeper-plain-marker-restore-test";
+      std::filesystem::temp_directory_path() / "save-keeper-plain-format-entry-restore-test";
   std::filesystem::remove_all(base);
   std::filesystem::create_directories(base / "source");
   std::ofstream(base / "source" / "data.bin", std::ios::binary) << std::string(2000, 'p');
@@ -654,23 +863,24 @@ void test_archive_has_plain_marker_and_restore_extraction_skips_it() {
   plain_request.save_id = "PCSE00121";
   plain_request.timestamp = {2026, 8, 15, 10, 0, 0};
   plain_request.compression_level = 6;
-  plain_request.add_plain_marker = true;
+  plain_request.add_plain_format_entry = true;
   const vsm::BackupResult plain_backup = vsm::create_backup_archive(plain_request);
   EXPECT_TRUE(plain_backup.ok);
   bool plain_cd_ok = false;
-  EXPECT_TRUE(vsm::archive_has_plain_marker(plain_backup.archive_path, &plain_cd_ok));
+  EXPECT_TRUE(vsm::archive_has_plain_format_entry(plain_backup.archive_path, &plain_cd_ok));
   EXPECT_TRUE(plain_cd_ok);
 
-  // Extraction (the plain restore path's building block) skips the marker: the ordinary file
-  // lands on disk, but the marker never materializes as a file.
+  // Extraction (the plain restore path's building block) skips the format entry: the ordinary
+  // file lands on disk, but the format entry never materializes as a file.
   const std::filesystem::path extracted = base / "extracted";
   const vsm::RestoreResult extraction =
       vsm::extract_backup_archive_for_inspection(plain_backup.archive_path, extracted.string());
   EXPECT_TRUE(extraction.ok);
   EXPECT_TRUE(std::filesystem::exists(extracted / "data.bin"));
-  EXPECT_TRUE(!std::filesystem::exists(extracted / vsm::kPlainContentMarkerName));
+  EXPECT_TRUE(!std::filesystem::exists(extracted / vsm::kPlainFormatEntryName));
 
-  // An ordinary (raw) archive never carries the marker; its extraction behavior is unaffected.
+  // An ordinary (raw) archive never carries the format entry; its extraction behavior is
+  // unaffected.
   vsm::BackupRequest raw_request;
   raw_request.source_path = (base / "source").string();
   raw_request.backup_root = (base / "backups").string();
@@ -680,7 +890,7 @@ void test_archive_has_plain_marker_and_restore_extraction_skips_it() {
   const vsm::BackupResult raw_backup = vsm::create_backup_archive(raw_request);
   EXPECT_TRUE(raw_backup.ok);
   bool raw_cd_ok = false;
-  EXPECT_TRUE(!vsm::archive_has_plain_marker(raw_backup.archive_path, &raw_cd_ok));
+  EXPECT_TRUE(!vsm::archive_has_plain_format_entry(raw_backup.archive_path, &raw_cd_ok));
   EXPECT_TRUE(raw_cd_ok);
 
   const std::filesystem::path raw_extracted = base / "raw-extracted";
@@ -692,18 +902,18 @@ void test_archive_has_plain_marker_and_restore_extraction_skips_it() {
   // A nonexistent archive: unreadable, cd_ok reports false. The 1-arg default-nullptr form (used
   // by callers with their own separate CD read and fallback) still just answers false, unchanged.
   bool missing_cd_ok = true;
-  EXPECT_TRUE(
-      !vsm::archive_has_plain_marker((base / "does-not-exist.zip").string(), &missing_cd_ok));
+  EXPECT_TRUE(!vsm::archive_has_plain_format_entry((base / "does-not-exist.zip").string(),
+                                                   &missing_cd_ok));
   EXPECT_TRUE(!missing_cd_ok);
-  EXPECT_TRUE(!vsm::archive_has_plain_marker((base / "does-not-exist.zip").string()));
+  EXPECT_TRUE(!vsm::archive_has_plain_format_entry((base / "does-not-exist.zip").string()));
 
-  // A plain archive whose local headers (marker entry included) are intact but whose trailing
+  // A plain archive whose local headers (format entry included) are intact but whose trailing
   // end-of-central-directory record is damaged: extract_backup_archive_for_inspection reads
   // sequentially and stops the moment it reaches the first central-directory-entry signature, so
   // it never even looks at the damaged trailer and would still "succeed" - the exact scenario
-  // that must not read as "definitely raw" (cd_ok false, not archive_has_plain_marker false), or
-  // a caller like handle_restore's dispatch would rename plaintext straight into an encrypted,
-  // unmounted save.
+  // that must not read as "definitely raw" (cd_ok false, not archive_has_plain_format_entry
+  // false), or a caller like handle_restore's dispatch would rename plaintext straight into an
+  // encrypted, unmounted save.
   const std::filesystem::path damaged_cd_path = base / "damaged-cd.zip";
   std::filesystem::copy_file(plain_backup.archive_path, damaged_cd_path);
   {
@@ -712,7 +922,7 @@ void test_archive_has_plain_marker_and_restore_extraction_skips_it() {
     file.put('\x00');
   }
   bool damaged_cd_ok = true;
-  EXPECT_TRUE(!vsm::archive_has_plain_marker(damaged_cd_path.string(), &damaged_cd_ok));
+  EXPECT_TRUE(!vsm::archive_has_plain_format_entry(damaged_cd_path.string(), &damaged_cd_ok));
   EXPECT_TRUE(!damaged_cd_ok);
   const vsm::RestoreResult damaged_extraction = vsm::extract_backup_archive_for_inspection(
       damaged_cd_path.string(), (base / "damaged-extracted").string());
@@ -4338,10 +4548,15 @@ int main() {
   test_backup_archive_probation_stores_mixed_incompressible_prefix();
   test_backup_archive_compressed_round_trip_restores_identical_bytes();
   test_backup_archive_rejects_corrupt_deflate_stream();
-  test_backup_archive_plain_marker_written_first_and_breaks_cd_match();
+  test_backup_archive_plain_format_entry_written_first_and_breaks_cd_match();
+  test_backup_archive_raw_skeleton_entries_ordered_after_format_entry_and_stored();
+  test_extract_backup_archive_skips_format_entry_but_keeps_raw_skeleton();
+  test_parse_plain_format_version_reads_trailing_integer_on_first_line();
+  test_archive_has_plain_marker_recognizes_legacy_name_for_fallback_detection_only();
+  test_comparison_entries_filters_sce_sys_and_raw_skeleton_prefixes();
   test_comparison_entries_ignores_sce_pfs_on_the_folder_side();
   test_entries_match_backup_archive_ignores_sce_pfs_on_the_archive_side_too();
-  test_archive_has_plain_marker_and_restore_extraction_skips_it();
+  test_archive_has_plain_format_entry_and_restore_extraction_skips_it();
   test_detail_view_sizes_from_folder_and_archive();
   test_save_fingerprint_reflects_folder_content();
   test_scan_fingerprints_every_save_and_flags_mount_requiring_ones();

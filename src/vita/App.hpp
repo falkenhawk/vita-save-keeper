@@ -230,16 +230,46 @@ private:
   LocalSnapshotResult create_local_snapshot(const SaveRecord &save, const std::string &suffix,
                                             const char *busy_label, bool force_new = false);
   void handle_restore();
-  // Restores a plain-content archive (Task A2's decrypted-through-a-mount shape, identified by
-  // archive_has_plain_marker): extracts to a work directory, copies it back in through a held
-  // save mount, then re-links the backup's sidecar (and Drive appProperties, when synced) to the
-  // freshly re-encrypted on-disk content. Called from handle_restore in place of
-  // restore_backup_archive for archives carrying the marker; the archive itself is never touched,
-  // so any failure here leaves it as valid a retry source as before the attempt.
+  // Amendment B's two-phase restore for a plain-content archive carrying the raw PFS skeleton
+  // (identified by archive_has_plain_format_entry): extract everything (including the raw .raw/
+  // skeleton) to a work directory, wipe the live save, write the skeleton raw (no mount - the
+  // console re-encrypts nothing yet, this is a plain rename like a legacy raw restore), THEN
+  // acquire the held mount and write the decrypted game files through it, sce_sys excluded (the
+  // skeleton already made it authoritative), then re-link the backup's sidecar (and Drive
+  // appProperties, when synced) to the freshly re-encrypted on-disk content. This is what lets a
+  // fresh console (game installed, never launched) restore straight from an archive: the
+  // skeleton's own keystone/sealedkey give the mount everything it needs. Called from
+  // handle_restore in place of restore_backup_archive for archives carrying the format entry; the
+  // archive itself is never touched, so any failure here leaves it as valid a retry source as
+  // before the attempt.
   RestoreResult restore_plain_content_archive(const SaveRecord &save,
                                               const std::string &archive_path,
                                               const std::string &backup_name,
                                               const BackupRow &row);
+  // Pre-Amendment-B plain restore: mount first, clear the mount's contents (sce_sys/sce_pfs
+  // spared), copy the extracted tree back in through the mount, three-tier dispatch for sce_sys
+  // entries (copy in place, skip, or - never for an existing file - recreate). Kept only for a
+  // plain archive that carries the OLD marker (kPlainContentMarkerName) and no raw skeleton -
+  // none shipped, this session's own pre-Amendment-B test archives are the only known examples -
+  // and requires an already-launched game (see handle_restore's dispatch), unlike the two-phase
+  // restore above.
+  RestoreResult restore_plain_content_archive_fallback(const SaveRecord &save,
+                                                       const std::string &archive_path,
+                                                       const std::string &backup_name,
+                                                       const BackupRow &row);
+  // Shared by both plain restore paths above: after a plain restore's game-file copy completes,
+  // the console has re-encrypted every file it received, so the on-disk (unmounted) walk no
+  // longer matches this backup's recorded triple. Re-walks save.path and updates this backup's
+  // sidecar (and Drive appProperties, when synced) so "no changes since" works again, exactly
+  // like a raw restore gets for free from its rename-based swap. Best-effort: the restore itself
+  // already succeeded either way; a failed write here only means this backup's unchanged-check
+  // falls back to its old triple until the next successful write of it (e.g. this save's next
+  // backup). progress, when set, is forwarded to the re-walk exactly like the caller's own
+  // per-phase progress bar.
+  void relink_plain_restore_metadata(
+      const SaveRecord &save, const std::string &metadata_path, const std::string &backup_name,
+      const SaveMetadataJsonResult &sidecar_before_restore, const BackupRow &row,
+      const std::function<void(std::uint64_t, std::uint64_t)> &progress = {});
   void handle_delete_button();
   void load_google_token_cache();
   bool load_google_credentials();
@@ -331,9 +361,10 @@ private:
                                           const std::vector<ArchiveEntryInfo> &entries) const;
   // Content triple of a local archive, derived from its central directory. Only valid for
   // archives whose entries hold the on-disk bytes: refused (returns false) when the archive
-  // carries the plain-content marker entry, whose CD describes decrypted data, or when the CD is
-  // unreadable or empty. Prefer the sidecar-recorded triple; this exists for archives that
-  // predate it (or a future upload of a raw archive with no sidecar walk available).
+  // carries either plain-content control entry (kPlainContentMarkerName or, Amendment B,
+  // kPlainFormatEntryName), whose CD describes decrypted data, or when the CD is unreadable or
+  // empty. Prefer the sidecar-recorded triple; this exists for archives that predate it (or a
+  // future upload of a raw archive with no sidecar walk available).
   bool compute_raw_archive_content_triple(const std::string &archive_path,
                                           ArchiveContentTriple *out) const;
   void perform_scoped_delete(bool delete_local, bool delete_remote);
