@@ -181,9 +181,14 @@ bool read_archive_central_directory(const std::string &archive_path,
                                     std::vector<ArchiveEntryInfo> *out);
 // True iff the archive's central directory lists an entry named kPlainContentMarkerName - it was
 // written decrypted through a held PFS mount (Task A2) and must be restored through one too.
-// False when the central directory itself could not be read, the same failure mode as
-// read_archive_central_directory (corrupt/truncated archive, or not one of our ZIP shapes).
-bool archive_has_plain_marker(const std::string &archive_path);
+// *cd_ok (when non-null) reports whether the central directory could be read at all. A caller
+// that must not guess when it could not (e.g. handle_restore's dispatch, which must never fall
+// back to the raw rename-based restore and risk writing plaintext into an encrypted, unmounted
+// save just because only the archive's trailing central directory - not its local headers - is
+// damaged) checks *cd_ok before trusting the return value; a caller with its own separate
+// central-directory read and fallback can omit the parameter and treat "unreadable" as "false"
+// exactly as before this parameter existed.
+bool archive_has_plain_marker(const std::string &archive_path, bool *cd_ok = nullptr);
 // True when the archive's central directory lists exactly the given entries.
 bool entries_match_backup_archive(const std::vector<ArchiveEntryInfo> &folder_entries,
                                   const std::string &archive_path);

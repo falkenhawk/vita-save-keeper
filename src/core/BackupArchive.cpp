@@ -1460,9 +1460,13 @@ bool read_archive_central_directory(const std::string &archive_path,
   return true;
 }
 
-bool archive_has_plain_marker(const std::string &archive_path) {
+bool archive_has_plain_marker(const std::string &archive_path, bool *cd_ok) {
   std::vector<ArchiveEntryInfo> entries;
-  if (!read_archive_central_directory(archive_path, &entries)) {
+  const bool read_ok = read_archive_central_directory(archive_path, &entries);
+  if (cd_ok) {
+    *cd_ok = read_ok;
+  }
+  if (!read_ok) {
     return false;
   }
   for (const ArchiveEntryInfo &entry : entries) {

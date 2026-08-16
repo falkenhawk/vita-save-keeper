@@ -571,7 +571,9 @@ void test_archive_has_plain_marker_and_restore_extraction_skips_it() {
   plain_request.add_plain_marker = true;
   const vsm::BackupResult plain_backup = vsm::create_backup_archive(plain_request);
   EXPECT_TRUE(plain_backup.ok);
-  EXPECT_TRUE(vsm::archive_has_plain_marker(plain_backup.archive_path));
+  bool plain_cd_ok = false;
+  EXPECT_TRUE(vsm::archive_has_plain_marker(plain_backup.archive_path, &plain_cd_ok));
+  EXPECT_TRUE(plain_cd_ok);
 
   // Extraction (the plain restore path's building block) skips the marker: the ordinary file
   // lands on disk, but the marker never materializes as a file.
@@ -591,7 +593,9 @@ void test_archive_has_plain_marker_and_restore_extraction_skips_it() {
   raw_request.compression_level = 6;
   const vsm::BackupResult raw_backup = vsm::create_backup_archive(raw_request);
   EXPECT_TRUE(raw_backup.ok);
-  EXPECT_TRUE(!vsm::archive_has_plain_marker(raw_backup.archive_path));
+  bool raw_cd_ok = false;
+  EXPECT_TRUE(!vsm::archive_has_plain_marker(raw_backup.archive_path, &raw_cd_ok));
+  EXPECT_TRUE(raw_cd_ok);
 
   const std::filesystem::path raw_extracted = base / "raw-extracted";
   const vsm::RestoreResult raw_extraction =
@@ -599,8 +603,34 @@ void test_archive_has_plain_marker_and_restore_extraction_skips_it() {
   EXPECT_TRUE(raw_extraction.ok);
   EXPECT_TRUE(std::filesystem::exists(raw_extracted / "data.bin"));
 
-  // An unreadable/nonexistent archive reports false rather than crashing.
+  // A nonexistent archive: unreadable, cd_ok reports false. The 1-arg default-nullptr form (used
+  // by callers with their own separate CD read and fallback) still just answers false, unchanged.
+  bool missing_cd_ok = true;
+  EXPECT_TRUE(
+      !vsm::archive_has_plain_marker((base / "does-not-exist.zip").string(), &missing_cd_ok));
+  EXPECT_TRUE(!missing_cd_ok);
   EXPECT_TRUE(!vsm::archive_has_plain_marker((base / "does-not-exist.zip").string()));
+
+  // A plain archive whose local headers (marker entry included) are intact but whose trailing
+  // end-of-central-directory record is damaged: extract_backup_archive_for_inspection reads
+  // sequentially and stops the moment it reaches the first central-directory-entry signature, so
+  // it never even looks at the damaged trailer and would still "succeed" - the exact scenario
+  // that must not read as "definitely raw" (cd_ok false, not archive_has_plain_marker false), or
+  // a caller like handle_restore's dispatch would rename plaintext straight into an encrypted,
+  // unmounted save.
+  const std::filesystem::path damaged_cd_path = base / "damaged-cd.zip";
+  std::filesystem::copy_file(plain_backup.archive_path, damaged_cd_path);
+  {
+    std::fstream file(damaged_cd_path, std::ios::in | std::ios::out | std::ios::binary);
+    file.seekp(-22, std::ios::end);
+    file.put('\x00');
+  }
+  bool damaged_cd_ok = true;
+  EXPECT_TRUE(!vsm::archive_has_plain_marker(damaged_cd_path.string(), &damaged_cd_ok));
+  EXPECT_TRUE(!damaged_cd_ok);
+  const vsm::RestoreResult damaged_extraction = vsm::extract_backup_archive_for_inspection(
+      damaged_cd_path.string(), (base / "damaged-extracted").string());
+  EXPECT_TRUE(damaged_extraction.ok);
 
   std::filesystem::remove_all(base);
 }

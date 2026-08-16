@@ -619,6 +619,18 @@ bool backup_content_matches(const std::string &entries_signature,
       read_save_metadata_json(local_backup_metadata_path(kBackupRoot, save_id, name));
   if (sidecar.ok && sidecar.archive_identity == backup_identity(name) &&
       sidecar.metadata.content_known) {
+    // The sidecar's recorded triple is the only valid comparison for a plain-content archive (its
+    // central directory holds decrypted bytes, not the on-disk signature), but trusting it alone
+    // would let a corrupt/truncated local zip with an intact sidecar answer "match" and suppress
+    // the pre-delete/pre-restore safety snapshot the old central-directory comparison guaranteed
+    // by construction. Requiring the archive's own central directory to still be readable restores
+    // that guard - a plain archive's CD is readable, just not comparable to a live-folder walk, so
+    // this costs nothing for plain archives - without re-deriving the signature from it.
+    std::vector<ArchiveEntryInfo> probe;
+    if (!read_archive_central_directory(local_backup_archive_path(kBackupRoot, save_id, name),
+                                        &probe)) {
+      return false;
+    }
     return sidecar.metadata.content_signature == entries_signature;
   }
   return entries_match_backup_archive(entries,
@@ -946,7 +958,9 @@ LocalSnapshotResult App::create_local_snapshot(const SaveRecord &save,
     content_is_plain = plain_content;
   } else {
     const SaveMetadataJsonResult existing_sidecar = read_save_metadata_json(metadata_path);
-    content_is_plain = existing_sidecar.ok && existing_sidecar.metadata.content_format == "plain";
+    content_is_plain = existing_sidecar.ok &&
+                       existing_sidecar.archive_identity == backup_identity(plan.archive_name) &&
+                       existing_sidecar.metadata.content_format == "plain";
   }
   end_cancelable_transfer();
 
@@ -2687,7 +2701,18 @@ void App::handle_restore() {
   // restored the same way - the rename-based swap below would drop re-encrypted-on-write bytes
   // onto disk as if they were the raw on-disk shape and corrupt the save.
   RestoreResult result;
-  if (archive_has_plain_marker(archive_path)) {
+  bool archive_cd_ok = false;
+  const bool archive_is_plain = archive_has_plain_marker(archive_path, &archive_cd_ok);
+  if (!archive_cd_ok) {
+    // The central directory could not be read at all - unknown, not "definitely raw". Dispatching
+    // to the raw rename-based restore below on that uncertainty would risk writing plaintext
+    // straight into an encrypted, unmounted save if the archive actually is plain but only its
+    // central directory (or just its trailing end-of-central-directory record) is damaged; local
+    // headers, and the marker entry among them, can still be perfectly intact in that case.
+    // Refuse instead - the archive is untouched, and a healthy copy (redownloaded from Drive, or
+    // a different local backup) is the recovery.
+    result.error = "this backup's archive could not be read";
+  } else if (archive_is_plain) {
     if (!extra_targets.empty()) {
       // Plain archives are single-source by construction: Task A2 only takes the plain path for
       // saves with no extra tracked folders, so a plain-marked archive recording targets anyway
@@ -4033,6 +4058,26 @@ SaveMetadataJsonResult App::ensure_local_backup_metadata(const SaveRecord &save,
     // path is user-initiated (opening details), not per-frame, so re-inspecting next time is cheap.
     return {false, {}, {}, "slot details unavailable"};
   }
+  // Recovery only re-derives times/slots (from sdslot.dat, or from the mount fallback above) - it
+  // can never re-derive the content triple, archive format, or tracked-folder mapping recorded at
+  // backup time, so a previously-read sidecar that is otherwise unusable (e.g. its time source is
+  // BackupClock) must still donate those creation-time facts into the rewritten one, or they are
+  // permanently lost the moment recovery fires once. Gated on matching archive identity, the same
+  // identity-gated-but-not-usable-gated pattern backup_content_matches and the upload site use -
+  // a stale companion from a different archive must never leak its triple into this one.
+  if (metadata.ok && metadata.archive_identity == identity) {
+    if (metadata.metadata.content_known) {
+      recovered.content_signature = metadata.metadata.content_signature;
+      recovered.content_bytes = metadata.metadata.content_bytes;
+      recovered.file_count = metadata.metadata.file_count;
+      recovered.content_known = true;
+      recovered.content_format = metadata.metadata.content_format;
+    }
+    if (!metadata.metadata.tracked_targets.empty()) {
+      recovered.tracked_targets = metadata.metadata.tracked_targets;
+    }
+  }
+
   std::string write_error;
   if (!write_save_metadata_json_atomic(metadata_path, identity, recovered, &write_error)) {
     return {false, {}, {}, write_error};
