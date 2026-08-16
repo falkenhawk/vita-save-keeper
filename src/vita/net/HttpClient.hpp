@@ -27,6 +27,11 @@ public:
   // Live connectivity, not configuration: true only while the console actually has an internet
   // connection. Cheap enough to poll every second.
   static bool network_reachable();
+  // Why the network is (or is not) usable, so a failed request can name the actual obstacle:
+  // Wi-Fi switched off, no network joined, still associating, or connected (in which case the
+  // failure happened past the console).
+  enum class NetworkStatus { Connected, Connecting, Disconnected, WifiOff };
+  static NetworkStatus network_status();
 
   static void set_progress_hook(ProgressHook hook);
   // Polled during transfers (at the progress-frame interval); returning true aborts the request,

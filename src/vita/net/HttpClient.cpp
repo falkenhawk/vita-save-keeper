@@ -348,6 +348,28 @@ bool HttpClient::network_reachable() {
   return state == SCE_NETCTL_STATE_CONNECTED;
 }
 
+HttpClient::NetworkStatus HttpClient::network_status() {
+  int state = 0;
+  if (sceNetCtlInetGetState(&state) < 0) {
+    // netctl refusing to even report a state is what a disabled radio looks like from user mode
+    return NetworkStatus::WifiOff;
+  }
+  if (state == SCE_NETCTL_STATE_CONNECTED) {
+    return NetworkStatus::Connected;
+  }
+  if (state == SCE_NETCTL_STATE_CONNECTING || state == SCE_NETCTL_STATE_FINALIZING) {
+    return NetworkStatus::Connecting;
+  }
+  // Disconnected: ask the wlan device whether its link is up at all. There is no user-mode
+  // radio-switch API, so the link state is the discriminator between "Wi-Fi off" and "Wi-Fi on
+  // but no network joined".
+  SceNetCtlInfo info {};
+  if (sceNetCtlInetGetInfo(SCE_NETCTL_INFO_GET_LINK, &info) < 0 || info.link == 0) {
+    return NetworkStatus::WifiOff;
+  }
+  return NetworkStatus::Disconnected;
+}
+
 void HttpClient::network_shutdown() {
   if (!g_network_ready) {
     return;

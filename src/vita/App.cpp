@@ -2605,11 +2605,29 @@ bool App::refresh_google_access_token() {
     // the network. A rejection with a body (invalid_grant and friends) still parses below.
     google_connected_ = false;
     drive_synced_ = false;
-    set_status(StatusKind::Error,
-               "Google unreachable: " + (response.error.empty()
-                                             ? "no response (HTTP " +
-                                                   std::to_string(response.status) + ")"
-                                             : response.error));
+    // The console's own network state beats curl's view of it: a dead radio or an unjoined
+    // network reads as a DNS failure from curl, which sends users hunting resolver problems
+    // that are really the Wi-Fi toggle.
+    std::string reason;
+    switch (HttpClient::network_status()) {
+    case HttpClient::NetworkStatus::WifiOff:
+      reason = "Wi-Fi is turned off";
+      break;
+    case HttpClient::NetworkStatus::Disconnected:
+      reason = "not connected to a Wi-Fi network";
+      break;
+    case HttpClient::NetworkStatus::Connecting:
+      reason = "Wi-Fi is still connecting";
+      break;
+    case HttpClient::NetworkStatus::Connected:
+      // curl's reason verbatim: "Could not resolve host: ..." and friends are recognizable
+      // wordings, and a truncated familiar message beats an intact paraphrase
+      reason = response.error.empty()
+                   ? "no response (HTTP " + std::to_string(response.status) + ")"
+                   : response.error;
+      break;
+    }
+    set_status(StatusKind::Error, "Google unreachable: " + reason);
     return false;
   }
   const TokenResponse token = parse_token_response(response.body);
