@@ -5451,12 +5451,33 @@ int App::run() {
   int browser_l_hold_frames = 0;
   bool browser_l_hold_consumed = false;
   int network_poll_delay_frames = 0;
+  bool drive_resync_pending = false;
   while (running) {
     if (network_poll_delay_frames <= 0) {
+      const bool was_connected = network_connected_;
       network_connected_ = HttpClient::network_reachable();
+      if (!was_connected && network_connected_ && google_token_cache_.ok && !drive_synced_) {
+        // Wi-Fi just came back on a signed-in console whose Drive view never loaded (an offline
+        // boot, or a drop mid-run): finish the sync automatically instead of waiting for a
+        // manual Drive action. Edge-triggered on purpose - a failed attempt waits for the next
+        // reconnect rather than retrying a half-working network every second.
+        drive_resync_pending = true;
+      }
       network_poll_delay_frames = kFramesPerSecond;
     }
     --network_poll_delay_frames;
+    if (drive_resync_pending && !slot_details_.open && !directory_browser_.open &&
+        !google_auth_pending_) {
+      // Deferred until the plain grid, so the sync modal never lands on top of another screen.
+      drive_resync_pending = false;
+      if (!drive_synced_ && ensure_google_access_token() && sync_drive_index()) {
+        refresh_remote_backups_view();
+        if (sort_mode_ == SaveSortMode::LastBackup) {
+          apply_sort_and_rebuild();
+        }
+        sync_backup_settings();
+      }
+    }
 
     SceCtrlData pad{};
     sceCtrlPeekBufferPositive(0, &pad, 1);
