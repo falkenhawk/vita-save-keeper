@@ -4,6 +4,18 @@ All notable changes to Save Keeper are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.3.1] - 2026-08-16
+
+### Fixed
+- loading no longer hangs on apps with thousands of files in their savedata (e.g. Custom Themes
+  Manager's cache) - such folders now scan in about a second
+- faster loading, save details, and backup creation - especially with large save folders
+- network trouble while refreshing the Google session now says so, instead of the misleading
+  "invalid token response"
+- with a stored sign-in, Drive syncs by itself once Wi-Fi comes back - no manual refresh needed
+- the PlayStation Mobile runtime package (`PCSI00011`) no longer poses as a Vita game - it
+  lives in the Homebrew tab now
+
 ## [1.3.0] - 2026-08-03
 
 ### Added
