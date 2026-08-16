@@ -31,6 +31,11 @@ bool is_retail_vita_title_id(const std::string &id) {
 // them. PCSG90096 is h-encore (and h-encore2), riding the "bitter smile" demo.
 bool is_exploit_save_id(const std::string &id) { return id == "PCSG90096"; }
 
+// Sony plumbing with a retail-shaped id: PCSI00011 is the PlayStation Mobile runtime package,
+// which installs like a game and keeps savedata but is not a playable title. It sits with the
+// other non-game saves in the Homebrew tab instead of between real Vita games (issue #3).
+bool is_utility_save_id(const std::string &id) { return id == "PCSI00011"; }
+
 SaveCategory classify_save(const SaveRecord &save) {
   if (save.platform == SavePlatform::Psp) {
     return SaveCategory::Psp;
@@ -40,7 +45,7 @@ SaveCategory classify_save(const SaveRecord &save) {
     return SaveCategory::VitaGame;
   }
   const std::string &id = save.title_id.empty() ? save.id : save.title_id;
-  if (is_exploit_save_id(id)) {
+  if (is_exploit_save_id(id) || is_utility_save_id(id)) {
     return SaveCategory::Homebrew;
   }
   return is_retail_vita_title_id(id) ? SaveCategory::VitaGame : SaveCategory::Homebrew;

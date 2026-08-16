@@ -2547,6 +2547,11 @@ void test_save_category_classification() {
   exploit.id = "PCSG90096";
   EXPECT_TRUE(vsm::classify_save(exploit) == vsm::SaveCategory::Homebrew);
 
+  // the PlayStation Mobile runtime package is retail-shaped Sony plumbing, not a game
+  vsm::SaveRecord psm_runtime;
+  psm_runtime.id = "PCSI00011";
+  EXPECT_TRUE(vsm::classify_save(psm_runtime) == vsm::SaveCategory::Homebrew);
+
   vsm::SaveRecord card;
   card.platform = vsm::SavePlatform::GameCard;
   card.id = "WHATEVER1";
