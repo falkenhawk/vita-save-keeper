@@ -3142,11 +3142,23 @@ RestoreResult App::restore_plain_content_archive(const SaveRecord &save,
     return {false, "could not mount the save for restore"};
   }
 
-  // Nothing needs clearing first (save.path was wiped from scratch above); write the decrypted
-  // game files straight in. sce_sys is still skipped wholesale in this general walk (the `true`
-  // argument) - keystone/sealedkey must never be mount-written (see copy_tree_through_mount's own
-  // comment for the hardware evidence why) - but that no longer means the whole subtree is left
-  // alone: the adaptive loop just below handles every sce_sys/ file the raw skeleton did not.
+  // The on-disk wipe above cannot touch the RECORDS the skeleton's sce_pfs carries for the
+  // backup's game files and directories - they describe entries that are not on disk yet, and
+  // creating over such a stale record fails (hardware-proven twice: file creates until the
+  // per-file pre-remove, then mkdir over DQB's slot0000/ directory records, which no per-file
+  // pre-remove can reach). Clearing the mounted view drops every stale game record wholesale -
+  // unlink/rmdir by name is the same mechanism the pre-remove already proved drops records - so
+  // the copy below creates everything fresh. sce_pfs and sce_sys are spared by the clear's own
+  // protected-path rule; the adaptive sce_sys loop handles its files' stale records per file.
+  if (!clear_mounted_save_contents(save.path)) {
+    release_held_save_mount(mount_name);
+    return {false, "could not clear the mounted save for restore"};
+  }
+
+  // sce_sys is still skipped wholesale in this general walk (the `true` argument) -
+  // keystone/sealedkey must never be mount-written (see copy_tree_through_mount's own comment
+  // for the hardware evidence why) - but that no longer means the whole subtree is left alone:
+  // the adaptive loop just below handles every sce_sys/ file the raw skeleton did not.
   std::uint64_t copy_bytes_done = 0;
   std::uint64_t copy_last_reported = 0;
   const auto on_copy_bytes = [&](std::size_t chunk) {
