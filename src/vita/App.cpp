@@ -3024,11 +3024,12 @@ RestoreResult App::restore_plain_content_archive(const SaveRecord &save,
   // never reached by that loop; a fat archive's raw skeleton already contains everything, so the
   // loop mount-writes nothing for it and restore behaves exactly as it always did.
   //
-  // Progress bar: same continuous 3-phase design as the fallback above (see its own comment for
-  // the display(phase, done, total) formula) - extract, mount-and-copy-game-files, re-link. The
-  // wipe and raw skeleton write between phases 0 and 1 are tiny (a couple hundred KB to a few MB
-  // at most, see kRawSkeletonCapBytes) and have no phase of their own; they run without progress
-  // reporting.
+  // Progress bar: one continuous fill across extract, mounted copy, and the re-link walk, each
+  // phase spanning a share of the bar weighted by the bytes it actually moves - extract processes
+  // the compressed archive while copy and re-link each process the full content, so a slim
+  // archive's ~100 KB extract is an honest sliver instead of the frozen third the old equal-phase
+  // split showed on hardware. The wipe and raw skeleton write between the phases are tiny (see
+  // kRawSkeletonCapBytes) and have no span of their own.
   const std::string metadata_path = local_backup_metadata_path(kBackupRoot, save.id, backup_name);
   const SaveMetadataJsonResult sidecar_before_restore = read_save_metadata_json(metadata_path);
   const bool sidecar_usable_upfront =
@@ -3041,26 +3042,34 @@ RestoreResult App::restore_plain_content_archive(const SaveRecord &save,
           ? static_cast<std::uint64_t>(sidecar_before_restore.metadata.content_bytes)
           : 0;
 
-  const auto phase_progress = [this](std::uint64_t total_content, int phase_index,
-                                     int phase_count, std::uint64_t done, std::uint64_t total) {
+  const auto phase_progress = [this](std::uint64_t total_content, std::uint64_t start_permille,
+                                     std::uint64_t span_permille, std::uint64_t done,
+                                     std::uint64_t total) {
     if (total_content == 0 || total == 0) {
       ui_.draw_busy("Restoring save", static_cast<long long>(done), static_cast<long long>(total));
       return;
     }
     const std::uint64_t clamped_done = std::min(done, total);
-    const std::uint64_t shown =
-        (total_content * static_cast<std::uint64_t>(phase_index) +
-         (total_content * clamped_done) / total) /
-        static_cast<std::uint64_t>(phase_count);
-    ui_.draw_busy("Restoring save", static_cast<long long>(shown),
+    const std::uint64_t permille = start_permille + span_permille * clamped_done / total;
+    ui_.draw_busy("Restoring save", static_cast<long long>(total_content * permille / 1000),
                   static_cast<long long>(total_content));
   };
 
+  // Extract's share of the bar: its compressed bytes against the whole restore's byte volume
+  // (archive + content moved twice more). Zero when the sidecar gave no upfront content size -
+  // the extract then reports raw archive bytes through the lambda's degraded path, and the
+  // weighted fill starts with the copy phase once extraction has measured the content.
+  bool archive_size_ok = false;
+  const std::uint64_t archive_bytes = archive_file_size(archive_path, &archive_size_ok);
+  std::uint64_t extract_span = 0;
+  if (sidecar_usable_upfront && archive_size_ok && archive_bytes > 0) {
+    extract_span = 1000 * archive_bytes / (archive_bytes + 2 * content_total);
+  }
   BackupInspectionDirectory work(archive_path + ".restore-plain-tmp");
   const RestoreResult extracted = extract_backup_archive_for_inspection(
       archive_path, work.path(), UINT64_MAX,
-      [&phase_progress, content_total](std::uint64_t done, std::uint64_t total) {
-        phase_progress(content_total, 0, 3, done, total);
+      [&phase_progress, content_total, extract_span](std::uint64_t done, std::uint64_t total) {
+        phase_progress(content_total, 0, extract_span, done, total);
       });
   if (!extracted.ok) {
     // Nothing was touched yet: the archive is untouched and the work directory is cleaned up by
@@ -3075,15 +3084,15 @@ RestoreResult App::restore_plain_content_archive(const SaveRecord &save,
     // would only fail the same way again.
     return {false, "this backup cannot restore the save's protected files"};
   }
-  int phase_count = 3;
-  int copy_phase_index = 1;
-  int relink_phase_index = 2;
+  std::uint64_t copy_start = extract_span;
   if (!sidecar_usable_upfront) {
+    // The extract already ran on the degraded raw-bytes bar; the weighted fill begins at zero.
     content_total = extracted.content_bytes;
-    phase_count = 2;
-    copy_phase_index = 0;
-    relink_phase_index = 1;
+    copy_start = 0;
   }
+  const std::uint64_t copy_span = (1000 - copy_start) / 2;
+  const std::uint64_t relink_start = copy_start + copy_span;
+  const std::uint64_t relink_span = 1000 - relink_start;
 
   // Wipe the live save raw and write the skeleton back raw, before any mount. Safety net: the
   // pre-restore auto-backup already ran unless this save's content exactly matched an existing
@@ -3148,7 +3157,7 @@ RestoreResult App::restore_plain_content_archive(const SaveRecord &save,
       return;
     }
     copy_last_reported = copy_bytes_done;
-    phase_progress(content_total, copy_phase_index, phase_count, copy_bytes_done, content_total);
+    phase_progress(content_total, copy_start, copy_span, copy_bytes_done, content_total);
   };
   const bool copied =
       copy_tree_through_mount(work.path(), save.path, /*sce_sys_authoritative_from_skeleton=*/true,
@@ -3169,13 +3178,13 @@ RestoreResult App::restore_plain_content_archive(const SaveRecord &save,
     // the restore (which re-wipes and re-writes the skeleton from scratch) is the recovery.
     return {false, "could not copy the save through the mount"};
   }
-  phase_progress(content_total, copy_phase_index, phase_count, content_total, content_total);
+  phase_progress(content_total, copy_start, copy_span, content_total, content_total);
 
   relink_plain_restore_metadata(
       save, metadata_path, backup_name, sidecar_before_restore, row,
-      [&phase_progress, content_total, relink_phase_index, phase_count](std::uint64_t done,
-                                                                        std::uint64_t total) {
-        phase_progress(content_total, relink_phase_index, phase_count, done, total);
+      [&phase_progress, content_total, relink_start, relink_span](std::uint64_t done,
+                                                                  std::uint64_t total) {
+        phase_progress(content_total, relink_start, relink_span, done, total);
       });
 
   return {true, {}};
