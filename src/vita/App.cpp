@@ -761,12 +761,27 @@ std::string matching_backup_name(const std::vector<ArchiveEntryInfo> &entries,
   // never fire.
   const std::vector<ArchiveEntryInfo> comparable = comparison_entries(entries);
   const std::string signature = compute_content_signature(comparable);
+  // The same content routinely lives in several archives at once - a restore makes the live save
+  // match the restored archive AND every earlier archive of that content, compressed and raw
+  // alike. Returning the first hit made the caller's "back up again to compress" hint depend on
+  // list order: it could name a raw archive while a plain twin sat next to it. Prefer a
+  // plain-format match, so the hint only fires when no compressed archive carries the content.
+  std::string first_match;
   for (const std::string &existing : backup_names) {
-    if (backup_content_matches(signature, comparable, save_id, existing)) {
+    if (!backup_content_matches(signature, comparable, save_id, existing)) {
+      continue;
+    }
+    if (first_match.empty()) {
+      first_match = existing;
+    }
+    const SaveMetadataJsonResult sidecar =
+        read_save_metadata_json(local_backup_metadata_path(kBackupRoot, save_id, existing));
+    if (sidecar.ok && sidecar.archive_identity == backup_identity(existing) &&
+        sidecar.metadata.content_format == "plain") {
       return existing;
     }
   }
-  return {};
+  return first_match;
 }
 
 std::string drive_folder_name_for(const std::string &save_id) {
