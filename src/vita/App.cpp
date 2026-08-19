@@ -3055,16 +3055,14 @@ RestoreResult App::restore_plain_content_archive(const SaveRecord &save,
                   static_cast<long long>(total_content));
   };
 
-  // Extract's share of the bar: its compressed bytes against the whole restore's byte volume
-  // (archive + content moved twice more). Zero when the sidecar gave no upfront content size -
-  // the extract then reports raw archive bytes through the lambda's degraded path, and the
-  // weighted fill starts with the copy phase once extraction has measured the content.
-  bool archive_size_ok = false;
-  const std::uint64_t archive_bytes = archive_file_size(archive_path, &archive_size_ok);
-  std::uint64_t extract_span = 0;
-  if (sidecar_usable_upfront && archive_size_ok && archive_bytes > 0) {
-    extract_span = 1000 * archive_bytes / (archive_bytes + 2 * content_total);
-  }
+  // Extract's share of the bar: a full third. Its PROGRESS input is compressed archive bytes
+  // (reported ~32 times regardless of archive size), but its WORK is inflating the whole content
+  // into the work directory - wall-clock comparable to the copy phase - so weighting it by
+  // archive bytes made a slim archive's extract crawl through ~1% of the bar for several real
+  // seconds (hardware-observed). Zero when the sidecar gave no upfront content size - the
+  // extract then reports raw archive bytes through the lambda's degraded path, and the weighted
+  // fill starts with the copy phase once extraction has measured the content.
+  const std::uint64_t extract_span = sidecar_usable_upfront ? 333 : 0;
   BackupInspectionDirectory work(archive_path + ".restore-plain-tmp");
   const RestoreResult extracted = extract_backup_archive_for_inspection(
       archive_path, work.path(), UINT64_MAX,
