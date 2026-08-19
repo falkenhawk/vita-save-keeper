@@ -885,7 +885,8 @@ bool ensure_parent_directory(const std::string &path) {
 // at the end (no leftover compressed bytes, no short output) so a truncated or corrupt deflate
 // stream is reported as failure rather than silently producing partial data.
 bool inflate_entry_to_file(FILE *zip, const LocalZipHeader &header, FILE *output,
-                           std::uint32_t *crc, const std::function<void()> &on_chunk) {
+                           std::uint32_t *crc,
+                           const std::function<void(std::size_t)> &on_chunk) {
   z_stream stream {};
   if (inflateInit2(&stream, -15) != Z_OK) {
     return false;
@@ -933,7 +934,7 @@ bool inflate_entry_to_file(FILE *zip, const LocalZipHeader &header, FILE *output
       *crc = update_crc32(*crc, out_buffer.data(), produced);
       total_out += produced;
       if (on_chunk) {
-        on_chunk();
+        on_chunk(produced);
       }
     }
   }
@@ -998,7 +999,7 @@ bool inflate_entry_to_buffer(FILE *zip, const LocalZipHeader &header,
 // Extracts one entry (store or deflate) to destination_path, CRC-checking the uncompressed bytes
 // against the header regardless of method.
 bool extract_file(FILE *zip, const LocalZipHeader &header, const std::string &destination_path,
-                  const std::function<void()> &on_chunk = {}) {
+                  const std::function<void(std::size_t)> &on_chunk = {}) {
   if (!ensure_parent_directory(destination_path)) {
     return false;
   }
@@ -1022,7 +1023,7 @@ bool extract_file(FILE *zip, const LocalZipHeader &header, const std::string &de
       crc = update_crc32(crc, buffer.data(), chunk);
       remaining -= static_cast<std::uint32_t>(chunk);
       if (on_chunk) {
-        on_chunk();
+        on_chunk(chunk);
       }
     }
   } else {
@@ -1046,13 +1047,16 @@ bool extract_archive_to_directory(
     FILE *zip, const std::string &destination_path, std::uint64_t max_total_bytes,
     bool *file_timestamps_uniform = nullptr,
     const std::function<void(std::uint64_t, std::uint64_t)> &progress = {},
-    std::uint64_t *extracted_content_bytes = nullptr) {
-  // Progress counts bytes consumed from the archive stream, so headers ride along for free and
-  // the bar lands exactly on the file size when the entries end at the central directory. The
-  // stream position is the single source of truth; no second pass over the archive is needed.
+    std::uint64_t *extracted_content_bytes = nullptr, std::uint64_t output_total = 0) {
+  // Two progress modes. With output_total (the caller pre-summed the entries' uncompressed
+  // sizes): report bytes PRODUCED against it - inflate's effort is proportional to output, so
+  // this is the bar that tracks real work; a highly compressed entry no longer crawls the bar
+  // while the console works hardest. Without it: legacy mode, bytes consumed from the archive
+  // stream via the stream position, which is what the raw restore bar has always shown.
   std::uint64_t archive_bytes = 0;
   std::uint64_t last_reported = 0;
-  std::function<void()> on_chunk;
+  std::uint64_t produced_total = 0;
+  std::function<void(std::size_t)> on_chunk;
   if (progress) {
     const long start = std::ftell(zip);
     if (start >= 0 && std::fseek(zip, 0, SEEK_END) == 0) {
@@ -1061,23 +1065,34 @@ bool extract_archive_to_directory(
         archive_bytes = static_cast<std::uint64_t>(end);
       }
     }
-    progress(0, archive_bytes);
-    // Report roughly 128 times across the archive regardless of its size: a fixed 256 KB step
-    // never fires for an archive smaller than that (a slim plain archive is ~100 KB), which
-    // showed up on hardware as a restore bar frozen at zero through the whole extract phase -
-    // and 32 steps still felt like one sluggish jump per second on a multi-minute extract.
-    // Large archives still step at most every kProgressReportStep, bounding redraw cost.
+    const std::uint64_t report_total = output_total > 0 ? output_total : archive_bytes;
+    progress(0, report_total);
+    // Report roughly 128 times across the run regardless of size: a fixed 256 KB step never
+    // fires for an archive smaller than that (a slim plain archive is ~100 KB), which showed up
+    // on hardware as a restore bar frozen at zero through the whole extract phase - and 32 steps
+    // still felt like one sluggish jump per second on a multi-minute extract. Large runs still
+    // step at most every kProgressReportStep, bounding redraw cost.
     const std::uint64_t report_step = std::min<std::uint64_t>(
-        kProgressReportStep, std::max<std::uint64_t>(archive_bytes / 128, 4u * 1024u));
-    on_chunk = [&last_reported, &progress, archive_bytes, report_step, zip] {
-      const long position = std::ftell(zip);
-      if (position < 0) {
-        return;
+        kProgressReportStep, std::max<std::uint64_t>(report_total / 128, 4u * 1024u));
+    on_chunk = [&last_reported, &produced_total, &progress, archive_bytes, output_total,
+                report_step, zip](std::size_t produced) {
+      std::uint64_t done = 0;
+      std::uint64_t total = 0;
+      if (output_total > 0) {
+        produced_total += produced;
+        done = produced_total;
+        total = output_total;
+      } else {
+        const long position = std::ftell(zip);
+        if (position < 0) {
+          return;
+        }
+        done = static_cast<std::uint64_t>(position);
+        total = archive_bytes;
       }
-      const std::uint64_t done = static_cast<std::uint64_t>(position);
       if (done - last_reported >= report_step) {
         last_reported = done;
-        progress(std::min(done, archive_bytes), archive_bytes);
+        progress(std::min(done, total), total);
       }
     };
   }
@@ -1102,7 +1117,8 @@ bool extract_archive_to_directory(
         *file_timestamps_uniform = entry_count > 0 && timestamps_uniform;
       }
       if (progress) {
-        progress(archive_bytes, archive_bytes);
+        const std::uint64_t report_total = output_total > 0 ? output_total : archive_bytes;
+        progress(report_total, report_total);
       }
       if (extracted_content_bytes) {
         *extracted_content_bytes = total_bytes;
@@ -1850,10 +1866,24 @@ RestoreResult extract_backup_archive_for_inspection(
   }
   bool timestamps_uniform = false;
   std::uint64_t content_bytes = 0;
+  // Pre-sum the entries this extraction will actually write (the skip-listed control entries
+  // never land on disk), so progress can run in output mode - see extract_archive_to_directory.
+  // An unreadable central directory just falls back to legacy archive-byte progress.
+  std::uint64_t output_total = 0;
+  if (progress) {
+    std::vector<ArchiveEntryInfo> cd_entries;
+    if (read_archive_central_directory(archive_path, &cd_entries)) {
+      for (const ArchiveEntryInfo &entry : cd_entries) {
+        if (entry.path != kPlainContentMarkerName && entry.path != kPlainFormatEntryName) {
+          output_total += entry.size;
+        }
+      }
+    }
+  }
   const bool extracted = ensure_directory(destination_path) &&
                          extract_archive_to_directory(zip, destination_path, max_total_bytes,
                                                       &timestamps_uniform, progress,
-                                                      &content_bytes);
+                                                      &content_bytes, output_total);
   std::fclose(zip);
   RestoreResult result = extracted ? RestoreResult{true, {}, timestamps_uniform}
                                    : restore_error("could not inspect archive");

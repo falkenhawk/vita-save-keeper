@@ -2936,7 +2936,9 @@ void test_restore_and_inspection_report_archive_byte_progress() {
     EXPECT_TRUE(i == 0 || reports[i - 1].first <= reports[i].first);
   }
 
-  // The inspection extractor shares the plumbing.
+  // The inspection extractor shares the plumbing but reports in OUTPUT mode: bytes produced
+  // against the pre-summed uncompressed total, because inflate's effort tracks output, not the
+  // compressed bytes consumed (the raw restore above keeps the legacy archive-byte bar).
   reports.clear();
   EXPECT_TRUE(vsm::extract_backup_archive_for_inspection(
                   backup.archive_path, (base / "inspection").string(),
@@ -2946,7 +2948,8 @@ void test_restore_and_inspection_report_archive_byte_progress() {
                   })
                   .ok);
   EXPECT_TRUE(!reports.empty());
-  EXPECT_TRUE(reports.back().first == archive_bytes);
+  EXPECT_TRUE(reports.back().first == source_bytes);
+  EXPECT_TRUE(reports.back().second == source_bytes);
 
   std::filesystem::remove_all(base);
 }

@@ -2955,7 +2955,7 @@ RestoreResult App::restore_plain_content_archive_fallback(const SaveRecord &save
   if (!extracted.ok) {
     // Nothing was touched yet: the archive is untouched and the work directory is cleaned up by
     // BackupInspectionDirectory's destructor.
-    return {false, "could not extract the backup for restore"};
+    return {false, "could not extract the backup"};
   }
   // Falls back to what extraction actually moved when the sidecar could not supply a total up
   // front (see the comment above) - always known now, and always non-zero for a real save.
@@ -2973,7 +2973,7 @@ RestoreResult App::restore_plain_content_archive_fallback(const SaveRecord &save
   if (mount_name.empty()) {
     // The game must be installed for its save to mount; the archive is untouched, so (re)installing
     // it and retrying is the recovery.
-    return {false, "could not mount the save for restore"};
+    return {false, "could not mount the save"};
   }
 
   // Clear the mounted directory's CONTENTS (not the folder itself - the mount stays open over
@@ -3001,7 +3001,7 @@ RestoreResult App::restore_plain_content_archive_fallback(const SaveRecord &save
     // Partial-failure semantics mirror the existing per-target restore: a failure mid-copy can
     // leave a partially restored save behind, but the archive itself is untouched, so retrying
     // the restore is the recovery.
-    return {false, "could not copy the save through the mount"};
+    return {false, "copy through the mount failed"};
   }
   // Lands the bar exactly on the copy phase's own boundary regardless of the throttle's last
   // reported step, the same way every other throttled pass in this app closes itself out.
@@ -3090,7 +3090,7 @@ RestoreResult App::restore_plain_content_archive(const SaveRecord &save,
   if (!extracted.ok) {
     // Nothing was touched yet: the archive is untouched and the work directory is cleaned up by
     // BackupInspectionDirectory's destructor.
-    return {false, "could not extract the backup for restore"};
+    return {false, "could not extract the backup"};
   }
   if (!raw_skeleton_has_required_crypto(work.path())) {
     // Refuse before the wipe just below, which is one-way: a slim archive missing either crypto
@@ -3098,7 +3098,7 @@ RestoreResult App::restore_plain_content_archive(const SaveRecord &save,
     // save folder - see raw_skeleton_has_required_crypto's own comment. The live save is
     // untouched; the archive itself was never a valid two-phase source, so retrying this restore
     // would only fail the same way again.
-    return {false, "this backup cannot restore the save's protected files"};
+    return {false, "backup lacks protected files"};
   }
   std::uint64_t copy_start = extract_span;
   if (!sidecar_usable_upfront) {
@@ -3118,10 +3118,10 @@ RestoreResult App::restore_plain_content_archive(const SaveRecord &save,
   // does not exist yet; remove_directory_tree treats that as already-deleted and the directory
   // create just below lays the (empty) folder down for the first time.
   if (!remove_directory_tree(save.path)) {
-    return {false, "could not clear the live save for restore"};
+    return {false, "could not clear the save"};
   }
   if (!ensure_directory_path(save.path)) {
-    return {false, "could not recreate the save folder"};
+    return {false, "could not recreate the folder"};
   }
   bool skeleton_ok = true;
   for (const char *dir_name : {"sce_sys", "sce_pfs"}) {
@@ -3141,7 +3141,7 @@ RestoreResult App::restore_plain_content_archive(const SaveRecord &save,
     }
   }
   if (!skeleton_ok) {
-    return {false, "could not write the save's raw sce_sys/sce_pfs data for restore"};
+    return {false, "could not write protected files"};
   }
   // The raw skeleton's own sce_sys file list, relative to sce_sys/ itself - not a hardcoded name
   // list - is what the adaptive mounted-copy phase below uses to decide, per file, whether it was
@@ -3157,7 +3157,7 @@ RestoreResult App::restore_plain_content_archive(const SaveRecord &save,
     // The save now holds only the raw skeleton (sce_sys + sce_pfs), no game files: a retry
     // re-runs this whole sequence cleanly from the untouched archive - there is no partial state
     // to resume from, only to redo.
-    return {false, "could not mount the save for restore"};
+    return {false, "could not mount the save"};
   }
 
   // The on-disk wipe above cannot touch the RECORDS the skeleton's sce_pfs carries for the
@@ -3171,7 +3171,7 @@ RestoreResult App::restore_plain_content_archive(const SaveRecord &save,
   // sce_pfs and sce_sys are spared by its protected-path rule.
   if (!clear_mounted_save_contents(save.path)) {
     release_held_save_mount(mount_name);
-    return {false, "could not clear the mounted save for restore"};
+    return {false, "could not clear the mount"};
   }
 
   // sce_sys is still skipped wholesale in this general walk (the `true` argument) -
@@ -3205,7 +3205,7 @@ RestoreResult App::restore_plain_content_archive(const SaveRecord &save,
     // Partial-failure semantics mirror every other restore path here: a failure mid-copy can
     // leave a partially restored save behind, but the archive itself is untouched, so retrying
     // the restore (which re-wipes and re-writes the skeleton from scratch) is the recovery.
-    return {false, "could not copy the save through the mount"};
+    return {false, "copy through the mount failed"};
   }
   phase_progress(content_total, copy_start, copy_span, content_total, content_total);
 
@@ -3384,7 +3384,7 @@ void App::handle_restore() {
     // headers, and the format entry among them, can still be perfectly intact in that case.
     // Refuse instead - the archive is untouched, and a healthy copy (redownloaded from Drive, or
     // a different local backup) is the recovery.
-    result.error = "this backup's archive could not be read";
+    result.error = "backup archive is unreadable";
   } else if (archive_has_format_entry) {
     // Format-version gate: refuse a future format this build does not understand rather than
     // guess at it. Unreadable/missing content should never happen for our own writer (which
@@ -3398,14 +3398,14 @@ void App::handle_restore() {
                   std::string(format_read.data.begin(), format_read.data.end()))
             : 1;
     if (format_version > 1) {
-      result.error = "this backup needs a newer Save Keeper";
+      result.error = "backup needs a newer Save Keeper";
     } else if (!extra_targets.empty()) {
       // Plain archives are single-source by construction: the plain backup path only ever takes
       // this shape for saves with no extra tracked folders, so a format-entry archive recording
       // targets anyway means something is wrong (a hand-tampered sidecar, or a future bug in the
       // backup path's own gate). Refuse rather than guess how to fan a single held mount across
       // several prefixes.
-      result.error = "this backup's format and folder layout are inconsistent";
+      result.error = "backup layout is inconsistent";
     } else {
       // No "launch the game once" pre-check here, unlike the fallback below: the two-phase
       // restore writes the raw sce_sys/sce_pfs skeleton BEFORE acquiring the mount, so it works
@@ -3416,7 +3416,7 @@ void App::handle_restore() {
     }
   } else if (archive_has_legacy_marker) {
     if (!extra_targets.empty()) {
-      result.error = "this backup's format and folder layout are inconsistent";
+      result.error = "backup layout is inconsistent";
     } else if (!save_directory_has_pfs_metadata(save.path)) {
       // A skeleton-less plain archive can only be restored by writing through the game's own PFS
       // mount, and that mount needs an existing keystone/sealedkey pair the game itself minted on
@@ -3429,7 +3429,7 @@ void App::handle_restore() {
       // launched here keeps working (its own keystone/sealedkey are already in place); the legacy
       // raw restore path below is untouched by this check and still restores into a nonexistent
       // folder as before, since a raw restore never needs a mount at all.
-      result.error = "launch the game once to create its save, then restore this backup";
+      result.error = "launch the game once, then retry";
     } else {
       result = restore_plain_content_archive_fallback(save, archive_path, backup_name, row);
     }
