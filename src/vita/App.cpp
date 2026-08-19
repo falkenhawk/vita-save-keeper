@@ -2297,11 +2297,11 @@ void App::create_new_backup() {
                                         backup_compression_level_ >= 1 &&
                                         save_directory_has_pfs_metadata(save.path);
         // Says why a new backup is redundant; the footer offers "Create New Backup Anyway".
+        // The hint variant drops the backup name: the 380px status budget can only shrink the
+        // name, so a fixed suffix this long would always end up ellipsized mid-word next to it.
         set_status(StatusKind::Info,
                    !matched_is_plain && plain_eligible_now
-                       ? status_with_name(
-                             "No changes since ", display_backup_name(match),
-                             " - back up again to compress it.")
+                       ? "No changes - back up again to compress the old backup."
                        : status_with_name("No changes since ", display_backup_name(match), "."));
         return;
       }
