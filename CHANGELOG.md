@@ -15,11 +15,12 @@ All notable changes to Save Keeper are documented here. The format follows
 
 ### Changed
 - backups are compressed now, and retail Vita saves are backed up decrypted through the console's
-  own mount, so big saves genuinely take less room on the memory card and on Google Drive.
-  Content that is already packed tight (LittleBigPlanet's own archives, photos) is stored as-is -
-  never larger - and every backup made by older versions still restores exactly as before
+  own mount, so the space savings are often huge - and every backup made by older versions still
+  restores exactly as before
 - older Save Keeper versions refuse the new backups cleanly instead of restoring them wrongly -
   restoring one of the new backups needs its game installed on the console
+- restoring works even when the save folder does not exist yet (same as before) - no need to
+  launch the game first, the backup carries everything the console needs to recreate it
 
 ## [1.3.1] - 2026-08-16
 

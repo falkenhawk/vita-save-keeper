@@ -542,6 +542,13 @@ bool copy_regular_file_through_mount(const std::string &source_path,
   if (!input) {
     return false;
   }
+  // Remove the destination by name before creating it. After a two-phase restore lays the raw
+  // sce_pfs skeleton down, its records still describe the game files of the backup - files that
+  // are not on disk yet - and creating over such a stale record fails outright (hardware-verified:
+  // the first mounted create failed instantly until this unlink was added, and succeeded with it).
+  // The unlink drops the stale record so the create registers the file fresh; when no record
+  // exists it fails with ENOENT and costs nothing.
+  std::remove(destination_path.c_str());
   FILE *output = std::fopen(destination_path.c_str(), "wb");
   if (!output) {
     std::fclose(input);
@@ -2294,7 +2301,7 @@ void App::create_new_backup() {
                    !matched_is_plain && plain_eligible_now
                        ? status_with_name(
                              "No changes since ", display_backup_name(match),
-                             " - stored uncompressed, back up again to shrink it.")
+                             " - back up again to compress it.")
                        : status_with_name("No changes since ", display_backup_name(match), "."));
         return;
       }
