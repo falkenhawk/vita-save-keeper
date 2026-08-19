@@ -43,6 +43,7 @@
 #include <set>
 #include <string>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -632,7 +633,24 @@ bool copy_tree_through_mount(const std::string &source_root, const std::string &
     }
     const std::string destination_path = join_path(destination_dir, entry.name);
     if (entry.is_directory) {
-      if (!ensure_directory(destination_path.c_str())) {
+      // A stale sce_pfs directory record (the skeleton still lists the backup's directories,
+      // which are not on disk yet) makes this mkdir fail with the console's "already exists"
+      // (hardware-observed errno 120 on DQB's slot directories), and no clearing pass can help:
+      // record-only entries are invisible to directory listings, only name-addressed operations
+      // reach them. Escalate by name like the file pre-remove does: retry after an rmdir of the
+      // record, and failing that accept the record itself as the directory - child writes resolve
+      // through it and drop their own stale records per file.
+      bool directory_ready = ensure_directory(destination_path.c_str());
+      if (!directory_ready) {
+        ::rmdir(destination_path.c_str());
+        directory_ready = ensure_directory(destination_path.c_str());
+      }
+      if (!directory_ready) {
+        struct stat record_info {};
+        directory_ready =
+            stat(destination_path.c_str(), &record_info) == 0 && S_ISDIR(record_info.st_mode);
+      }
+      if (!directory_ready) {
         ok = false;
         return true;
       }
@@ -3144,12 +3162,13 @@ RestoreResult App::restore_plain_content_archive(const SaveRecord &save,
 
   // The on-disk wipe above cannot touch the RECORDS the skeleton's sce_pfs carries for the
   // backup's game files and directories - they describe entries that are not on disk yet, and
-  // creating over such a stale record fails (hardware-proven twice: file creates until the
-  // per-file pre-remove, then mkdir over DQB's slot0000/ directory records, which no per-file
-  // pre-remove can reach). Clearing the mounted view drops every stale game record wholesale -
-  // unlink/rmdir by name is the same mechanism the pre-remove already proved drops records - so
-  // the copy below creates everything fresh. sce_pfs and sce_sys are spared by the clear's own
-  // protected-path rule; the adaptive sce_sys loop handles its files' stale records per file.
+  // creating over such a stale record fails (hardware-proven). Stale records are also INVISIBLE
+  // to directory listings (hardware-proven: this clear returned in 10ms having seen nothing on a
+  // record-only save), so no clearing pass can sweep them - only name-addressed operations reach
+  // them, which is why the copy handles records where they collide: the per-file pre-remove for
+  // files, the rmdir-or-descend ladder in copy_tree_through_mount for directories. This clear
+  // stays for what it CAN see: real on-disk leftovers from an interrupted earlier restore.
+  // sce_pfs and sce_sys are spared by its protected-path rule.
   if (!clear_mounted_save_contents(save.path)) {
     release_held_save_mount(mount_name);
     return {false, "could not clear the mounted save for restore"};

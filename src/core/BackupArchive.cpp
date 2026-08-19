@@ -1062,12 +1062,13 @@ bool extract_archive_to_directory(
       }
     }
     progress(0, archive_bytes);
-    // Report roughly 32 times across the archive regardless of its size: a fixed 256 KB step
+    // Report roughly 128 times across the archive regardless of its size: a fixed 256 KB step
     // never fires for an archive smaller than that (a slim plain archive is ~100 KB), which
-    // showed up on hardware as a restore bar frozen at zero through the whole extract phase.
+    // showed up on hardware as a restore bar frozen at zero through the whole extract phase -
+    // and 32 steps still felt like one sluggish jump per second on a multi-minute extract.
     // Large archives still step at most every kProgressReportStep, bounding redraw cost.
     const std::uint64_t report_step = std::min<std::uint64_t>(
-        kProgressReportStep, std::max<std::uint64_t>(archive_bytes / 32, 4u * 1024u));
+        kProgressReportStep, std::max<std::uint64_t>(archive_bytes / 128, 4u * 1024u));
     on_chunk = [&last_reported, &progress, archive_bytes, report_step, zip] {
       const long position = std::ftell(zip);
       if (position < 0) {
