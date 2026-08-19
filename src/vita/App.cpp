@@ -2423,28 +2423,13 @@ void App::create_new_backup() {
       const std::string match = matching_backup_name(entries, save.id, local_backups_);
       if (!match.empty()) {
         duplicate_backup_confirmation_pending_ = true;
-        // A raw archive of a plain-eligible save stores PFS-encrypted bytes, which barely
-        // compress at all regardless of the configured level (see the LBP save facts: an
-        // encrypted backup is effectively incompressible) - the real size win comes from
-        // switching to the plain (decrypted) format. Nudge that next step when today's backup
-        // would land plain but the matched one predates it: no plain marker on its sidecar, and
-        // the save is plain-eligible right now (the same gate create_local_snapshot itself uses).
-        const SaveMetadataJsonResult matched_sidecar =
-            read_save_metadata_json(local_backup_metadata_path(kBackupRoot, save.id, match));
-        const bool matched_is_plain =
-            matched_sidecar.ok && matched_sidecar.archive_identity == backup_identity(match) &&
-            matched_sidecar.metadata.content_format == "plain";
-        const bool plain_eligible_now = save.extra_paths.empty() &&
-                                        save.platform != SavePlatform::Psp &&
-                                        backup_compression_level_ >= 1 &&
-                                        save_directory_has_pfs_metadata(save.path);
         // Says why a new backup is redundant; the footer offers "Create New Backup Anyway".
-        // The hint variant drops the backup name: the 380px status budget can only shrink the
-        // name, so a fixed suffix this long would always end up ellipsized mid-word next to it.
+        // An earlier build appended a "back up again to compress it" hint for raw matches, but
+        // no wording fit the 380px status budget next to a name - and matching_backup_name
+        // already prefers a compressed twin when one holds the same content, so the plain
+        // message is right far more often than the hint ever was.
         set_status(StatusKind::Info,
-                   !matched_is_plain && plain_eligible_now
-                       ? "No changes - back up again to compress the old backup."
-                       : status_with_name("No changes since ", display_backup_name(match), "."));
+                   status_with_name("No changes since ", display_backup_name(match), "."));
         return;
       }
       const std::string remote_match = matching_remote_backup_name(save, entries);
