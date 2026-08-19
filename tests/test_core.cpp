@@ -648,6 +648,90 @@ void test_extract_backup_archive_skips_format_entry_but_keeps_raw_skeleton() {
   std::filesystem::remove_all(base);
 }
 
+void test_backup_archive_slim_raw_skeleton_omits_data_specials_but_keeps_decrypted_copies() {
+  // Mirrors the shape App::create_local_snapshot's plain backup path builds since the slim
+  // skeleton change: raw_entries carries only the crypto pair and sce_pfs (App::
+  // append_raw_skeleton_entries no longer captures param.sfo/safemem.dat/sdslot.dat raw), while
+  // source_path - walked through the held mount in the real app - supplies their DECRYPTED
+  // copies as ordinary entries, exactly like any other game file.
+  const std::filesystem::path base =
+      std::filesystem::temp_directory_path() / "save-keeper-slim-raw-skeleton-test";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base / "source" / "sce_sys");
+  std::ofstream(base / "source" / "data.bin", std::ios::binary) << std::string(200, 'd');
+  std::ofstream(base / "source" / "sce_sys" / "param.sfo", std::ios::binary) << "decrypted-sfo";
+  std::ofstream(base / "source" / "sce_sys" / "safemem.dat", std::ios::binary)
+      << "decrypted-safemem";
+  std::ofstream(base / "source" / "sce_sys" / "sdslot.dat", std::ios::binary)
+      << "decrypted-sdslot";
+
+  vsm::BackupRequest request;
+  request.source_path = (base / "source").string();
+  request.backup_root = (base / "backups").string();
+  request.save_id = "PCSE00120";
+  request.timestamp = {2026, 8, 17, 9, 0, 0};
+  request.compression_level = 6;
+  request.add_plain_format_entry = true;
+  request.raw_entries.push_back(
+      {std::string(vsm::kRawSkeletonPrefix) + "sce_sys/keystone", {1, 2, 3, 4}});
+  request.raw_entries.push_back(
+      {std::string(vsm::kRawSkeletonPrefix) + "sce_sys/sealedkey", {5, 6, 7, 8}});
+  request.raw_entries.push_back(
+      {std::string(vsm::kRawSkeletonPrefix) + "sce_pfs/000.pfs", {9, 10, 11}});
+  const vsm::BackupResult result = vsm::create_backup_archive(request);
+  EXPECT_TRUE(result.ok);
+
+  const std::vector<std::string> names = read_zip_central_directory_names(result.archive_path);
+  const auto has_name = [&names](const std::string &name) {
+    return std::find(names.begin(), names.end(), name) != names.end();
+  };
+  // The raw skeleton carries exactly the crypto pair plus sce_pfs - nothing else under .raw/.
+  EXPECT_TRUE(has_name(".raw/sce_sys/keystone"));
+  EXPECT_TRUE(has_name(".raw/sce_sys/sealedkey"));
+  EXPECT_TRUE(has_name(".raw/sce_pfs/000.pfs"));
+  EXPECT_TRUE(!has_name(".raw/sce_sys/param.sfo"));
+  EXPECT_TRUE(!has_name(".raw/sce_sys/safemem.dat"));
+  EXPECT_TRUE(!has_name(".raw/sce_sys/sdslot.dat"));
+  // The three data specials still land in the archive - as ordinary, decrypted entries under
+  // their ordinary sce_sys/ zip path, restored through the mount rather than the raw skeleton.
+  EXPECT_TRUE(has_name("sce_sys/param.sfo"));
+  EXPECT_TRUE(has_name("sce_sys/safemem.dat"));
+  EXPECT_TRUE(has_name("sce_sys/sdslot.dat"));
+  EXPECT_TRUE(has_name("data.bin"));
+
+  // Change detection still ignores every sce_sys/ path - decrypted copies included - the same way
+  // it always ignored a fat archive's sce_sys wholesale (comparison_entries has no notion of
+  // "data special" vs. any other sce_sys file). This is also the first coverage of an archive
+  // whose central directory mixes BOTH .raw/ and ordinary sce_sys/ entries at once, which is
+  // exactly the slim archive's real shape. (Not entries_match_backup_archive here: the plain
+  // format entry always breaks that comparison by design - see
+  // test_backup_archive_plain_format_entry_written_first_and_breaks_cd_match - a plain archive's
+  // own sidecar triple is the real match check, exercised elsewhere.)
+  bool entries_ok = false;
+  const std::vector<vsm::ArchiveEntryInfo> baseline_entries =
+      vsm::compute_folder_entries((base / "source").string(), &entries_ok);
+  EXPECT_TRUE(entries_ok);
+  const std::vector<vsm::ArchiveEntryInfo> folder_filtered =
+      vsm::comparison_entries(baseline_entries);
+  EXPECT_TRUE(!folder_filtered.empty());  // data.bin survives the filter
+  for (const vsm::ArchiveEntryInfo &entry : folder_filtered) {
+    EXPECT_TRUE(entry.path.compare(0, 8, "sce_sys/") != 0);
+  }
+
+  std::vector<vsm::ArchiveEntryInfo> archive_entries;
+  EXPECT_TRUE(vsm::read_archive_central_directory(result.archive_path, &archive_entries));
+  const std::vector<vsm::ArchiveEntryInfo> archive_filtered =
+      vsm::comparison_entries(archive_entries);
+  for (const vsm::ArchiveEntryInfo &entry : archive_filtered) {
+    EXPECT_TRUE(entry.path.compare(0, 8, "sce_sys/") != 0);
+    EXPECT_TRUE(entry.path.compare(0, 5, ".raw/") != 0);
+  }
+  // Only the format entry and data.bin survive filtering on the archive side.
+  EXPECT_EQ(archive_filtered.size(), static_cast<std::size_t>(2));
+
+  std::filesystem::remove_all(base);
+}
+
 void test_parse_plain_format_version_reads_trailing_integer_on_first_line() {
   EXPECT_EQ(static_cast<std::size_t>(
                 vsm::parse_plain_format_version("save-keeper compatibility marker - format 1\n"
@@ -4551,6 +4635,7 @@ int main() {
   test_backup_archive_plain_format_entry_written_first_and_breaks_cd_match();
   test_backup_archive_raw_skeleton_entries_ordered_after_format_entry_and_stored();
   test_extract_backup_archive_skips_format_entry_but_keeps_raw_skeleton();
+  test_backup_archive_slim_raw_skeleton_omits_data_specials_but_keeps_decrypted_copies();
   test_parse_plain_format_version_reads_trailing_integer_on_first_line();
   test_archive_has_plain_marker_recognizes_legacy_name_for_fallback_detection_only();
   test_comparison_entries_filters_sce_sys_and_raw_skeleton_prefixes();

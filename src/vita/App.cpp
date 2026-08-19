@@ -649,6 +649,89 @@ bool copy_tree_through_mount(const std::string &source_root, const std::string &
   return opened && ok;
 }
 
+// Recursively collects the relative paths (relative to root_dir) of every regular file under
+// root_dir into *out. Used only to build the raw skeleton's own sce_sys file list for
+// restore_plain_content_archive's adaptive copy below - see copy_adaptive_sce_sys_through_mount's
+// own comment for why that list, not a hardcoded name, is what decides each file's handling.
+void collect_relative_regular_file_paths(const std::string &root_dir,
+                                         const std::string &relative_path,
+                                         std::set<std::string> *out) {
+  const std::string dir = relative_path.empty() ? root_dir : join_path(root_dir, relative_path);
+  for_each_dir_entry(dir, [&](const DirEntryInfo &entry) {
+    const std::string child_relative =
+        relative_path.empty() ? entry.name : relative_path + "/" + entry.name;
+    if (entry.is_directory) {
+      collect_relative_regular_file_paths(root_dir, child_relative, out);
+    } else if (entry.is_regular) {
+      out->insert(child_relative);
+    }
+    return true;
+  });
+}
+
+// Slim skeleton's adaptive handling for sce_sys during the two-phase restore's mounted copy
+// phase. copy_tree_through_mount's own general walk skips sce_sys/ wholesale when
+// sce_sys_authoritative_from_skeleton is true - keystone and sealedkey must never be
+// mount-written (hardware-proven C1-6427-9), and both are always in the raw skeleton by the time
+// this runs (restore_plain_content_archive's up-front check refuses the restore otherwise). This
+// walks the DECRYPTED sce_sys/ entries the archive extracted into decrypted_sce_sys_dir and
+// mount-writes each FILE whose path relative to sce_sys/ is NOT already in raw_skeleton_paths -
+// exactly what the raw skeleton write just before this phase actually moved into place.
+//
+// For a slim archive that mount-writes param.sfo/safemem.dat/sdslot.dat (Amendment C no longer
+// captures them raw - see App::append_raw_skeleton_entries). For an OLD FAT archive, whose raw
+// skeleton still carries the whole sce_sys tree, raw_skeleton_paths already contains every one of
+// these files, so this writes nothing and a fat archive restores exactly as it always did.
+// destination_sce_sys_dir is always save.path's sce_sys directory, which the skeleton write
+// already created via rename before this phase runs, so copy_regular_file_through_mount's own
+// stale-record pre-remove (fopen "wb" after an unconditional unlink) is what makes writing a data
+// special that already exists on disk from the raw skeleton hand-off - or that only exists as a
+// leftover PFS record with no on-disk file yet - both safe, exactly like any other game file.
+bool copy_adaptive_sce_sys_through_mount(const std::string &decrypted_sce_sys_dir,
+                                         const std::string &destination_sce_sys_dir,
+                                         const std::set<std::string> &raw_skeleton_paths,
+                                         const std::string &relative_path,
+                                         const std::function<void(std::size_t)> &on_bytes) {
+  const std::string source_dir =
+      relative_path.empty() ? decrypted_sce_sys_dir : join_path(decrypted_sce_sys_dir, relative_path);
+  bool ok = true;
+  for_each_dir_entry(source_dir, [&](const DirEntryInfo &entry) {
+    const std::string child_relative =
+        relative_path.empty() ? entry.name : relative_path + "/" + entry.name;
+    if (!entry.stat_ok) {
+      ok = false;
+      return true;
+    }
+    if (entry.is_directory) {
+      // Every known retail sce_sys/ is flat (no subdirectories), so this branch is unreached in
+      // practice; ensure_directory here only guards against a future game that nests one, the
+      // same way copy_tree_through_mount's own general walk already does for everything else.
+      const std::string destination_path = join_path(destination_sce_sys_dir, child_relative);
+      if (!ensure_directory(destination_path.c_str())) {
+        ok = false;
+        return true;
+      }
+      ok = copy_adaptive_sce_sys_through_mount(decrypted_sce_sys_dir, destination_sce_sys_dir,
+                                               raw_skeleton_paths, child_relative, on_bytes) &&
+           ok;
+      return true;
+    }
+    if (!entry.is_regular || raw_skeleton_paths.count(child_relative) != 0) {
+      // Not a plain file, or already restored raw by the skeleton write above - nothing to do.
+      return true;
+    }
+    const std::string destination_path = join_path(destination_sce_sys_dir, child_relative);
+    ok = copy_regular_file_through_mount(join_path(source_dir, entry.name), destination_path,
+                                         on_bytes) &&
+         ok;
+    return true;
+  });
+  // A missing/unreadable decrypted sce_sys directory is not a failure here: the protected files
+  // this phase exists to restore (keystone, sealedkey, sce_pfs) were already verified present and
+  // written raw before this phase ever runs, so there is simply nothing left for this walk to do.
+  return ok;
+}
+
 bool read_text_file(const char *path, std::string *contents) {
   FILE *file = std::fopen(path, "rb");
   if (!file) {
@@ -857,27 +940,71 @@ bool collect_raw_skeleton_files(const std::string &directory_path, const std::st
   return opened && ok;
 }
 
-// Captures save.path's raw (encrypted, unmounted) sce_sys and sce_pfs trees into *out under
+// Captures save.path's raw (encrypted, unmounted) crypto pair and sce_pfs tree into *out under
 // kRawSkeletonPrefix zip paths - called from create_local_snapshot's plain backup path BEFORE it
 // acquires its held mount, the same phase the pre-backup triple walk already runs in: a mounted
 // view cannot supply these same raw bytes back (sce_pfs is invisible through it, sce_sys shows
-// only decrypted content). Both directories are optional on disk in general (mirroring
-// compute_sources_entries' own "missing source is not a failure" rule), though in practice
-// sce_pfs is guaranteed present here - it is exactly what save_directory_has_pfs_metadata, the
-// plain-backup gate itself, already checked just before this runs.
+// only decrypted content).
+//
+// Slim skeleton: only sce_sys/keystone, sce_sys/sealedkey, and the whole sce_pfs tree are
+// captured raw here. The other three sce_sys files this used to carry raw - param.sfo,
+// safemem.dat, sdslot.dat - are not console-minted, so they restore fine through the mount in
+// phase 2 from their DECRYPTED copies already sitting in the archive at their ordinary sce_sys/
+// zip paths (copy_regular_file_through_mount's stale-record pre-remove handles their
+// absent-file-with-record state exactly like any other game file - see
+// restore_plain_content_archive's adaptive sce_sys loop). keystone and sealedkey stay raw because
+// they are the opposite: console-minted crypto that must never be created through a mount
+// (hardware-proven C1-6427-9). This shrinks a typical retail archive's skeleton by ~385 KB.
+//
+// keystone/sealedkey are required, not optional - restore_plain_content_archive's own up-front
+// check refuses a two-phase restore that lacks either one, so a backup that cannot read them
+// would only produce an archive nobody could restore onto a wiped folder; failing here instead is
+// strictly better. sce_pfs stays optional on disk in general (mirroring compute_sources_entries'
+// own "missing source is not a failure" rule), though in practice it is guaranteed present here -
+// it is exactly what save_directory_has_pfs_metadata, the plain-backup gate itself, already
+// checked just before this runs.
 bool append_raw_skeleton_entries(const std::string &save_path, std::vector<InMemoryEntry> *out) {
   std::uint64_t total_bytes = 0;
-  for (const char *dir_name : {"sce_sys", "sce_pfs"}) {
-    const std::string dir_path = join_path(save_path, dir_name);
-    if (!path_is_directory(dir_path)) {
-      continue;
+  static const char *const kCryptoPairNames[] = {"keystone", "sealedkey"};
+  const std::string sce_sys_dir = join_path(save_path, "sce_sys");
+  for (const char *file_name : kCryptoPairNames) {
+    const std::string file_path = join_path(sce_sys_dir, file_name);
+    std::string data;
+    if (!path_is_regular_file(file_path) || !read_text_file(file_path.c_str(), &data)) {
+      return false;
     }
-    if (!collect_raw_skeleton_files(dir_path, std::string(kRawSkeletonPrefix) + dir_name,
+    total_bytes += data.size();
+    if (total_bytes > kRawSkeletonCapBytes) {
+      return false;
+    }
+    InMemoryEntry raw_entry;
+    raw_entry.zip_path = std::string(kRawSkeletonPrefix) + "sce_sys/" + file_name;
+    raw_entry.data.assign(data.begin(), data.end());
+    out->push_back(std::move(raw_entry));
+  }
+  const std::string sce_pfs_dir = join_path(save_path, "sce_pfs");
+  if (path_is_directory(sce_pfs_dir)) {
+    if (!collect_raw_skeleton_files(sce_pfs_dir, std::string(kRawSkeletonPrefix) + "sce_pfs",
                                     &total_bytes, out)) {
       return false;
     }
   }
   return true;
+}
+
+// True when an extracted plain-archive work directory's raw skeleton has everything a two-phase
+// restore must write back BEFORE any mount is acquired: the crypto pair (keystone, sealedkey -
+// console-minted, never mount-written, hardware-proven C1-6427-9) and the sce_pfs directory.
+// Checked by restore_plain_content_archive before it wipes the live save - that wipe is one-way,
+// so a slim archive that somehow lost either crypto file (or an even older archive predating the
+// pair entirely) must be refused up front rather than leave a wiped folder with nothing to
+// restore onto it. An old fat archive's raw skeleton always has both, exactly as it always did.
+bool raw_skeleton_has_required_crypto(const std::string &work_dir) {
+  const std::string sce_sys_raw = join_path(work_dir, std::string(kRawSkeletonPrefix) + "sce_sys");
+  const std::string sce_pfs_raw = join_path(work_dir, std::string(kRawSkeletonPrefix) + "sce_pfs");
+  return path_is_regular_file(join_path(sce_sys_raw, "keystone")) &&
+         path_is_regular_file(join_path(sce_sys_raw, "sealedkey")) &&
+         path_is_directory(sce_pfs_raw);
 }
 
 // Writes through a temporary and renames, so an interrupted write can never leave a half PNG
@@ -2896,12 +3023,21 @@ RestoreResult App::restore_plain_content_archive(const SaveRecord &save,
   // none shipped): extract everything, including the raw .raw/ skeleton, to a work directory;
   // wipe the live save; write the skeleton raw (sce_sys + sce_pfs, no mount needed yet - a plain
   // rename, exactly like a legacy raw restore of those same two directories); THEN acquire the
-  // held mount and write the decrypted game files through it, sce_sys excluded (it is already
-  // authoritative from the skeleton, see copy_tree_through_mount's sce_sys_authoritative_from_
-  // skeleton parameter). This is what lets a fresh console (game installed, never launched)
-  // restore straight from an archive: the skeleton's own keystone/sealedkey give the mount
-  // everything it needs, the same way LBP's proven cross-console raw restores already show a
-  // foreign keystone/sealedkey pair mounts fine (PFS savedata keys are per-game, not per-console).
+  // held mount and write the decrypted game files through it. This is what lets a fresh console
+  // (game installed, never launched) restore straight from an archive: the skeleton's own
+  // keystone/sealedkey give the mount everything it needs, the same way LBP's proven
+  // cross-console raw restores already show a foreign keystone/sealedkey pair mounts fine (PFS
+  // savedata keys are per-game, not per-console).
+  //
+  // Amendment C's slim skeleton: the raw .raw/sce_sys/ the rename above moves in no longer
+  // necessarily carries the whole sce_sys tree - only keystone/sealedkey for an archive written by
+  // this version (App::append_raw_skeleton_entries), though an OLD FAT archive's still does. So
+  // the mounted phase below can no longer skip sce_sys/ wholesale; it uses the ADAPTIVE rule
+  // instead (copy_adaptive_sce_sys_through_mount): mount-write every decrypted sce_sys/ file the
+  // raw skeleton did NOT already restore raw. keystone/sealedkey are always in the raw skeleton by
+  // construction (this function's own up-front check refuses the restore otherwise), so they are
+  // never reached by that loop; a fat archive's raw skeleton already contains everything, so the
+  // loop mount-writes nothing for it and restore behaves exactly as it always did.
   //
   // Progress bar: same continuous 3-phase design as the fallback above (see its own comment for
   // the display(phase, done, total) formula) - extract, mount-and-copy-game-files, re-link. The
@@ -2946,6 +3082,14 @@ RestoreResult App::restore_plain_content_archive(const SaveRecord &save,
     // BackupInspectionDirectory's destructor.
     return {false, "could not extract the backup for restore"};
   }
+  if (!raw_skeleton_has_required_crypto(work.path())) {
+    // Refuse before the wipe just below, which is one-way: a slim archive missing either crypto
+    // file (or an even older archive predating the pair entirely) cannot restore onto a wiped
+    // save folder - see raw_skeleton_has_required_crypto's own comment. The live save is
+    // untouched; the archive itself was never a valid two-phase source, so retrying this restore
+    // would only fail the same way again.
+    return {false, "this backup cannot restore the save's protected files"};
+  }
   int phase_count = 3;
   int copy_phase_index = 1;
   int relink_phase_index = 2;
@@ -2989,6 +3133,14 @@ RestoreResult App::restore_plain_content_archive(const SaveRecord &save,
   if (!skeleton_ok) {
     return {false, "could not write the save's raw sce_sys/sce_pfs data for restore"};
   }
+  // The raw skeleton's own sce_sys file list, relative to sce_sys/ itself - not a hardcoded name
+  // list - is what the adaptive mounted-copy phase below uses to decide, per file, whether it was
+  // already restored raw by the rename just above. save.path/sce_sys now holds exactly what that
+  // rename moved in (the up-front check guarantees keystone/sealedkey are in there; an old fat
+  // archive's copy of this directory holds the whole tree instead).
+  std::set<std::string> raw_skeleton_sce_sys_paths;
+  collect_relative_regular_file_paths(join_path(save.path, "sce_sys"), {},
+                                      &raw_skeleton_sce_sys_paths);
 
   const std::string mount_name = acquire_held_save_mount(save.path);
   if (mount_name.empty()) {
@@ -2999,9 +3151,10 @@ RestoreResult App::restore_plain_content_archive(const SaveRecord &save,
   }
 
   // Nothing needs clearing first (save.path was wiped from scratch above); write the decrypted
-  // game files straight in. sce_sys is skipped wholesale (the `true` argument) - it is already
-  // authoritative from the raw skeleton just written above, and the mounted phase must never
-  // touch it (see copy_tree_through_mount's own comment for the hardware evidence why).
+  // game files straight in. sce_sys is still skipped wholesale in this general walk (the `true`
+  // argument) - keystone/sealedkey must never be mount-written (see copy_tree_through_mount's own
+  // comment for the hardware evidence why) - but that no longer means the whole subtree is left
+  // alone: the adaptive loop just below handles every sce_sys/ file the raw skeleton did not.
   std::uint64_t copy_bytes_done = 0;
   std::uint64_t copy_last_reported = 0;
   const auto on_copy_bytes = [&](std::size_t chunk) {
@@ -3015,8 +3168,17 @@ RestoreResult App::restore_plain_content_archive(const SaveRecord &save,
   const bool copied =
       copy_tree_through_mount(work.path(), save.path, /*sce_sys_authoritative_from_skeleton=*/true,
                               {}, on_copy_bytes);
+  // Adaptive rule (Amendment C): mount-write every decrypted sce_sys/ file that raw_skeleton_
+  // sce_sys_paths does NOT already cover - param.sfo/safemem.dat/sdslot.dat for a slim archive,
+  // nothing at all for an old fat archive (its raw skeleton already carries the whole tree, so
+  // this always finds every file already covered). keystone/sealedkey are always in that set (the
+  // up-front check above guarantees it), so this loop never reaches them.
+  const bool sce_sys_ok =
+      copied && copy_adaptive_sce_sys_through_mount(join_path(work.path(), "sce_sys"),
+                                                     join_path(save.path, "sce_sys"),
+                                                     raw_skeleton_sce_sys_paths, {}, on_copy_bytes);
   release_held_save_mount(mount_name);
-  if (!copied) {
+  if (!copied || !sce_sys_ok) {
     // Partial-failure semantics mirror every other restore path here: a failure mid-copy can
     // leave a partially restored save behind, but the archive itself is untouched, so retrying
     // the restore (which re-wipes and re-writes the skeleton from scratch) is the recovery.
